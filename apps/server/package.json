@@ -1,0 +1,18 @@
+{
+  "name": "@blog-system/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/index.ts --format esm --target node22 --out-dir dist",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@blog-system/content-core": "*",
+    "ajv": "^8.17.1",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2"
+  }
+}

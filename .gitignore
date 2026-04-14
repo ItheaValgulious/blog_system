@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-*
+.turbo
+.cache
+coverage
+playwright-report
+test-results
+*.log
+.env
+.DS_Store
+config/site-publish.local.json

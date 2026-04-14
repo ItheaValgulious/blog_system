@@ -1,0 +1,19 @@
+{
+  "name": "@blog-system/admin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@blog-system/content-core": "*",
+    "@monaco-editor/react": "^4.7.0",
+    "katex": "^0.16.22",
+    "monaco-editor": "^0.52.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  }
+}

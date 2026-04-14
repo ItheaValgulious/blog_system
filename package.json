@@ -1,0 +1,36 @@
+{
+  "name": "blog-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm --prefix apps/server run dev",
+    "dev:admin": "npm --prefix apps/admin run dev",
+    "dev:site": "npm --prefix apps/site run dev",
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build -w packages/content-core && npm run build -w apps/server && npm run build -w apps/admin && npm run build -w apps/site",
+    "test": "npm run test -w packages/content-core && npm run test -w apps/server && npm run test -w apps/admin",
+    "build-site": "npm run build-site -w apps/site",
+    "publish-site": "npm run publish-site -w apps/site"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.3",
+    "@types/express-session": "^1.18.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "supertest": "^7.1.4",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}
