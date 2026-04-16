@@ -113,6 +113,105 @@ test("pasting an image stores it in the workspace media library", async () => {
   assert.equal(files.length, 1);
 });
 
+test("render config endpoint returns defaults and persists updates", async () => {
+  const { agent, tempRoot } = await setupTempApp();
+
+  const initial = await agent.get("/api/render-config").expect(200);
+  assert.deepEqual(initial.body.value.styles, []);
+
+  const saved = await agent
+    .put("/api/render-config")
+    .send({
+      raw: JSON.stringify(
+        {
+          styles: [
+            {
+              directory: "water.css",
+              enable: true
+            }
+          ]
+        },
+        null,
+        2
+      )
+    })
+    .expect(200);
+
+  assert.equal(saved.body.value.styles[0].directory, "water.css");
+
+  const persistedRaw = await fs.readFile(path.join(tempRoot, "config", "render.json"), "utf8");
+  assert.match(persistedRaw, /"water\.css"/);
+});
+
+test("render style endpoint creates css file and registers it in render.json", async () => {
+  const { agent, tempRoot } = await setupTempApp();
+
+  const created = await agent
+    .post("/api/render-style/create")
+    .send({
+      fileName: "paper"
+    })
+    .expect(200);
+
+  assert.equal(created.body.directory, "paper.css");
+  assert.match(created.body.raw, /config\/render\/paper\.css/);
+  assert.equal(created.body.renderConfig.value.styles[0].directory, "paper.css");
+  assert.equal(created.body.renderConfig.value.styles[0].enable, true);
+
+  const cssRaw = await fs.readFile(path.join(tempRoot, "config", "render", "paper.css"), "utf8");
+  assert.match(cssRaw, /paper\.css/);
+});
+
+test("editor config endpoint accepts VS Code style snippet objects and jsonc", async () => {
+  const { agent, tempRoot } = await setupTempApp();
+
+  const response = await agent
+    .put("/api/editor-config")
+    .send({
+      markdownSnippetsRaw: `{
+  // markdown snippets
+  "Article Frontmatter": {
+    "prefix": "frontmatter",
+    "body": [
+      "---",
+      "title: $1",
+      "$0"
+    ],
+  }
+}`,
+      latexSnippetsRaw: `{
+  "divide": {
+    "scope": "latex,tex",
+    "prefix": [
+      "/",
+      "\\\\frac"
+    ],
+    "body": "\\\\dfrac{$1}{$2} $0"
+  }
+}`,
+      keybindingsRaw: `[
+  {
+    "key": "ctrl+p",
+    "command": "workbench.action.showCommands"
+  },
+  {
+    "key": "escape",
+    "command": "hideSuggestWidget",
+    "when": "suggestWidgetVisible"
+  },
+]`
+    })
+    .expect(200);
+
+  assert.equal(response.body.markdownSnippets[0].name, "Article Frontmatter");
+  assert.equal(response.body.latexSnippets[0].name, "divide");
+  assert.equal(response.body.keybindings[0].command, "workbench.action.showCommands");
+
+  const persistedLatexRaw = await fs.readFile(path.join(tempRoot, "config", "editor", "latex.snippets.json"), "utf8");
+  assert.match(persistedLatexRaw, /"divide": \{/);
+  assert.doesNotMatch(persistedLatexRaw, /"name": "divide"/);
+});
+
 test("file system endpoints create, rename, copy, and delete entries", async () => {
   const { agent, contentRoot } = await setupTempApp();
 

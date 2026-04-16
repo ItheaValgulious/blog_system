@@ -1,3 +1,5 @@
+import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
+
 import type {
   EditorConfig,
   EditorConfigValidation,
@@ -5,38 +7,58 @@ import type {
   EditorSnippet
 } from "./types.js";
 
-export const snippetSchema = {
-  type: "array",
-  items: {
-    type: "object",
-    additionalProperties: false,
-    required: ["name", "body"],
-    properties: {
-      name: { type: "string", minLength: 1 },
-      scope: { type: "string" },
-      prefix: {
-        anyOf: [
-          { type: "string" },
-          {
-            type: "array",
-            items: { type: "string", minLength: 1 },
-            minItems: 1
-          }
-        ]
-      },
-      key: { type: "string" },
-      body: {
-        anyOf: [
-          { type: "string" },
-          {
-            type: "array",
-            items: { type: "string" }
-          }
-        ]
-      },
-      description: { type: "string" }
-    }
+const snippetValueSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["body"],
+  properties: {
+    scope: { type: "string" },
+    prefix: {
+      anyOf: [
+        { type: "string" },
+        {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          minItems: 1
+        }
+      ]
+    },
+    key: { type: "string" },
+    body: {
+      anyOf: [
+        { type: "string" },
+        {
+          type: "array",
+          items: { type: "string" }
+        }
+      ]
+    },
+    description: { type: "string" }
   }
+} as const;
+
+const namedSnippetValueSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["name", "body"],
+  properties: {
+    name: { type: "string", minLength: 1 },
+    ...snippetValueSchema.properties
+  }
+} as const;
+
+export const snippetSchema = {
+  anyOf: [
+    {
+      type: "array",
+      items: namedSnippetValueSchema
+    },
+    {
+      type: "object",
+      propertyNames: { minLength: 1 },
+      additionalProperties: snippetValueSchema
+    }
+  ]
 } as const;
 
 export const keybindingSchema = {
@@ -54,6 +76,142 @@ export const keybindingSchema = {
   }
 } as const;
 
+export type SnippetConfigFormat = "array" | "object";
+
+function normalizeOptionalString(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function getLineColumn(raw: string, offset: number) {
+  const safeOffset = Math.max(0, Math.min(raw.length, offset));
+  const prefix = raw.slice(0, safeOffset);
+  const lines = prefix.split(/\r?\n/);
+
+  return {
+    line: lines.length,
+    column: (lines.at(-1) ?? "").length + 1
+  };
+}
+
+export function parseJsoncConfig(raw: string, label: string): unknown {
+  const errors: ParseError[] = [];
+  const value = parseJsonc(raw, errors, {
+    allowEmptyContent: false,
+    allowTrailingComma: true,
+    disallowComments: false
+  });
+
+  if (errors.length === 0) {
+    return value;
+  }
+
+  const message = errors
+    .map((error) => {
+      const location = getLineColumn(raw, error.offset);
+      return `${label} line ${location.line}, column ${location.column}: ${printParseErrorCode(error.error)}`;
+    })
+    .join("; ");
+  throw new Error(message);
+}
+
+export function parseSnippetConfigValue(value: unknown): {
+  format: SnippetConfigFormat;
+  snippets: EditorSnippet[];
+} {
+  if (Array.isArray(value)) {
+    return {
+      format: "array",
+      snippets: value.map((snippet) => snippet as EditorSnippet)
+    };
+  }
+
+  if (value && typeof value === "object") {
+    return {
+      format: "object",
+      snippets: Object.entries(value as Record<string, Omit<EditorSnippet, "name">>).map(([name, snippet]) => {
+        const { name: _ignoredName, ...rest } = (snippet ?? {}) as Partial<EditorSnippet>;
+        return {
+          ...rest,
+          name
+        } as EditorSnippet;
+      })
+    };
+  }
+
+  throw new Error("Snippet config must be an array or an object.");
+}
+
+function serializeSnippetValue(
+  snippet: EditorSnippet,
+  options: { includeName: boolean }
+) {
+  const prefixes = normalizeSnippetPrefixes(snippet);
+  const serialized: Record<string, unknown> = {
+    body: Array.isArray(snippet.body) ? [...snippet.body] : snippet.body
+  };
+
+  if (options.includeName) {
+    serialized.name = snippet.name;
+  }
+
+  if (snippet.scope?.trim()) {
+    serialized.scope = snippet.scope.trim();
+  }
+
+  if (prefixes.length === 1) {
+    serialized.prefix = prefixes[0];
+  } else if (prefixes.length > 1) {
+    serialized.prefix = prefixes;
+  }
+
+  if (snippet.key?.trim()) {
+    serialized.key = snippet.key.trim();
+  }
+
+  if (snippet.description?.trim()) {
+    serialized.description = snippet.description.trim();
+  }
+
+  return serialized;
+}
+
+export function serializeSnippetConfig(
+  snippets: EditorSnippet[],
+  format: SnippetConfigFormat
+) {
+  const normalizedSnippets = normalizeEditorConfig({
+    snippets,
+    keybindings: []
+  }).snippets;
+
+  if (format === "array") {
+    return `${JSON.stringify(normalizedSnippets.map((snippet) => serializeSnippetValue(snippet, { includeName: true })), null, 2)}\n`;
+  }
+
+  const snippetMap = Object.fromEntries(
+    normalizedSnippets.map((snippet) => [
+      snippet.name,
+      serializeSnippetValue(snippet, { includeName: false })
+    ])
+  );
+
+  return `${JSON.stringify(snippetMap, null, 2)}\n`;
+}
+
+export function serializeKeybindingConfig(keybindings: EditorKeybinding[]) {
+  const normalizedKeybindings = normalizeEditorConfig({
+    snippets: [],
+    keybindings
+  }).keybindings;
+
+  return `${JSON.stringify(normalizedKeybindings, null, 2)}\n`;
+}
+
 export function normalizeSnippetPrefixes(snippet: EditorSnippet): string[] {
   if (Array.isArray(snippet.prefix)) {
     return snippet.prefix.map((prefix) => prefix.trim()).filter(Boolean);
@@ -66,37 +224,43 @@ export function normalizeSnippetPrefixes(snippet: EditorSnippet): string[] {
   return [];
 }
 
+export function matchesSnippetScope(snippet: Pick<EditorSnippet, "scope">, languageId: string) {
+  const normalizedScope = normalizeOptionalString(snippet.scope);
+
+  if (!normalizedScope) {
+    return true;
+  }
+
+  const normalizedLanguage = languageId.trim().toLowerCase();
+  const aliasesByLanguage: Record<string, string[]> = {
+    markdown: ["markdown", "md", "gfm", "quarto", "rmd"],
+    latex: ["latex", "tex", "plaintex"]
+  };
+  const candidates = new Set([normalizedLanguage, ...(aliasesByLanguage[normalizedLanguage] ?? [])]);
+
+  return normalizedScope
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .some((entry) => candidates.has(entry));
+}
+
 export function normalizeEditorConfig(config: EditorConfig): EditorConfig {
   return {
     snippets: config.snippets.map((snippet) => ({
       ...snippet,
-      prefix: normalizeSnippetPrefixes(snippet)
+      scope: normalizeOptionalString(snippet.scope),
+      prefix: normalizeSnippetPrefixes(snippet),
+      key: normalizeOptionalString(snippet.key),
+      description: normalizeOptionalString(snippet.description)
     })),
     keybindings: config.keybindings.map((keybinding) => ({
       ...keybinding,
-      key: keybinding.key.trim()
+      key: keybinding.key.trim(),
+      command: keybinding.command.trim(),
+      when: normalizeOptionalString(keybinding.when)
     }))
   };
-}
-
-function collectDuplicateKeys(snippets: EditorSnippet[], keybindings: EditorKeybinding[]) {
-  const buckets = new Map<string, string[]>();
-
-  for (const snippet of snippets) {
-    if (snippet.key?.trim()) {
-      const normalized = snippet.key.trim().toLowerCase();
-      buckets.set(normalized, [...(buckets.get(normalized) ?? []), `snippet:${snippet.name}`]);
-    }
-  }
-
-  for (const keybinding of keybindings) {
-    const normalized = keybinding.key.trim().toLowerCase();
-    buckets.set(normalized, [...(buckets.get(normalized) ?? []), `keybinding:${keybinding.command}`]);
-  }
-
-  return [...buckets.entries()]
-    .filter(([, owners]) => owners.length > 1)
-    .map(([key, owners]) => `Shortcut "${key}" is declared by ${owners.join(", ")}`);
 }
 
 export function validateEditorConfigShape(config: EditorConfig): EditorConfigValidation {
@@ -119,8 +283,6 @@ export function validateEditorConfigShape(config: EditorConfig): EditorConfigVal
     }
     duplicateNameSet.add(normalized);
   }
-
-  errors.push(...collectDuplicateKeys(normalizedConfig.snippets, normalizedConfig.keybindings));
 
   return {
     valid: errors.length === 0,

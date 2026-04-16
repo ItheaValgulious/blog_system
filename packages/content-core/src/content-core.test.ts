@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   createDefaultSlug,
   extractMarkdownBlocks,
+  findDuplicateRenderStyleDirectories,
   normalizeArticleForSave,
+  normalizeRenderConfig,
   renderMarkdown,
   renderMarkdownFragmentWithKatex,
   renderMarkdownWithKatex,
@@ -88,7 +90,7 @@ test("rewriteRelativeAssetUrls rewrites local asset references", () => {
   assert.match(rewritten, /href="\/content-files\/notes\/notes\/file\.pdf"/);
 });
 
-test("validateEditorConfigShape detects duplicate shortcuts", () => {
+test("validateEditorConfigShape allows overlapping VS Code style keybindings", () => {
   const result = validateEditorConfigShape({
     snippets: [
       {
@@ -100,13 +102,42 @@ test("validateEditorConfigShape detects duplicate shortcuts", () => {
     keybindings: [
       {
         key: "Ctrl+S",
-        command: "editor.saveArticle"
+        command: "-workbench.action.quickOpen"
       }
     ]
   });
 
-  assert.equal(result.valid, false);
-  assert.match(result.errors[0], /ctrl\+s/i);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test("normalizeRenderConfig trims render style entries", () => {
+  const config = normalizeRenderConfig({
+    styles: [
+      {
+        directory: " nested\\water.css ",
+        enable: true
+      }
+    ]
+  });
+
+  assert.deepEqual(config.styles, [
+    {
+      directory: "nested/water.css",
+      enable: true
+    }
+  ]);
+});
+
+test("findDuplicateRenderStyleDirectories reports repeated directories", () => {
+  const duplicates = findDuplicateRenderStyleDirectories({
+    styles: [
+      { directory: "water.css", enable: true },
+      { directory: "Water.css", enable: false }
+    ]
+  });
+
+  assert.deepEqual(duplicates, ["Water.css"]);
 });
 
 test("renderMarkdown outputs math placeholders for preview", async () => {
@@ -134,6 +165,51 @@ test("extractMarkdownBlocks returns top-level markdown ranges", () => {
   assert.equal(blocks[1].endLine, 3);
   assert.equal(blocks[2].startLine, 5);
   assert.match(blocks[2].source, /\$\$/);
+});
+
+test("extractMarkdownBlocks keeps paired html containers together", async () => {
+  const markdown = ["<div>", "", "asdfasdf", "", "</div>"].join("\n");
+  const blocks = extractMarkdownBlocks(markdown);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].startLine, 1);
+  assert.equal(blocks[0].endLine, 5);
+  assert.equal(blocks[0].source, markdown);
+
+  const html = await renderMarkdownFragmentWithKatex(blocks[0].source);
+  assert.match(html, /^<div>\s*<p>asdfasdf<\/p>\s*<\/div>$/);
+});
+
+test("extractMarkdownBlocks keeps nested html containers together", () => {
+  const markdown = ["<div>", "", "<section>", "", "# hi", "", "</section>", "", "</div>"].join("\n");
+  const blocks = extractMarkdownBlocks(markdown);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].source, markdown);
+});
+
+test("extractMarkdownBlocks keeps paired custom elements together", () => {
+  const markdown = ["<x-demo data-mode=\"callout\">", "", "text", "", "</x-demo>"].join("\n");
+  const blocks = extractMarkdownBlocks(markdown);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].source, markdown);
+});
+
+test("extractMarkdownBlocks leaves unmatched and self-closing html nodes unchanged", () => {
+  const unmatchedMarkdown = ["<div>", "", "text"].join("\n");
+  const unmatchedBlocks = extractMarkdownBlocks(unmatchedMarkdown);
+
+  assert.equal(unmatchedBlocks.length, 2);
+  assert.equal(unmatchedBlocks[0].source, "<div>");
+  assert.equal(unmatchedBlocks[1].source, "text");
+
+  const selfClosingMarkdown = ["<div />", "", "text"].join("\n");
+  const selfClosingBlocks = extractMarkdownBlocks(selfClosingMarkdown);
+
+  assert.equal(selfClosingBlocks.length, 2);
+  assert.equal(selfClosingBlocks[0].source, "<div />");
+  assert.equal(selfClosingBlocks[1].source, "text");
 });
 
 test("renderMarkdownFragmentWithKatex renders math html", async () => {

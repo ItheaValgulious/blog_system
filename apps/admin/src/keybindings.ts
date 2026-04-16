@@ -1,5 +1,7 @@
 import type * as Monaco from "monaco-editor";
 
+import type { EditorKeybinding } from "@blog-system/content-core";
+
 const keyCodeMap: Record<string, number> = {
   Enter: 3,
   Tab: 2,
@@ -11,6 +13,10 @@ const keyCodeMap: Record<string, number> = {
   End: 13,
   PageUp: 11,
   PageDown: 12,
+  ArrowLeft: 15,
+  ArrowUp: 16,
+  ArrowRight: 17,
+  ArrowDown: 18,
   Slash: 85,
   Minus: 83,
   Equal: 81,
@@ -35,6 +41,10 @@ const codeToKeyMap: Record<string, string> = {
   End: "End",
   PageUp: "PageUp",
   PageDown: "PageDown",
+  ArrowLeft: "ArrowLeft",
+  ArrowUp: "ArrowUp",
+  ArrowRight: "ArrowRight",
+  ArrowDown: "ArrowDown",
   Slash: "Slash",
   Minus: "Minus",
   Equal: "Equal",
@@ -47,6 +57,11 @@ const codeToKeyMap: Record<string, string> = {
   Period: "Period",
   Backslash: "Backslash"
 };
+
+export interface KeybindingWhenContext extends Record<string, unknown> {
+  editor?: Record<string, unknown>;
+  trae?: Record<string, unknown>;
+}
 
 function normalizeKeyPart(rawPart: string): string | null {
   const trimmed = rawPart.trim();
@@ -75,6 +90,22 @@ function normalizeKeyPart(rawPart: string): string | null {
 
   if (upper === "META" || upper === "CMD" || upper === "WIN") {
     return "Meta";
+  }
+
+  if (upper === "UP" || upper === "ARROWUP") {
+    return "ArrowUp";
+  }
+
+  if (upper === "DOWN" || upper === "ARROWDOWN") {
+    return "ArrowDown";
+  }
+
+  if (upper === "LEFT" || upper === "ARROWLEFT") {
+    return "ArrowLeft";
+  }
+
+  if (upper === "RIGHT" || upper === "ARROWRIGHT") {
+    return "ArrowRight";
   }
 
   if (/^[A-Z]$/.test(upper)) {
@@ -276,4 +307,64 @@ export function matchesKeybindingEvent(
   }
 
   return false;
+}
+
+function transformWhenExpression(expression: string) {
+  return expression.replace(
+    /([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\s*=~\s*(\/(?:\\.|[^/\\])+\/[dgimsuvy]*)/g,
+    "($2).test($1)"
+  );
+}
+
+export function evaluateWhenClause(when: string | undefined, context: KeybindingWhenContext): boolean {
+  if (!when?.trim()) {
+    return true;
+  }
+
+  try {
+    const evaluator = new Function(
+      "__ctx",
+      `with (__ctx) { return Boolean(${transformWhenExpression(when)}); }`
+    ) as (context: KeybindingWhenContext) => boolean;
+    return evaluator(context);
+  } catch {
+    return false;
+  }
+}
+
+export function getMatchingKeybindings(
+  keybindings: EditorKeybinding[],
+  event: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "code" | "key">,
+  context: KeybindingWhenContext
+) {
+  return keybindings.filter(
+    (keybinding) =>
+      matchesKeybindingEvent(keybinding.key, event) && evaluateWhenClause(keybinding.when, context)
+  );
+}
+
+export function getActiveKeybinding(
+  keybindings: EditorKeybinding[],
+  event: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "code" | "key">,
+  context: KeybindingWhenContext
+) {
+  const matchingKeybindings = getMatchingKeybindings(keybindings, event, context);
+  const removedCommands = new Set<string>();
+
+  for (let index = matchingKeybindings.length - 1; index >= 0; index -= 1) {
+    const keybinding = matchingKeybindings[index];
+
+    if (keybinding.command.startsWith("-")) {
+      removedCommands.add(keybinding.command.slice(1));
+      continue;
+    }
+
+    if (removedCommands.has(keybinding.command)) {
+      continue;
+    }
+
+    return keybinding;
+  }
+
+  return null;
 }

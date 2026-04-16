@@ -5,13 +5,17 @@ import Ajv from "ajv";
 import {
   keybindingSchema,
   normalizeEditorConfig,
+  parseJsoncConfig,
+  parseSnippetConfigValue,
+  serializeKeybindingConfig,
+  serializeSnippetConfig,
   snippetSchema,
   type EditorKeybinding,
   type EditorSnippet
 } from "@blog-system/content-core";
 
 const ajv = new Ajv({ allErrors: true });
-const validateSnippets = ajv.compile<EditorSnippet[]>(snippetSchema);
+const validateSnippets = ajv.compile(snippetSchema);
 const validateKeybindings = ajv.compile<EditorKeybinding[]>(keybindingSchema);
 
 export interface LoadedEditorConfig {
@@ -81,44 +85,7 @@ function collectDuplicateNames(language: string, snippets: EditorSnippet[]) {
   return errors;
 }
 
-function collectShortcutConflicts(
-  language: string,
-  snippets: EditorSnippet[],
-  keybindings: EditorKeybinding[]
-) {
-  const errors: string[] = [];
-  const ownersByKey = new Map<string, string[]>();
-
-  for (const snippet of snippets) {
-    if (!snippet.key?.trim()) {
-      continue;
-    }
-
-    const normalizedKey = snippet.key.trim().toLowerCase();
-    ownersByKey.set(normalizedKey, [
-      ...(ownersByKey.get(normalizedKey) ?? []),
-      `${language} snippet:${snippet.name}`
-    ]);
-  }
-
-  for (const keybinding of keybindings) {
-    const normalizedKey = keybinding.key.trim().toLowerCase();
-    ownersByKey.set(normalizedKey, [
-      ...(ownersByKey.get(normalizedKey) ?? []),
-      `keybinding:${keybinding.command}`
-    ]);
-  }
-
-  for (const [key, owners] of ownersByKey.entries()) {
-    if (owners.length > 1) {
-      errors.push(`Shortcut "${key}" is declared by ${owners.join(", ")}`);
-    }
-  }
-
-  return errors;
-}
-
-function validateSnippetArray(label: string, snippets: unknown) {
+function validateSnippetConfig(label: string, snippets: unknown) {
   if (validateSnippets(snippets)) {
     return;
   }
@@ -152,14 +119,24 @@ export async function loadEditorConfig(editorConfigDir: string): Promise<LoadedE
   const resolvedMarkdownSnippetsRaw = markdownSnippetsRaw ?? legacySnippetsRaw ?? "[]\n";
   const resolvedLatexSnippetsRaw = latexSnippetsRaw ?? "[]\n";
   const resolvedKeybindingsRaw = keybindingsRaw ?? "[]\n";
+  const parsedMarkdownSnippets = parseJsoncConfig(resolvedMarkdownSnippetsRaw, "markdownSnippets");
+  const parsedLatexSnippets = parseJsoncConfig(resolvedLatexSnippetsRaw, "latexSnippets");
+  const parsedKeybindings = parseJsoncConfig(resolvedKeybindingsRaw, "keybindings");
+
+  validateSnippetConfig("markdownSnippets", parsedMarkdownSnippets);
+  validateSnippetConfig("latexSnippets", parsedLatexSnippets);
+  validateKeybindingArray(parsedKeybindings);
+
+  const markdownSnippetConfig = parseSnippetConfigValue(parsedMarkdownSnippets);
+  const latexSnippetConfig = parseSnippetConfigValue(parsedLatexSnippets);
 
   return {
     markdownSnippetsRaw: resolvedMarkdownSnippetsRaw,
     latexSnippetsRaw: resolvedLatexSnippetsRaw,
     keybindingsRaw: resolvedKeybindingsRaw,
-    markdownSnippets: normalizeSnippetList(JSON.parse(resolvedMarkdownSnippetsRaw) as EditorSnippet[]),
-    latexSnippets: normalizeSnippetList(JSON.parse(resolvedLatexSnippetsRaw) as EditorSnippet[]),
-    keybindings: normalizeKeybindingList(JSON.parse(resolvedKeybindingsRaw) as EditorKeybinding[])
+    markdownSnippets: normalizeSnippetList(markdownSnippetConfig.snippets),
+    latexSnippets: normalizeSnippetList(latexSnippetConfig.snippets),
+    keybindings: normalizeKeybindingList(parsedKeybindings as EditorKeybinding[])
   };
 }
 
@@ -168,19 +145,19 @@ export function validateEditorConfigPayload(
   latexSnippets: unknown,
   keybindings: unknown
 ) {
-  validateSnippetArray("markdownSnippets", markdownSnippets);
-  validateSnippetArray("latexSnippets", latexSnippets);
+  validateSnippetConfig("markdownSnippets", markdownSnippets);
+  validateSnippetConfig("latexSnippets", latexSnippets);
   validateKeybindingArray(keybindings);
 
-  const normalizedMarkdownSnippets = normalizeSnippetList(markdownSnippets as EditorSnippet[]);
-  const normalizedLatexSnippets = normalizeSnippetList(latexSnippets as EditorSnippet[]);
+  const markdownSnippetConfig = parseSnippetConfigValue(markdownSnippets);
+  const latexSnippetConfig = parseSnippetConfigValue(latexSnippets);
+  const normalizedMarkdownSnippets = normalizeSnippetList(markdownSnippetConfig.snippets);
+  const normalizedLatexSnippets = normalizeSnippetList(latexSnippetConfig.snippets);
   const normalizedKeybindings = normalizeKeybindingList(keybindings as EditorKeybinding[]);
 
   const errors = [
     ...collectDuplicateNames("Markdown", normalizedMarkdownSnippets),
-    ...collectDuplicateNames("LaTeX", normalizedLatexSnippets),
-    ...collectShortcutConflicts("Markdown", normalizedMarkdownSnippets, normalizedKeybindings),
-    ...collectShortcutConflicts("LaTeX", normalizedLatexSnippets, normalizedKeybindings)
+    ...collectDuplicateNames("LaTeX", normalizedLatexSnippets)
   ];
 
   if (errors.length > 0) {
@@ -192,6 +169,10 @@ export function validateEditorConfigPayload(
       markdownSnippets: normalizedMarkdownSnippets,
       latexSnippets: normalizedLatexSnippets,
       keybindings: normalizedKeybindings
+    },
+    formats: {
+      markdownSnippets: markdownSnippetConfig.format,
+      latexSnippets: latexSnippetConfig.format
     },
     warnings: [
       ...collectLanguageWarnings("Markdown", normalizedMarkdownSnippets),
@@ -206,9 +187,9 @@ export async function saveEditorConfig(
   latexSnippetsRaw: string,
   keybindingsRaw: string
 ): Promise<LoadedEditorConfig & { warnings: string[] }> {
-  const parsedMarkdownSnippets = JSON.parse(markdownSnippetsRaw);
-  const parsedLatexSnippets = JSON.parse(latexSnippetsRaw);
-  const parsedKeybindings = JSON.parse(keybindingsRaw);
+  const parsedMarkdownSnippets = parseJsoncConfig(markdownSnippetsRaw, "markdownSnippets");
+  const parsedLatexSnippets = parseJsoncConfig(latexSnippetsRaw, "latexSnippets");
+  const parsedKeybindings = parseJsoncConfig(keybindingsRaw, "keybindings");
   const validation = validateEditorConfigPayload(
     parsedMarkdownSnippets,
     parsedLatexSnippets,
@@ -216,9 +197,15 @@ export async function saveEditorConfig(
   );
   const configPaths = getConfigPaths(editorConfigDir);
 
-  const normalizedMarkdownSnippetsRaw = `${JSON.stringify(validation.config.markdownSnippets, null, 2)}\n`;
-  const normalizedLatexSnippetsRaw = `${JSON.stringify(validation.config.latexSnippets, null, 2)}\n`;
-  const normalizedKeybindingsRaw = `${JSON.stringify(validation.config.keybindings, null, 2)}\n`;
+  const normalizedMarkdownSnippetsRaw = serializeSnippetConfig(
+    validation.config.markdownSnippets,
+    validation.formats.markdownSnippets
+  );
+  const normalizedLatexSnippetsRaw = serializeSnippetConfig(
+    validation.config.latexSnippets,
+    validation.formats.latexSnippets
+  );
+  const normalizedKeybindingsRaw = serializeKeybindingConfig(validation.config.keybindings);
 
   await fs.mkdir(editorConfigDir, { recursive: true });
   await Promise.all([

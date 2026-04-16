@@ -3,10 +3,12 @@ import Editor, { loader, type OnMount } from "@monaco-editor/react";
 import * as monacoEditor from "monaco-editor";
 import "monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2.js";
 import "katex/dist/katex.min.css";
+import katexCssRaw from "katex/dist/katex.min.css?raw";
 import "./monaco-environment";
 
 import {
   extractMarkdownBlocks,
+  highlightThemeCss,
   normalizeEditorConfig,
   parseArticleSource,
   renderMarkdownFragmentWithKatex,
@@ -23,12 +25,15 @@ import {
   type GitChangedFilePayload,
   type GitCommitPayload,
   type MediaAssetPayload,
+  type RenderConfigPayload,
+  type RenderStylePayload,
   type SiteConfigPayload,
   type SiteThemeConfigPayload,
   type TreePayload
 } from "./api";
 import { jsonSchemas } from "./editor-config-schema";
-import { matchesKeybindingEvent } from "./keybindings";
+import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
+import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
 import { PluginRuntime } from "./workbench/plugin-runtime";
@@ -40,6 +45,7 @@ import type {
   ConfigWorkbenchDocument,
   NormalizedEditorConfig,
   NormalizedSnippet,
+  RenderStyleWorkbenchDocument,
   SidebarViewContributionDefinition,
   SidebarViewId,
   WorkbenchApi,
@@ -73,7 +79,7 @@ interface RenderedPreviewBlock {
   element: HTMLElement;
 }
 
-const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "siteConfig" | "siteThemeAtlas">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
+const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "siteConfig" | "siteThemeAtlas" | "renderConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
   markdownSnippets: {
     title: "markdown.snippets.json",
     path: "config/markdown.snippets.json",
@@ -102,6 +108,212 @@ const SITE_THEME_DOCUMENT_META = {
   themeId: "atlas"
 } as const;
 
+const RENDER_CONFIG_DOCUMENT_META = {
+  title: "render.json",
+  path: "config/render.json"
+} as const;
+
+function normalizeRenderStyleDirectory(value: string) {
+  const trimmed = value.trim().replace(/\\/g, "/").replace(/^config\/render\/+/i, "").replace(/^render\/+/i, "");
+
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.toLowerCase().endsWith(".css") ? trimmed : `${trimmed}.css`;
+}
+
+function getRenderStyleDocumentPath(directory: string) {
+  return `config/render/${directory}`;
+}
+
+function getRenderStyleTitle(directory: string) {
+  return directory.split("/").pop() ?? directory;
+}
+
+function getDocumentPath(document: WorkbenchDocument | null, fallbackPath: string | null) {
+  if (!document) {
+    return fallbackPath ?? "";
+  }
+
+  if (document.kind === "article") {
+    return document.articlePath;
+  }
+
+  if (document.kind === "renderStyle") {
+    return document.editorPath;
+  }
+
+  return getConfigDocumentPath(document.configKind);
+}
+
+function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "media" | "git" | "command" }) {
+  const commonProps = {
+    "aria-hidden": true,
+    className: "activity-icon",
+    fill: "none",
+    stroke: "currentColor",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    strokeWidth: 1.8,
+    viewBox: "0 0 24 24"
+  };
+
+  switch (icon) {
+    case "explorer":
+      return (
+        <svg {...commonProps}>
+          <path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+          <path d="M3.5 6.5v-1a2 2 0 0 1 2-2h4l2 2h5a2 2 0 0 1 2 2v1" />
+        </svg>
+      );
+    case "edit":
+      return (
+        <svg {...commonProps}>
+          <path d="M4.5 19.5h4l9.5-9.5-4-4L4.5 15.5z" />
+          <path d="M12.5 7.5l4 4" />
+          <path d="M4.5 19.5l3-1" />
+        </svg>
+      );
+    case "plugins":
+      return (
+        <svg {...commonProps}>
+          <path d="M10 4.5h4v5h5v5h-5v5h-4v-5H5v-5h5z" />
+        </svg>
+      );
+    case "media":
+      return (
+        <svg {...commonProps}>
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <circle cx="9" cy="10" r="1.5" />
+          <path d="M6.5 17l4.5-4.5 3.5 3.5 2-2 1.5 1.5" />
+        </svg>
+      );
+    case "git":
+      return (
+        <svg {...commonProps}>
+          <circle cx="8" cy="6.5" r="2" />
+          <circle cx="16" cy="17.5" r="2" />
+          <circle cx="16" cy="6.5" r="2" />
+          <path d="M10 6.5h4" />
+          <path d="M8 8.5v5a4 4 0 0 0 4 4h2" />
+        </svg>
+      );
+    case "command":
+      return (
+        <svg {...commonProps}>
+          <path d="M8.5 7.5a2 2 0 1 1-4 0 2 2 0 0 1 4 0v9a2 2 0 1 1-4 0" />
+          <path d="M19.5 7.5a2 2 0 1 1-4 0 2 2 0 0 1 4 0v9a2 2 0 1 1-4 0" />
+          <path d="M6.5 10.5h11" />
+          <path d="M6.5 13.5h11" />
+        </svg>
+      );
+  }
+}
+
+function getSidebarViewIcon(viewId: SidebarViewId) {
+  switch (viewId) {
+    case "explorer":
+      return "explorer";
+    case "edit":
+      return "edit";
+    case "plugins":
+      return "plugins";
+    case "media":
+      return "media";
+    case "git":
+      return "git";
+  }
+}
+
+const PREVIEW_SHADOW_BASE_CSS = `
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  color: var(--wb-foreground);
+  font-family: "Georgia", serif;
+  line-height: 1.8;
+  background: transparent;
+}
+
+a {
+  color: var(--wb-accent);
+}
+
+img {
+  max-width: 100%;
+  display: block;
+  border-radius: 14px;
+  border: 1px solid var(--wb-border);
+}
+
+pre {
+  overflow: auto;
+  padding: 16px;
+  border-radius: 12px;
+  background: #172028;
+  border: 1px solid var(--wb-border);
+  color: #d8e1eb;
+}
+
+code:not(pre code) {
+  padding: 0.18em 0.38em;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 0.92em;
+}
+
+pre code {
+  font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 1px solid var(--wb-border);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+blockquote {
+  margin: 0;
+  padding-left: 16px;
+  border-left: 3px solid var(--wb-accent);
+  color: var(--wb-foreground-muted);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--wb-border);
+}
+
+.preview-prose {
+  line-height: 1.8;
+}
+
+.preview-block {
+  scroll-margin-block: 35vh;
+}
+
+.preview-prose h1,
+.preview-prose h2,
+.preview-prose h3 {
+  font-family: "Georgia", serif;
+}
+
+${highlightThemeCss}
+${katexCssRaw}
+`;
+
 const emptyConfigPayload: EditorConfigPayload = {
   markdownSnippets: [],
   latexSnippets: [],
@@ -111,6 +323,73 @@ const emptyConfigPayload: EditorConfigPayload = {
   keybindingsRaw: "[]\n",
   warnings: []
 };
+
+const DEFAULT_KEYBINDINGS = normalizeEditorConfig({
+  snippets: [],
+  keybindings: [
+    {
+      key: "Ctrl+S",
+      command: "workbench.saveActiveDocument"
+    },
+    {
+      key: "Ctrl+Shift+P",
+      command: "workbench.action.showCommands"
+    },
+    {
+      key: "F1",
+      command: "workbench.action.showCommands"
+    },
+    {
+      key: "Ctrl+B",
+      command: "workbench.toggleSidebar"
+    },
+    {
+      key: "Ctrl+Backslash",
+      command: "workbench.togglePreview"
+    },
+    {
+      key: "F22",
+      command: "acceptSelectedSuggestion",
+      when: "suggestWidgetVisible"
+    }
+  ]
+}).keybindings;
+
+function getConfigDocumentPath(kind: ConfigDocumentKind) {
+  switch (kind) {
+    case "siteConfig":
+      return SITE_CONFIG_DOCUMENT_META.path;
+    case "siteThemeAtlas":
+      return SITE_THEME_DOCUMENT_META.path;
+    case "renderConfig":
+      return RENDER_CONFIG_DOCUMENT_META.path;
+    default:
+      return CONFIG_DOCUMENT_META[kind].path;
+  }
+}
+
+function getConfigDocumentTitle(kind: ConfigDocumentKind) {
+  switch (kind) {
+    case "siteConfig":
+      return SITE_CONFIG_DOCUMENT_META.title;
+    case "siteThemeAtlas":
+      return SITE_THEME_DOCUMENT_META.title;
+    case "renderConfig":
+      return RENDER_CONFIG_DOCUMENT_META.title;
+    default:
+      return CONFIG_DOCUMENT_META[kind].title;
+  }
+}
+
+function getJsonSchemaDefinitions() {
+  return [
+    { uri: "inmemory://schemas/snippets.json", fileMatch: [CONFIG_DOCUMENT_META.markdownSnippets.path, CONFIG_DOCUMENT_META.latexSnippets.path], schema: jsonSchemas.snippetSchema as object },
+    { uri: "inmemory://schemas/keybindings.json", fileMatch: [CONFIG_DOCUMENT_META.keybindings.path], schema: jsonSchemas.keybindingSchema as object },
+    { uri: "inmemory://schemas/site.json", fileMatch: [SITE_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.siteConfigSchema as object },
+    { uri: "inmemory://schemas/render.json", fileMatch: [RENDER_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.renderConfigSchema as object },
+    { uri: "inmemory://schemas/site-theme.json", fileMatch: [SITE_THEME_DOCUMENT_META.path], schema: jsonSchemas.siteThemeConfigSchema as object }
+  ];
+}
 
 function hashText(value: string) {
   let hash = 2166136261;
@@ -198,40 +477,37 @@ function isConfigDocument(document: WorkbenchDocument | null): document is Confi
   return Boolean(document && document.kind === "config");
 }
 
-function normalizeSnippetList(snippets: EditorSnippet[]) {
-  return normalizeEditorConfig({ snippets, keybindings: [] }).snippets as NormalizedSnippet[];
+function isRenderStyleDocument(document: WorkbenchDocument | null): document is RenderStyleWorkbenchDocument {
+  return Boolean(document && document.kind === "renderStyle");
 }
 
 function buildNormalizedEditorConfig(configPayload: EditorConfigPayload | null): NormalizedEditorConfig {
   const payload = configPayload ?? emptyConfigPayload;
   return {
-    markdownSnippets: normalizeSnippetList(payload.markdownSnippets),
-    latexSnippets: normalizeSnippetList(payload.latexSnippets),
-    keybindings: normalizeEditorConfig({ snippets: [], keybindings: payload.keybindings }).keybindings
+    markdownSnippets: normalizeWorkbenchSnippets(payload.markdownSnippets, "markdown"),
+    latexSnippets: normalizeWorkbenchSnippets(payload.latexSnippets, "latex"),
+    keybindings: [...DEFAULT_KEYBINDINGS, ...normalizeEditorConfig({ snippets: [], keybindings: payload.keybindings }).keybindings]
   };
 }
 
 function buildConfigDocument(
   kind: ConfigDocumentKind,
-  payload: EditorConfigPayload | SiteConfigPayload
+  payload: EditorConfigPayload | SiteConfigPayload | SiteThemeConfigPayload | RenderConfigPayload
 ): ConfigWorkbenchDocument {
-  const isSiteConfig = kind === "siteConfig";
-  const isSiteThemeConfig = kind === "siteThemeAtlas";
-  const value = isSiteConfig
-    ? (payload as SiteConfigPayload).raw
-    : isSiteThemeConfig
-      ? (payload as SiteThemeConfigPayload).raw
-    : CONFIG_DOCUMENT_META[kind as Exclude<ConfigDocumentKind, "siteConfig" | "siteThemeAtlas">].read(payload as EditorConfigPayload);
+  const value =
+    kind === "siteConfig"
+      ? (payload as SiteConfigPayload).raw
+      : kind === "siteThemeAtlas"
+        ? (payload as SiteThemeConfigPayload).raw
+        : kind === "renderConfig"
+          ? (payload as RenderConfigPayload).raw
+          : CONFIG_DOCUMENT_META[kind].read(payload as EditorConfigPayload);
 
   return {
     id: `config:${kind}`,
     kind: "config",
     configKind: kind,
-    title: isSiteConfig
-      ? SITE_CONFIG_DOCUMENT_META.title
-      : isSiteThemeConfig
-        ? SITE_THEME_DOCUMENT_META.title
-      : CONFIG_DOCUMENT_META[kind as Exclude<ConfigDocumentKind, "siteConfig" | "siteThemeAtlas">].title,
+    title: getConfigDocumentTitle(kind),
     language: "json",
     value,
     savedValue: value,
@@ -252,6 +528,21 @@ function buildArticleDocument(record: ArticleRecord): ArticleWorkbenchDocument {
     savedValue: record.rawContent,
     dirty: false,
     previewable: true
+  };
+}
+
+function buildRenderStyleDocument(payload: RenderStylePayload): RenderStyleWorkbenchDocument {
+  return {
+    id: `render-style:${payload.directory}`,
+    kind: "renderStyle",
+    directory: payload.directory,
+    editorPath: getRenderStyleDocumentPath(payload.directory),
+    title: getRenderStyleTitle(payload.directory),
+    language: "css",
+    value: payload.raw,
+    savedValue: payload.raw,
+    dirty: false,
+    previewable: false
   };
 }
 
@@ -341,12 +632,55 @@ function toSnippetBody(body: string | string[]) {
   return Array.isArray(body) ? body.join("\n") : body;
 }
 
+function getScopedSnippets(snippets: NormalizedSnippet[], languageId: "markdown" | "latex") {
+  return getSnippetsForLanguage(snippets, languageId);
+}
+
 function getSymbolSuffix(value: string) {
   return /[^A-Za-z0-9_-]+$/.exec(value)?.[0] ?? "";
 }
 
 function isSymbolSnippetPrefix(prefix: string) {
   return /[^A-Za-z0-9_-]/.test(prefix);
+}
+
+function getSymbolTriggerCharacters(snippets: NormalizedSnippet[]) {
+  return Array.from(
+    new Set(
+      snippets
+        .flatMap((snippet) => snippet.prefix)
+        .filter((prefix) => isSymbolSnippetPrefix(prefix))
+        .map((prefix) => prefix.slice(-1))
+        .filter(Boolean)
+    )
+  );
+}
+
+function buildPreviewRootCompatCss(rawCss: string) {
+  return rawCss.replace(/(^|,)\s*:root\b/gm, "$1 :host, html");
+}
+
+function isWorkbenchKeybindingCommand(command: string) {
+  return command === "workbench.action.showCommands" || command.startsWith("workbench.") || command.startsWith("blog.");
+}
+
+function isSuppressedDefaultEditorCommand(command: string, context: Record<string, unknown>) {
+  switch (command) {
+    case "acceptSelectedSuggestion":
+      return context.suggestWidgetVisible === true;
+    case "editor.action.triggerSuggest":
+    case "editor.action.inlineSuggest.commit":
+    case "editor.action.copyLinesDownAction":
+    case "markdown.extension.onCopyLineDown":
+    case "editor.action.copyLinesUpAction":
+    case "markdown.extension.onCopyLineUp":
+    case "editor.action.insertCursorAbove":
+    case "editor.action.insertCursorBelow":
+    case "workbench.action.quickOpen":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function parseCommaSeparatedTags(value: string) {
@@ -538,6 +872,7 @@ export function App() {
   const [selectedPaletteIndex, setSelectedPaletteIndex] = useState(0);
   const [treePayload, setTreePayload] = useState<TreePayload | null>(null);
   const [configPayload, setConfigPayload] = useState<EditorConfigPayload | null>(null);
+  const [renderConfigPayload, setRenderConfigPayload] = useState<RenderConfigPayload | null>(null);
   const [siteConfigPayload, setSiteConfigPayload] = useState<SiteConfigPayload | null>(null);
   const [siteThemeConfigPayload, setSiteThemeConfigPayload] = useState<SiteThemeConfigPayload | null>(null);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([]);
@@ -552,6 +887,8 @@ export function App() {
   const [gitInitialized, setGitInitialized] = useState(true);
   const [tagFilter, setTagFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
+  const [previewRenderDialogOpen, setPreviewRenderDialogOpen] = useState(false);
+  const [renderStyleAssetVersion, setRenderStyleAssetVersion] = useState(0);
   const [themeId, setThemeId] = useState(() => window.localStorage.getItem("admin-theme") ?? "eva-dark");
   const [disabledPluginIds, setDisabledPluginIds] = useState<string[]>(() => {
     try {
@@ -580,6 +917,7 @@ export function App() {
   const editorRef = useRef<monacoEditor.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof monacoEditor | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const previewShadowHeadRef = useRef<HTMLDivElement | null>(null);
   const previewProseRef = useRef<HTMLDivElement | null>(null);
   const previewBlocksRef = useRef<RenderedPreviewBlock[]>([]);
   const previewBlockIdRef = useRef(0);
@@ -619,16 +957,46 @@ export function App() {
     [pluginRuntime]
   );
   const activeTheme = pluginRuntime.getTheme(themeId) ?? availableThemes[0] ?? null;
+  const previewRenderStyles = useMemo(
+    () => renderConfigPayload?.value.styles ?? [],
+    [renderConfigPayload]
+  );
   const commandItems = useMemo(() => {
     const query = deferredCommandQuery.trim().toLowerCase();
+    const renderStyleQueryCandidate = deferredCommandQuery.trim();
+    const requestedRenderStyleDirectory =
+      renderStyleQueryCandidate.length > 0 &&
+      (!renderStyleQueryCandidate.includes(" ") ||
+        renderStyleQueryCandidate.toLowerCase().endsWith(".css") ||
+        renderStyleQueryCandidate.includes("/") ||
+        renderStyleQueryCandidate.includes("\\"))
+        ? normalizeRenderStyleDirectory(renderStyleQueryCandidate)
+        : null;
     const base = availableCommands.map((command) => ({
       id: command.id,
       title: command.title,
       description: command.keywords?.join(", "),
       haystack: `${command.title} ${command.id} ${(command.keywords ?? []).join(" ")}`.toLowerCase()
     }));
-    return query ? base.filter((command) => command.haystack.includes(query)) : base;
-  }, [availableCommands, deferredCommandQuery]);
+    const filtered = query ? base.filter((command) => command.haystack.includes(query)) : base;
+    const renderStyleCommand =
+      requestedRenderStyleDirectory && query
+        ? [
+            {
+              id: `render-style:create:${requestedRenderStyleDirectory}`,
+              title: (renderConfigPayload?.value.styles.some(
+                (style) => style.directory.toLowerCase() === requestedRenderStyleDirectory.toLowerCase()
+              ) ?? false)
+                ? `Open Render CSS: ${requestedRenderStyleDirectory}`
+                : `Create Render CSS: ${requestedRenderStyleDirectory}`,
+              description: `Edit config/render/${requestedRenderStyleDirectory}`,
+              haystack: requestedRenderStyleDirectory.toLowerCase()
+            }
+          ]
+        : [];
+
+    return [...renderStyleCommand, ...filtered];
+  }, [availableCommands, deferredCommandQuery, renderConfigPayload]);
   const themeItems = useMemo(() => {
     const query = deferredCommandQuery.trim().toLowerCase();
     const base = availableThemes.map((theme) => ({
@@ -753,18 +1121,6 @@ export function App() {
     [getCreateDialogMetadataDefaults]
   );
   const selectedTags = treePayload?.tags ?? [];
-  const articleSearchResults = useMemo(() => {
-    const query = deferredSearchQuery.trim().toLowerCase();
-    if (!treePayload || !query) {
-      return [];
-    }
-    return treePayload.articles.filter(
-      (article) =>
-        article.title.toLowerCase().includes(query) ||
-        article.path.toLowerCase().includes(query) ||
-        article.tags.some((tag) => tag.toLowerCase().includes(query))
-    );
-  }, [deferredSearchQuery, treePayload]);
 
   const getDraftValue = useCallback(
     (document: WorkbenchDocument) => draftValuesRef.current[document.id] ?? document.savedValue,
@@ -776,8 +1132,30 @@ export function App() {
     setPreviewReadyVersion((current) => current + 1);
   }, []);
 
-  const attachPreviewProseRef = useCallback((node: HTMLDivElement | null) => {
-    previewProseRef.current = node;
+  const attachPreviewSurfaceRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) {
+      previewShadowHeadRef.current = null;
+      previewProseRef.current = null;
+      previewBlocksRef.current = [];
+      setPreviewReadyVersion((current) => current + 1);
+      return;
+    }
+
+    const shadowRoot = node.shadowRoot ?? node.attachShadow({ mode: "open" });
+    const baseStyle = document.createElement("style");
+    baseStyle.textContent = PREVIEW_SHADOW_BASE_CSS;
+
+    const externalStylesHost = document.createElement("div");
+    const htmlElement = document.createElement("html");
+    const bodyElement = document.createElement("body");
+    const proseElement = document.createElement("div");
+    proseElement.className = "preview-prose";
+    bodyElement.appendChild(proseElement);
+    htmlElement.appendChild(bodyElement);
+
+    shadowRoot.replaceChildren(baseStyle, externalStylesHost, htmlElement);
+    previewShadowHeadRef.current = externalStylesHost;
+    previewProseRef.current = proseElement;
     previewBlocksRef.current = [];
     setPreviewReadyVersion((current) => current + 1);
   }, []);
@@ -842,6 +1220,14 @@ export function App() {
     const payload = await api.getEditorConfig();
     startTransition(() => {
       setConfigPayload(payload);
+    });
+    return payload;
+  };
+
+  const loadRenderConfig = async () => {
+    const payload = await api.getRenderConfig();
+    startTransition(() => {
+      setRenderConfigPayload(payload);
     });
     return payload;
   };
@@ -930,6 +1316,88 @@ export function App() {
     setSelectedTreePath(articlePath);
   };
 
+  const applySavedRenderConfigPayload = (savedPayload: RenderConfigPayload) => {
+    setRenderConfigPayload(savedPayload);
+    setDocuments((current) =>
+      current.map((document) =>
+        document.kind === "config" && document.configKind === "renderConfig"
+          ? {
+              ...document,
+              value: savedPayload.raw,
+              savedValue: savedPayload.raw,
+              dirty: false
+            }
+          : document
+      )
+    );
+    draftValuesRef.current["config:renderConfig"] = savedPayload.raw;
+    if (activeDocument?.kind === "config" && activeDocument.configKind === "renderConfig") {
+      syncEditorValuePreservingView(savedPayload.raw);
+    }
+    setRenderStyleAssetVersion((current) => current + 1);
+  };
+
+  const applySavedRenderStylePayload = (savedPayload: RenderStylePayload) => {
+    const savedDocument = buildRenderStyleDocument(savedPayload);
+    draftValuesRef.current[savedDocument.id] = savedDocument.value;
+    setDocuments((current) => upsertDocument(current, savedDocument));
+    setActiveDocumentId(savedDocument.id);
+    if (activeDocument?.kind === "renderStyle" && activeDocument.directory === savedPayload.directory) {
+      syncEditorValuePreservingView(savedPayload.raw);
+    }
+    setRenderStyleAssetVersion((current) => current + 1);
+  };
+
+  const openRenderStyleDocument = async (directory: string) => {
+    const normalizedDirectory = normalizeRenderStyleDirectory(directory);
+
+    if (!normalizedDirectory) {
+      return;
+    }
+
+    try {
+      const existingDocument = documents.find(
+        (document) => document.kind === "renderStyle" && document.directory === normalizedDirectory
+      );
+      if (existingDocument) {
+        setActiveDocumentId(existingDocument.id);
+        return;
+      }
+
+      const payload = await api.getRenderStyle(normalizedDirectory);
+      const renderStyleDocument = buildRenderStyleDocument(payload);
+      draftValuesRef.current[renderStyleDocument.id] = renderStyleDocument.value;
+      setDocuments((current) => upsertDocument(current, renderStyleDocument));
+      setActiveDocumentId(renderStyleDocument.id);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const createRenderStyleDocument = async (fileName: string) => {
+    const normalizedDirectory = normalizeRenderStyleDirectory(fileName);
+
+    if (!normalizedDirectory) {
+      return;
+    }
+
+    setBusyMessage(`Opening ${normalizedDirectory}...`);
+    try {
+      const payload = await api.createRenderStyle(normalizedDirectory);
+      applySavedRenderConfigPayload(payload.renderConfig);
+      applySavedRenderStylePayload({
+        directory: payload.directory,
+        raw: payload.raw
+      });
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
   const openConfigDocument = async (kind: ConfigDocumentKind) => {
     const existingDocument = documents.find((document) => document.kind === "config" && document.configKind === kind);
     if (existingDocument) {
@@ -939,6 +1407,8 @@ export function App() {
     const payload =
       kind === "siteConfig"
         ? siteConfigPayload ?? (await loadSiteConfig())
+        : kind === "renderConfig"
+          ? renderConfigPayload ?? (await loadRenderConfig())
         : kind === "siteThemeAtlas"
           ? siteThemeConfigPayload ?? (await loadSiteThemeConfig())
         : configPayload ?? (await loadConfig());
@@ -948,8 +1418,14 @@ export function App() {
     setActiveDocumentId(document.id);
   };
 
+  const saveRenderConfigRaw = async (raw: string) => {
+    const savedPayload = await api.saveRenderConfig(raw);
+    applySavedRenderConfigPayload(savedPayload);
+    return savedPayload;
+  };
+
   const refreshWorkspace = async () => {
-    const [tree] = await Promise.all([loadTree(), loadConfig(), loadSiteConfig(), loadSiteThemeConfig(), loadMediaAssets(), loadGitData()]);
+    const [tree] = await Promise.all([loadTree(), loadConfig(), loadRenderConfig(), loadSiteConfig(), loadSiteThemeConfig(), loadMediaAssets(), loadGitData()]);
     if (!activeDocumentId) {
       const firstArticlePath = flattenTreePaths(tree.tree)[0];
       if (firstArticlePath) {
@@ -970,10 +1446,15 @@ export function App() {
     setConfigPayload(savedPayload);
     setDocuments((current) =>
       current.map((document) => {
-        if (document.kind !== "config") {
+        if (
+          document.kind !== "config" ||
+          (document.configKind !== "markdownSnippets" &&
+            document.configKind !== "latexSnippets" &&
+            document.configKind !== "keybindings")
+        ) {
           return document;
         }
-        const nextValue = CONFIG_DOCUMENT_META[document.configKind as Exclude<ConfigDocumentKind, "siteConfig" | "siteThemeAtlas">].read(savedPayload);
+        const nextValue = CONFIG_DOCUMENT_META[document.configKind].read(savedPayload);
         return { ...document, value: nextValue, savedValue: nextValue, dirty: false };
       })
     );
@@ -1036,6 +1517,90 @@ export function App() {
     draftValuesRef.current["config:siteThemeAtlas"] = savedPayload.raw;
   };
 
+  const saveRenderConfigDocument = async () => {
+    const renderConfigDocument = documents.find(
+      (document) => document.kind === "config" && document.configKind === "renderConfig"
+    );
+    const raw = (renderConfigDocument ? getDraftValue(renderConfigDocument) : undefined) ?? renderConfigPayload?.raw;
+
+    if (typeof raw !== "string") {
+      return;
+    }
+
+    await saveRenderConfigRaw(raw);
+  };
+
+  const saveRenderStyleDocument = async () => {
+    if (!isRenderStyleDocument(activeDocument)) {
+      return;
+    }
+
+    const raw = editorRef.current?.getValue() ?? getDraftValue(activeDocument);
+    const savedPayload = await api.saveRenderStyle(activeDocument.directory, raw);
+    applySavedRenderStylePayload(savedPayload);
+  };
+
+  const toggleRenderStyleEnable = async (directory: string, enable: boolean) => {
+    const renderConfigDocument = documents.find(
+      (document) => document.kind === "config" && document.configKind === "renderConfig"
+    );
+    const raw = (renderConfigDocument ? getDraftValue(renderConfigDocument) : undefined) ?? renderConfigPayload?.raw;
+    const normalizedDirectory = normalizeRenderStyleDirectory(directory);
+
+    if (!normalizedDirectory || typeof raw !== "string") {
+      return;
+    }
+
+    setBusyMessage("Updating render CSS...");
+
+    try {
+      const parsed = JSON.parse(raw) as { styles?: Array<{ directory?: string; enable?: boolean }> };
+      const currentStyles = Array.isArray(parsed.styles) ? parsed.styles : [];
+      const nextStyles = currentStyles.some(
+        (style) =>
+          typeof style.directory === "string" &&
+          style.directory.trim().toLowerCase() === normalizedDirectory.toLowerCase()
+      )
+        ? currentStyles.map((style) =>
+            typeof style.directory === "string" &&
+            style.directory.trim().toLowerCase() === normalizedDirectory.toLowerCase()
+              ? {
+                  directory: style.directory.trim().replace(/\\/g, "/"),
+                  enable
+                }
+              : {
+                  directory: typeof style.directory === "string" ? style.directory.trim().replace(/\\/g, "/") : "",
+                  enable: style.enable === true
+                }
+          )
+        : [
+            ...currentStyles.map((style) => ({
+              directory: typeof style.directory === "string" ? style.directory.trim().replace(/\\/g, "/") : "",
+              enable: style.enable === true
+            })),
+            {
+              directory: normalizedDirectory,
+              enable
+            }
+          ];
+
+      await saveRenderConfigRaw(
+        JSON.stringify(
+          {
+            styles: nextStyles.filter((style) => style.directory.length > 0)
+          },
+          null,
+          2
+        )
+      );
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
   const saveActiveDocument = async () => {
     if (!activeDocument) {
       return;
@@ -1052,8 +1617,12 @@ export function App() {
         syncEditorValuePreservingView(savedDocument.value);
         schedulePreviewSourceUpdate(savedDocument.value, { immediate: true });
         await loadTree();
+      } else if (activeDocument.kind === "renderStyle") {
+        await saveRenderStyleDocument();
       } else if (activeDocument.configKind === "siteConfig") {
         await saveSiteConfigDocument();
+      } else if (activeDocument.configKind === "renderConfig") {
+        await saveRenderConfigDocument();
       } else if (activeDocument.configKind === "siteThemeAtlas") {
         await saveSiteThemeConfigDocument();
       } else {
@@ -1104,6 +1673,61 @@ export function App() {
   }, [previewWidth]);
 
   useEffect(() => {
+    const previewShadowHead = previewShadowHeadRef.current;
+
+    if (!previewShadowHead) {
+      return;
+    }
+
+    let cancelled = false;
+    const enabledStyles = previewRenderStyles.filter((style) => style.enable);
+    const nextLinks = enabledStyles.map((style) => {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = `/render-files/${style.directory
+        .split("/")
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join("/")}?v=${renderStyleAssetVersion}`;
+      link.dataset.renderStyleDirectory = style.directory;
+      return link;
+    });
+    previewShadowHead.replaceChildren(...nextLinks);
+
+    void Promise.all(
+      enabledStyles.map(async (style) => {
+        const href = `/render-files/${style.directory
+          .split("/")
+          .filter(Boolean)
+          .map((segment) => encodeURIComponent(segment))
+          .join("/")}?v=${renderStyleAssetVersion}`;
+        const response = await fetch(href, { credentials: "include" });
+        const cssText = await response.text();
+        const styleElement = document.createElement("style");
+        styleElement.dataset.renderStyleRootCompat = style.directory;
+        styleElement.textContent = buildPreviewRootCompatCss(cssText);
+        return styleElement;
+      })
+    )
+      .then((compatStyles) => {
+        if (cancelled || previewShadowHeadRef.current !== previewShadowHead) {
+          return;
+        }
+
+        previewShadowHead.replaceChildren(...nextLinks, ...compatStyles);
+      })
+      .catch(() => {
+        if (!cancelled && previewShadowHeadRef.current === previewShadowHead) {
+          previewShadowHead.replaceChildren(...nextLinks);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [previewReadyVersion, previewRenderStyles, renderStyleAssetVersion]);
+
+  useEffect(() => {
     if (!activeTheme) {
       return;
     }
@@ -1133,6 +1757,12 @@ export function App() {
       setCommandPaletteMode("commands");
     }
   }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    if (!previewVisible || !isArticleDocument(activeDocument)) {
+      setPreviewRenderDialogOpen(false);
+    }
+  }, [activeDocument, previewVisible]);
 
   useEffect(() => {
     if (!activeDocument || activeDocument.kind !== "article") {
@@ -1368,11 +1998,27 @@ export function App() {
       if (commandPaletteOpen) {
         return;
       }
-      const binding = normalizedConfig.keybindings.find((keybinding) => !keybinding.command.startsWith("editor.") && matchesKeybindingEvent(keybinding.key, event));
-      if (!binding || !workbenchApiRef.current) {
+
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      const position = editor?.getPosition();
+      const snippetLanguage =
+        editor && model && position && isArticleDocument(activeDocument) ? getSnippetLanguage(model, position) : "markdown";
+      const context = {
+        editorLangId: snippetLanguage,
+        editorTextFocus: Boolean(editor?.hasTextFocus()),
+        textInputFocus: Boolean(editor?.hasTextFocus()),
+        inputFocus: Boolean(editor?.hasTextFocus()),
+        suggestWidgetVisible: Boolean(document.querySelector(".suggest-widget.visible"))
+      };
+      const binding = getActiveKeybinding(normalizedConfig.keybindings, event, context);
+      if (!binding || !workbenchApiRef.current || !isWorkbenchKeybindingCommand(binding.command)) {
         return;
       }
-      const command = pluginRuntime.getCommand(binding.command);
+
+      const command = pluginRuntime.getCommand(
+        binding.command === "workbench.action.showCommands" ? "workbench.showCommandPalette" : binding.command
+      );
       if (!command) {
         return;
       }
@@ -1382,7 +2028,7 @@ export function App() {
     };
     window.addEventListener("keydown", listener, true);
     return () => window.removeEventListener("keydown", listener, true);
-  }, [commandPaletteOpen, normalizedConfig.keybindings, pluginRuntime]);
+  }, [activeDocument, commandPaletteOpen, normalizedConfig.keybindings, pluginRuntime]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -1439,12 +2085,7 @@ export function App() {
     setEditorReadyVersion((current) => current + 1);
     monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
       validate: true,
-      schemas: [
-        { uri: "inmemory://schemas/snippets.json", fileMatch: [CONFIG_DOCUMENT_META.markdownSnippets.path, CONFIG_DOCUMENT_META.latexSnippets.path], schema: jsonSchemas.snippetSchema as object },
-        { uri: "inmemory://schemas/keybindings.json", fileMatch: [CONFIG_DOCUMENT_META.keybindings.path], schema: jsonSchemas.keybindingSchema as object },
-        { uri: "inmemory://schemas/site.json", fileMatch: [SITE_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.siteConfigSchema as object },
-        { uri: "inmemory://schemas/site-theme.json", fileMatch: [SITE_THEME_DOCUMENT_META.path], schema: jsonSchemas.siteThemeConfigSchema as object }
-      ]
+      schemas: getJsonSchemaDefinitions()
     });
     if (activeTheme) {
       monaco.editor.setTheme(activeTheme.id);
@@ -1458,13 +2099,18 @@ export function App() {
       return;
     }
     const allSnippets = [...normalizedConfig.markdownSnippets, ...normalizedConfig.latexSnippets];
+    const markdownSymbolTriggerCharacters = getSymbolTriggerCharacters(normalizedConfig.markdownSnippets);
+    const latexSymbolTriggerCharacters = getSymbolTriggerCharacters(normalizedConfig.latexSnippets);
     const completionProvider = monaco.languages.registerCompletionItemProvider("markdown", {
-      triggerCharacters: Array.from(new Set(allSnippets.flatMap((snippet) => snippet.prefix).filter((prefix) => isSymbolSnippetPrefix(prefix)).map((prefix) => prefix.slice(-1)).filter(Boolean))),
       provideCompletionItems(model, position) {
         if (!isArticleDocument(activeDocument)) {
           return { suggestions: [] };
         }
-        const relevantSnippets = getSnippetLanguage(model, position) === "latex" ? normalizedConfig.latexSnippets : normalizedConfig.markdownSnippets;
+        const snippetLanguage = getSnippetLanguage(model, position);
+        const relevantSnippets = getScopedSnippets(
+          snippetLanguage === "latex" ? normalizedConfig.latexSnippets : normalizedConfig.markdownSnippets,
+          snippetLanguage
+        );
         const linePrefix = model.getValueInRange(new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column));
         const trailingWord = /[A-Za-z0-9_-]+$/.exec(linePrefix)?.[0] ?? "";
         const symbolSuffix = getSymbolSuffix(linePrefix);
@@ -1501,43 +2147,195 @@ export function App() {
         return { suggestions };
       }
     });
+    const domNode = editor.getDomNode();
+    const textarea = domNode?.querySelector("textarea.inputarea");
+    const getSnippetController = () =>
+      editor.getContribution("snippetController2") as {
+        insert: (template: string) => void;
+        isInSnippet?: () => boolean;
+      } | null;
+    const insertSnippet = (snippet: EditorSnippet) => {
+      getSnippetController()?.insert(toSnippetBody(snippet.body));
+    };
+    const createEditorWhenContext = () => {
+      const model = editor.getModel();
+      const position = editor.getPosition();
+      const hasSelection = Boolean(editor.getSelection()) && !editor.getSelection()?.isEmpty();
+      const editorHasTextFocus = editor.hasTextFocus();
+      const snippetController = getSnippetController();
+      const snippetLanguage =
+        model && position && isArticleDocument(activeDocument) ? getSnippetLanguage(model, position) : "markdown";
+
+      return {
+        editorLangId: snippetLanguage,
+        editorTextFocus: editorHasTextFocus,
+        textInputFocus: editorHasTextFocus,
+        inputFocus: editorHasTextFocus,
+        editorReadonly: editor.getOption(monaco.editor.EditorOption.readOnly),
+        editorHasCompletionItemProvider: isArticleDocument(activeDocument),
+        suggestWidgetVisible: Boolean(domNode?.querySelector(".suggest-widget.visible")),
+        editorHasMultipleSelections: (editor.getSelections()?.length ?? 0) > 1,
+        editorHasSelection: hasSelection,
+        editorHoverVisible: Boolean(domNode?.querySelector(".monaco-hover.visible")),
+        editorHoverFocused: false,
+        editorTabMovesFocus: false,
+        inlineChatFocused: false,
+        notebookEditorFocused: false,
+        notebookOutputFocused: false,
+        inInlineEditsPreviewEditor: false,
+        inlineEditIsVisible: false,
+        inlineSuggestionVisible: false,
+        inlineSuggestionHasIndentationLessThanTabSize: false,
+        tabShouldAcceptInlineEdit: false,
+        inSnippetMode: snippetController?.isInSnippet?.() ?? false,
+        editor: {
+          hasSelection
+        },
+        trae: {
+          hasInlineSuggestShouldAcceptDirect: false
+        }
+      };
+    };
+    const executeEditorKeybinding = async (
+      keybinding: EditorConfigPayload["keybindings"][number],
+      relevantSnippets: NormalizedSnippet[]
+    ) => {
+      if (keybinding.command === "editor.insertSnippet") {
+        const snippetName = String(keybinding.args?.snippetName ?? "");
+        const snippet =
+          relevantSnippets.find((item) => item.name === snippetName) ??
+          allSnippets.find((item) => item.name === snippetName);
+
+        if (snippet) {
+          insertSnippet(snippet);
+          return true;
+        }
+
+        return false;
+      }
+
+      if (keybinding.command === "type") {
+        editor.trigger("keyboard", "type", keybinding.args ?? {});
+        return true;
+      }
+
+      if (isWorkbenchKeybindingCommand(keybinding.command)) {
+        const workbenchCommand = pluginRuntime.getCommand(
+          keybinding.command === "workbench.action.showCommands"
+            ? "workbench.showCommandPalette"
+            : keybinding.command
+        );
+        if (workbenchCommand && workbenchApiRef.current) {
+          await workbenchCommand.handler(workbenchApiRef.current);
+          return true;
+        }
+      }
+
+      const action = pluginRuntime.getEditorAction(keybinding.command);
+      if (action) {
+        return await action.handler({ editor, monaco, activeDocument, snippets: relevantSnippets });
+      }
+
+      if (
+        keybinding.command === "hideSuggestWidget" ||
+        keybinding.command === "acceptSelectedSuggestion" ||
+        keybinding.command.startsWith("editor.")
+      ) {
+        editor.trigger("keyboard", keybinding.command, keybinding.args ?? {});
+        return true;
+      }
+
+      return false;
+    };
     const keydownListener = async (event: KeyboardEvent) => {
       if (!editor.hasTextFocus() || !isArticleDocument(activeDocument)) {
         return;
       }
       const model = editor.getModel();
       const position = editor.getPosition();
-      const relevantSnippets = !model || !position || getSnippetLanguage(model, position) === "markdown" ? normalizedConfig.markdownSnippets : normalizedConfig.latexSnippets;
+      if (!model || !position) {
+        return;
+      }
+
+      const snippetLanguage = getSnippetLanguage(model, position);
+      const relevantSnippets = getScopedSnippets(
+        snippetLanguage === "markdown" ? normalizedConfig.markdownSnippets : normalizedConfig.latexSnippets,
+        snippetLanguage
+      );
+      const whenContext = createEditorWhenContext();
+      const matchingKeybindings = getMatchingKeybindings(normalizedConfig.keybindings, event, whenContext);
+      const activeKeybinding = getActiveKeybinding(normalizedConfig.keybindings, event, whenContext);
+
+      if (activeKeybinding) {
+        const handled = await executeEditorKeybinding(activeKeybinding, relevantSnippets);
+        if (handled) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+      }
+
+      const removedCommands = matchingKeybindings
+        .filter((keybinding) => keybinding.command.startsWith("-"))
+        .map((keybinding) => keybinding.command.slice(1));
+      const snippetController = getSnippetController();
+
+      if (
+        event.key === "Tab" &&
+        (snippetController?.isInSnippet?.() ?? false) &&
+        removedCommands.includes("acceptSelectedSuggestion")
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        editor.trigger(
+          "keyboard",
+          event.shiftKey ? "jumpToPrevSnippetPlaceholder" : "jumpToNextSnippetPlaceholder",
+          {}
+        );
+        return;
+      }
+
+      if (removedCommands.some((command) => isSuppressedDefaultEditorCommand(command, whenContext))) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
       const keyedSnippet = relevantSnippets.find((snippet) => snippet.key && matchesKeybindingEvent(snippet.key, event));
       if (keyedSnippet) {
         event.preventDefault();
         event.stopPropagation();
-        (editor.getContribution("snippetController2") as { insert: (template: string) => void } | null)?.insert(toSnippetBody(keyedSnippet.body));
+        insertSnippet(keyedSnippet);
         return;
-      }
-      const matchingBinding = normalizedConfig.keybindings.find((keybinding) => keybinding.command.startsWith("editor.") && matchesKeybindingEvent(keybinding.key, event));
-      if (!matchingBinding) {
-        return;
-      }
-      if (matchingBinding.command === "editor.insertSnippet") {
-        const snippetName = String(matchingBinding.args?.snippetName ?? "");
-        const snippet = [...normalizedConfig.markdownSnippets, ...normalizedConfig.latexSnippets].find((item) => item.name === snippetName);
-        if (snippet) {
-          event.preventDefault();
-          event.stopPropagation();
-          (editor.getContribution("snippetController2") as { insert: (template: string) => void } | null)?.insert(toSnippetBody(snippet.body));
-          return;
-        }
-      }
-      const action = pluginRuntime.getEditorAction(matchingBinding.command);
-      if (action) {
-        const handled = await action.handler({ editor, monaco, activeDocument, snippets: relevantSnippets });
-        if (handled) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
       }
     };
+    const typeDisposable = editor.onDidType((text) => {
+      if (!isArticleDocument(activeDocument) || text.length !== 1) {
+        return;
+      }
+
+      const model = editor.getModel();
+      const position = editor.getPosition();
+      if (!model || !position) {
+        return;
+      }
+
+      const snippetLanguage = getSnippetLanguage(model, position);
+      const triggerCharacters =
+        snippetLanguage === "latex" ? latexSymbolTriggerCharacters : markdownSymbolTriggerCharacters;
+
+      if (!triggerCharacters.includes(text)) {
+        return;
+      }
+
+      queueMicrotask(() => {
+        if (!editor.hasTextFocus()) {
+          return;
+        }
+
+        editor.trigger("keyboard", "editor.action.triggerSuggest", {});
+      });
+    });
     const pasteListener = async (event: ClipboardEvent) => {
       if (!isArticleDocument(activeDocument)) {
         return;
@@ -1578,14 +2376,13 @@ export function App() {
         }
       }
     };
-    const domNode = editor.getDomNode();
-    const textarea = domNode?.querySelector("textarea.inputarea");
     domNode?.addEventListener("keydown", keydownListener, true);
     domNode?.addEventListener("paste", pasteListener, true);
     textarea?.addEventListener("paste", pasteListener, true);
     window.addEventListener("paste", pasteListener, true);
     return () => {
       completionProvider.dispose();
+      typeDisposable.dispose();
       domNode?.removeEventListener("keydown", keydownListener, true);
       domNode?.removeEventListener("paste", pasteListener, true);
       textarea?.removeEventListener("paste", pasteListener, true);
@@ -1701,6 +2498,11 @@ export function App() {
           if (commandPaletteMode === "themes") {
             setThemeId(id);
             setCommandPaletteOpen(false);
+            return;
+          }
+          if (id.startsWith("render-style:create:")) {
+            setCommandPaletteOpen(false);
+            void createRenderStyleDocument(id.slice("render-style:create:".length));
             return;
           }
           const command = pluginRuntime.getCommand(id);
@@ -1834,6 +2636,66 @@ export function App() {
         </div>
       ) : null}
 
+      {previewRenderDialogOpen ? (
+        <div className="dialog-backdrop" onClick={() => setPreviewRenderDialogOpen(false)} role="presentation">
+          <div className="dialog-card preview-render-dialog" onClick={(event) => event.stopPropagation()}>
+            <div>
+              <p className="title-overline">Preview Render</p>
+              <h2>Render CSS</h2>
+              <p className="body-muted">
+                Toggle the saved `enable` values from `render.json`, or open a stylesheet under `config/render`.
+              </p>
+            </div>
+            <div className="preview-render-style-list">
+              {previewRenderStyles.length === 0 ? (
+                <p className="body-muted">No render CSS entries are configured in `render.json` yet.</p>
+              ) : (
+                previewRenderStyles.map((style) => (
+                  <div className="preview-render-style-item" key={style.directory}>
+                    <input
+                      checked={style.enable}
+                      onChange={(event) => {
+                        void toggleRenderStyleEnable(style.directory, event.target.checked);
+                      }}
+                      type="checkbox"
+                    />
+                    <div>
+                      <strong>{getRenderStyleTitle(style.directory)}</strong>
+                      <span>{getRenderStyleDocumentPath(style.directory)}</span>
+                    </div>
+                    <button
+                      className="action-button ghost"
+                      onClick={() => {
+                        setPreviewRenderDialogOpen(false);
+                        void openRenderStyleDocument(style.directory);
+                      }}
+                      type="button"
+                    >
+                      Open
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="dialog-actions">
+              <button
+                className="action-button ghost"
+                onClick={() => {
+                  setPreviewRenderDialogOpen(false);
+                  void openConfigDocument("renderConfig");
+                }}
+                type="button"
+              >
+                Open render.json
+              </button>
+              <button className="action-button primary" onClick={() => setPreviewRenderDialogOpen(false)} type="button">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {contextMenuState ? (
         <div className="context-menu-backdrop" onClick={() => setContextMenuState(null)} role="presentation">
           <div className="context-menu" style={{ left: contextMenuState.x, top: contextMenuState.y }} onClick={(event) => event.stopPropagation()}>
@@ -1915,11 +2777,45 @@ export function App() {
 
       <div className="activity-bar">
         <div className="activity-brand">KB</div>
-        <button className={`activity-button ${sidebarVisible && sidebarView === "explorer" ? "is-active" : ""}`} onClick={() => { setSidebarView("explorer"); setSidebarVisible((current) => sidebarView === "explorer" ? !current : true); }} type="button">EX</button>
-        <button className={`activity-button ${sidebarVisible && sidebarView === "search" ? "is-active" : ""}`} onClick={() => { setSidebarView("search"); setSidebarVisible((current) => sidebarView === "search" ? !current : true); }} type="button">SR</button>
-        <button className={`activity-button ${sidebarVisible && sidebarView === "plugins" ? "is-active" : ""}`} onClick={() => { setSidebarView("plugins"); setSidebarVisible((current) => sidebarView === "plugins" ? !current : true); }} type="button">PL</button>
+        <button
+          aria-label="Explorer"
+          className={`activity-button ${sidebarVisible && sidebarView === "explorer" ? "is-active" : ""}`}
+          onClick={() => {
+            setSidebarView("explorer");
+            setSidebarVisible((current) => sidebarView === "explorer" ? !current : true);
+          }}
+          title="Explorer"
+          type="button"
+        >
+          <ActivityIcon icon="explorer" />
+        </button>
+        <button
+          aria-label="Edit"
+          className={`activity-button ${sidebarVisible && sidebarView === "edit" ? "is-active" : ""}`}
+          onClick={() => {
+            setSidebarView("edit");
+            setSidebarVisible((current) => sidebarView === "edit" ? !current : true);
+          }}
+          title="Edit"
+          type="button"
+        >
+          <ActivityIcon icon="edit" />
+        </button>
+        <button
+          aria-label="Plugins"
+          className={`activity-button ${sidebarVisible && sidebarView === "plugins" ? "is-active" : ""}`}
+          onClick={() => {
+            setSidebarView("plugins");
+            setSidebarVisible((current) => sidebarView === "plugins" ? !current : true);
+          }}
+          title="Plugins"
+          type="button"
+        >
+          <ActivityIcon icon="plugins" />
+        </button>
         {sidebarViewContributions.map((view) => (
           <button
+            aria-label={view.title}
             className={`activity-button ${sidebarVisible && sidebarView === view.viewId ? "is-active" : ""}`}
             key={view.id}
             onClick={() => {
@@ -1929,10 +2825,12 @@ export function App() {
             title={view.title}
             type="button"
           >
-            {view.label}
+            <ActivityIcon icon={getSidebarViewIcon(view.viewId)} />
           </button>
         ))}
-        <button className="activity-button bottom" onClick={() => openPalette("commands")} type="button">CMD</button>
+        <button aria-label="Command Palette" className="activity-button bottom" onClick={() => openPalette("commands")} title="Command Palette" type="button">
+          <ActivityIcon icon="command" />
+        </button>
       </div>
 
       <div
@@ -1945,12 +2843,11 @@ export function App() {
           {sidebarVisible ? (
             sidebarView === "explorer" ? (
               <div className="sidebar-scroll" ref={treeRootRef}>
-                <div className="sidebar-section">
-                  <button className="action-button accent" onClick={() => void publishStaticSite()} type="button">
-                    Publish Static Site
-                  </button>
-                  {treeClipboard ? <span className="status-pill info">{treeClipboard.mode === "copy" ? "Copy" : "Cut"}: {getBaseName(treeClipboard.path)}</span> : null}
-                </div>
+                {treeClipboard ? (
+                  <div className="sidebar-section">
+                    <span className="status-pill info">{treeClipboard.mode === "copy" ? "Copy" : "Cut"}: {getBaseName(treeClipboard.path)}</span>
+                  </div>
+                ) : null}
                 <div className="sidebar-section filters-section">
                   <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Filter files" />
                   <div className="filter-inline-row">
@@ -1975,21 +2872,92 @@ export function App() {
                   {(treePayload?.fileTree ?? []).map((node) => renderFileNode(node))}
                 </div>
               </div>
-            ) : sidebarView === "search" ? (
+            ) : sidebarView === "edit" ? (
               <div className="sidebar-scroll">
                 <div className="sidebar-section">
-                  <label>
-                    <span>Search Query</span>
-                    <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search articles, tags, paths" />
-                  </label>
+                  <strong>Edit Actions</strong>
+                  <div className="edit-actions">
+                    <button className="action-button accent" onClick={() => void publishStaticSite()} type="button">
+                      Publish Static Site
+                    </button>
+                    {isArticleDocument(activeDocument) ? (
+                      <button
+                        className="action-button ghost"
+                        onClick={async () => {
+                          setBusyMessage("Updating status...");
+                          try {
+                            const updated = await api.updateStatus(
+                              activeDocument.articlePath,
+                              activeDocument.record.status === "draft" ? "published" : "draft"
+                            );
+                            const updatedDocument = buildArticleDocument(updated);
+                            setDocuments((current) => upsertDocument(current, updatedDocument));
+                            setActiveDocumentId(updatedDocument.id);
+                            draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
+                            syncEditorValuePreservingView(updatedDocument.value);
+                            schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
+                            await loadTree();
+                            setPageError(null);
+                          } catch (error) {
+                            setPageError((error as Error).message);
+                          } finally {
+                            setBusyMessage(null);
+                          }
+                        }}
+                        type="button"
+                      >
+                        {activeDocument.record.status === "draft" ? "Publish Article" : "Move To Draft"}
+                      </button>
+                    ) : null}
+                    <button className="action-button primary" disabled={!activeDocument} onClick={() => void saveActiveDocument()} type="button">
+                      Save
+                    </button>
+                  </div>
+                  {busyMessage ? <span className="status-pill info">{busyMessage}</span> : null}
+                  {pageError ? <span className="status-pill error">{pageError}</span> : null}
+                  {configPayload?.warnings.length ? <span className="status-pill warning">{configPayload.warnings.length} config warning{configPayload.warnings.length > 1 ? "s" : ""}</span> : null}
+                </div>
+                <div className="sidebar-section">
+                  <div className="sidebar-section-header">
+                    <strong>Render CSS</strong>
+                    <button
+                      className="action-button ghost"
+                      onClick={() => {
+                        setSidebarVisible(true);
+                        openPalette("commands");
+                      }}
+                      type="button"
+                    >
+                      Create Render CSS
+                    </button>
+                  </div>
+                  <p className="body-muted">Open the command palette, type a CSS file name, and create `config/render/*.css` directly.</p>
                 </div>
                 <div className="sidebar-section search-results">
-                  {articleSearchResults.length === 0 ? <div className="empty-state">No matching articles.</div> : articleSearchResults.map((article) => (
-                    <button className="search-result" key={article.path} onClick={() => void openArticleDocument(article.path)} type="button">
-                      <strong>{article.title}</strong>
-                      <span>{article.path}</span>
-                    </button>
-                  ))}
+                  {previewRenderStyles.length === 0 ? (
+                    <div className="empty-state">No render CSS entries.</div>
+                  ) : (
+                    previewRenderStyles.map((style) => (
+                      <div className="render-style-row" key={style.directory}>
+                        <label className="render-style-toggle">
+                          <input
+                            checked={style.enable}
+                            onChange={(event) => {
+                              void toggleRenderStyleEnable(style.directory, event.target.checked);
+                            }}
+                            type="checkbox"
+                          />
+                          <div className="search-result">
+                            <strong>{getRenderStyleTitle(style.directory)}</strong>
+                            <span>{getRenderStyleDocumentPath(style.directory)}</span>
+                          </div>
+                        </label>
+                        <button className="action-button ghost" onClick={() => void openRenderStyleDocument(style.directory)} type="button">
+                          Open
+                        </button>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             ) : sidebarView === "media" ? (
@@ -2155,49 +3123,6 @@ export function App() {
                 </button>
               ))}
             </div>
-            <div className="editor-toolbar">
-              <div className="toolbar-identity">
-                <span className="toolbar-title">{activeDocument?.title ?? "Select a document"}</span>
-                <span className="toolbar-path">
-                  {isArticleDocument(activeDocument)
-                    ? activeDocument.articlePath
-                    : isConfigDocument(activeDocument)
-                      ? activeDocument.configKind === "siteConfig"
-                        ? SITE_CONFIG_DOCUMENT_META.path
-                        : activeDocument.configKind === "siteThemeAtlas"
-                          ? SITE_THEME_DOCUMENT_META.path
-                        : CONFIG_DOCUMENT_META[activeDocument.configKind].path
-                      : selectedTreePath ?? ""}
-                </span>
-              </div>
-              <div className="toolbar-actions">
-                {busyMessage ? <span className="status-pill info">{busyMessage}</span> : null}
-                {pageError ? <span className="status-pill error">{pageError}</span> : null}
-                {configPayload?.warnings.length ? <span className="status-pill warning">{configPayload.warnings.length} config warning{configPayload.warnings.length > 1 ? "s" : ""}</span> : null}
-                {isArticleDocument(activeDocument) ? (
-                  <button className="action-button ghost" onClick={async () => {
-                    setBusyMessage("Updating status...");
-                    try {
-                      const updated = await api.updateStatus(activeDocument.articlePath, activeDocument.record.status === "draft" ? "published" : "draft");
-                      const updatedDocument = buildArticleDocument(updated);
-                      setDocuments((current) => upsertDocument(current, updatedDocument));
-                      setActiveDocumentId(updatedDocument.id);
-                      draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
-                      syncEditorValuePreservingView(updatedDocument.value);
-                      schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
-                      await loadTree();
-                    } catch (error) {
-                      setPageError((error as Error).message);
-                    } finally {
-                      setBusyMessage(null);
-                    }
-                  }} type="button">
-                    {activeDocument.record.status === "draft" ? "Publish Article" : "Move To Draft"}
-                  </button>
-                ) : null}
-                <button className="action-button primary" onClick={() => void saveActiveDocument()} type="button">Save</button>
-              </div>
-            </div>
             <div className="editor-surface">
               {activeDocument ? (
                 <Editor
@@ -2205,12 +3130,7 @@ export function App() {
                   beforeMount={(monaco) => {
                     monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
                       validate: true,
-                      schemas: [
-                        { uri: "inmemory://schemas/snippets.json", fileMatch: [CONFIG_DOCUMENT_META.markdownSnippets.path, CONFIG_DOCUMENT_META.latexSnippets.path], schema: jsonSchemas.snippetSchema as object },
-                        { uri: "inmemory://schemas/keybindings.json", fileMatch: [CONFIG_DOCUMENT_META.keybindings.path], schema: jsonSchemas.keybindingSchema as object },
-                        { uri: "inmemory://schemas/site.json", fileMatch: [SITE_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.siteConfigSchema as object },
-                        { uri: "inmemory://schemas/site-theme.json", fileMatch: [SITE_THEME_DOCUMENT_META.path], schema: jsonSchemas.siteThemeConfigSchema as object }
-                      ]
+                      schemas: getJsonSchemaDefinitions()
                     });
                   }}
                   defaultLanguage={activeDocument.language}
@@ -2221,22 +3141,24 @@ export function App() {
                   path={
                     activeDocument.kind === "article"
                       ? activeDocument.articlePath
-                      : activeDocument.configKind === "siteConfig"
-                        ? SITE_CONFIG_DOCUMENT_META.path
-                        : activeDocument.configKind === "siteThemeAtlas"
-                          ? SITE_THEME_DOCUMENT_META.path
-                        : CONFIG_DOCUMENT_META[activeDocument.configKind].path
+                      : activeDocument.kind === "renderStyle"
+                        ? activeDocument.editorPath
+                        : getConfigDocumentPath(activeDocument.configKind)
                   }
                   onChange={(value) => {
                     const nextValue = value ?? "";
                     draftValuesRef.current[activeDocument.id] = nextValue;
-                    const shouldBeDirty = nextValue !== activeDocument.savedValue;
                     setDocuments((current) => {
                       let changed = false;
                       const nextDocuments = current.map((document) => {
-                        if (document.id === activeDocument.id && document.dirty !== shouldBeDirty) {
+                        if (document.id !== activeDocument.id) {
+                          return document;
+                        }
+
+                        const shouldBeDirty = nextValue !== document.savedValue;
+                        if (document.dirty !== shouldBeDirty || document.value !== nextValue) {
                           changed = true;
-                          return { ...document, dirty: shouldBeDirty };
+                          return { ...document, value: nextValue, dirty: shouldBeDirty };
                         }
 
                         return document;
@@ -2263,8 +3185,11 @@ export function App() {
               role="presentation"
             />
             <aside className="preview-group">
+              <button className="action-button ghost preview-float-button" onClick={() => setPreviewRenderDialogOpen(true)} type="button">
+                Render CSS
+              </button>
               <div className="preview-scroll" ref={attachPreviewRef}>
-                <div className="preview-prose" ref={attachPreviewProseRef} />
+                <div className="preview-shadow-host" ref={attachPreviewSurfaceRef} />
               </div>
             </aside>
             </>

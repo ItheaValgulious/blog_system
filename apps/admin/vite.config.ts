@@ -17,6 +17,10 @@ export default defineConfig({
       "/media": {
         target: "http://localhost:8787",
         changeOrigin: true
+      },
+      "/render-files": {
+        target: "http://localhost:8787",
+        changeOrigin: true
       }
     }
   }

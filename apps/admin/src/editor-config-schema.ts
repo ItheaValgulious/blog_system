@@ -1,4 +1,4 @@
-import { keybindingSchema, snippetSchema } from "@blog-system/content-core";
+import { keybindingSchema, renderConfigSchema, snippetSchema } from "@blog-system/content-core";
 
 const siteConfigSchema = {
   type: "object",
@@ -52,6 +52,7 @@ const siteThemeConfigSchema = {
 export const jsonSchemas = {
   snippetSchema,
   keybindingSchema,
+  renderConfigSchema,
   siteConfigSchema,
   siteThemeConfigSchema
 };

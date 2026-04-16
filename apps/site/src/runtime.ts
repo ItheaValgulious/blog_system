@@ -16,6 +16,7 @@ export interface SiteThemeRenderArgs {
   bodyClass?: string;
   content: string;
   description: string;
+  externalStylesheets?: string[];
   headerMode?: "brand" | "nav-only";
   navigation: SiteNavigationItem[];
   siteDescription: string;
@@ -32,6 +33,7 @@ export interface SiteThemeDefinition {
 export interface SiteBuildContext {
   basePrefix: string;
   config: SiteConfig;
+  externalStylesheets: string[];
   projectRoot: string;
   publishedArticles: ArticleRecord[];
   settings: SiteBuildSettings;

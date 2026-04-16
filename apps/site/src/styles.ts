@@ -1,4 +1,4 @@
-import { resolveManagedMediaPath } from "@blog-system/content-core";
+import { highlightThemeCss, resolveManagedMediaPath } from "@blog-system/content-core";
 
 import type { SiteConfig } from "./site-config.js";
 import type { SiteThemeConfig } from "./theme-config.js";
@@ -60,11 +60,15 @@ img { max-width: 100%; display: block; }
 .side-panel { position: sticky; top: 20px; height: fit-content; }
 .prose { line-height: 1.85; }
 .prose h1, .prose h2, .prose h3 { font-family: "Iowan Old Style", "Palatino Linotype", serif; margin-top: 1.8em; }
+.prose code:not(pre code) { padding: 0.18em 0.38em; border-radius: 8px; background: rgba(15, 23, 42, 0.08); font-family: "Cascadia Code", "Fira Code", monospace; font-size: 0.92em; }
 .prose pre { overflow: auto; padding: 18px; border-radius: 18px; background: #0f172a; color: #e2e8f0; }
+.prose pre code { font-family: "Cascadia Code", "Fira Code", monospace; }
 .prose img { border-radius: 18px; border: 1px solid var(--line); }
 .pager-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 28px; }
 .tree-list { margin: 0; padding-left: 20px; }
 .search-input { width: 100%; min-height: 42px; padding: 10px 14px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8); color: var(--ink); }
+
+${highlightThemeCss}
 
 @media (max-width: 980px) {
   .site-header, .site-footer, .article-layout, .pager-row { grid-template-columns: 1fr; flex-direction: column; align-items: flex-start; }

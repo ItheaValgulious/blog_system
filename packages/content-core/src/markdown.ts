@@ -14,6 +14,11 @@ import { visit } from "unist-util-visit";
 
 import type { ArticleRenderResult, HeadingItem, MarkdownBlock } from "./types.js";
 
+interface HtmlTagBoundary {
+  kind: "opening" | "closing";
+  tagName: string;
+}
+
 function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -50,6 +55,104 @@ function isExternalResource(url: string): boolean {
 
 function normalizeBasePath(basePath: string) {
   return basePath.replace(/\/+$/g, "");
+}
+
+function classifyHtmlTagBoundary(value: unknown): HtmlTagBoundary | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("<") || trimmed.startsWith("<!--") || trimmed.startsWith("<!") || trimmed.startsWith("<?")) {
+    return null;
+  }
+
+  const closingMatch = /^<\/([A-Za-z][A-Za-z0-9:-]*)\s*>$/.exec(trimmed);
+  if (closingMatch) {
+    return {
+      kind: "closing",
+      tagName: closingMatch[1].toLowerCase()
+    };
+  }
+
+  if (trimmed.startsWith("</")) {
+    return null;
+  }
+
+  const tagNameMatch = /^<([A-Za-z][A-Za-z0-9:-]*)/.exec(trimmed);
+  if (!tagNameMatch) {
+    return null;
+  }
+
+  const tagName = tagNameMatch[1].toLowerCase();
+  let quote: "\"" | "'" | null = null;
+
+  for (let index = tagNameMatch[0].length; index < trimmed.length; index += 1) {
+    const character = trimmed[index];
+
+    if (quote) {
+      if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (character === "\"" || character === "'") {
+      quote = character;
+      continue;
+    }
+
+    if (character === "<") {
+      return null;
+    }
+
+    if (character === ">") {
+      const beforeClose = trimmed.slice(0, index).trimEnd();
+      const afterClose = trimmed.slice(index + 1).trim();
+
+      if (afterClose.length > 0 || beforeClose.endsWith("/")) {
+        return null;
+      }
+
+      return {
+        kind: "opening",
+        tagName
+      };
+    }
+  }
+
+  return null;
+}
+
+function createMarkdownBlock(
+  markdown: string,
+  startOffsetValue: unknown,
+  endOffsetValue: unknown,
+  startLineValue: unknown,
+  endLineValue: unknown
+): MarkdownBlock | null {
+  if (!Number.isFinite(startOffsetValue) || !Number.isFinite(endOffsetValue)) {
+    return null;
+  }
+
+  const startOffset = Math.max(0, Number(startOffsetValue));
+  const endOffset = Math.max(startOffset, Number(endOffsetValue));
+  if (endOffset <= startOffset) {
+    return null;
+  }
+
+  const source = markdown.slice(startOffset, endOffset);
+  if (!source.trim()) {
+    return null;
+  }
+
+  return {
+    startLine: Number.isFinite(startLineValue) ? Number(startLineValue) : 1,
+    endLine: Number.isFinite(endLineValue) ? Number(endLineValue) : Number.isFinite(startLineValue) ? Number(startLineValue) : 1,
+    startOffset,
+    endOffset,
+    source
+  };
 }
 
 export function extractHeadings(markdown: string): HeadingItem[] {
@@ -126,35 +229,72 @@ export function extractMarkdownBlocks(markdown: string): MarkdownBlock[] {
   const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(markdown) as any;
   const children = Array.isArray(tree.children) ? tree.children : [];
   const blocks: MarkdownBlock[] = [];
+  let index = 0;
 
-  for (const child of children) {
-    const startOffset = child?.position?.start?.offset;
-    const endOffset = child?.position?.end?.offset;
-    const startLine = child?.position?.start?.line;
-    const endLine = child?.position?.end?.line;
+  while (index < children.length) {
+    const child = children[index];
+    const htmlBoundary = child?.type === "html" ? classifyHtmlTagBoundary(child.value) : null;
 
-    if (!Number.isFinite(startOffset) || !Number.isFinite(endOffset)) {
-      continue;
+    if (htmlBoundary?.kind === "opening") {
+      const tagStack = [htmlBoundary.tagName];
+      let matchIndex = -1;
+
+      for (let scanIndex = index + 1; scanIndex < children.length; scanIndex += 1) {
+        const nextChild = children[scanIndex];
+        const nextBoundary = nextChild?.type === "html" ? classifyHtmlTagBoundary(nextChild.value) : null;
+
+        if (!nextBoundary) {
+          continue;
+        }
+
+        if (nextBoundary.kind === "opening") {
+          tagStack.push(nextBoundary.tagName);
+          continue;
+        }
+
+        const expectedTagName = tagStack[tagStack.length - 1];
+        if (nextBoundary.tagName !== expectedTagName) {
+          matchIndex = -1;
+          break;
+        }
+
+        tagStack.pop();
+        if (tagStack.length === 0) {
+          matchIndex = scanIndex;
+          break;
+        }
+      }
+
+      if (matchIndex !== -1) {
+        const mergedBlock = createMarkdownBlock(
+          markdown,
+          child?.position?.start?.offset,
+          children[matchIndex]?.position?.end?.offset,
+          child?.position?.start?.line,
+          children[matchIndex]?.position?.end?.line
+        );
+
+        if (mergedBlock) {
+          blocks.push(mergedBlock);
+          index = matchIndex + 1;
+          continue;
+        }
+      }
     }
 
-    const safeStart = Math.max(0, Number(startOffset));
-    const safeEnd = Math.max(safeStart, Number(endOffset));
-    if (safeEnd <= safeStart) {
-      continue;
+    const block = createMarkdownBlock(
+      markdown,
+      child?.position?.start?.offset,
+      child?.position?.end?.offset,
+      child?.position?.start?.line,
+      child?.position?.end?.line
+    );
+
+    if (block) {
+      blocks.push(block);
     }
 
-    const source = markdown.slice(safeStart, safeEnd);
-    if (!source.trim()) {
-      continue;
-    }
-
-    blocks.push({
-      startLine: Number.isFinite(startLine) ? Number(startLine) : 1,
-      endLine: Number.isFinite(endLine) ? Number(endLine) : Number.isFinite(startLine) ? Number(startLine) : 1,
-      startOffset: safeStart,
-      endOffset: safeEnd,
-      source
-    });
+    index += 1;
   }
 
   if (blocks.length === 0 && markdown.trim().length > 0) {

@@ -12,6 +12,7 @@
     "dev:admin": "npm --prefix apps/admin run dev",
     "dev:site": "npm --prefix apps/site run dev",
     "dev": "node scripts/dev.mjs",
+    "import-content": "tsx scripts/import-content.ts",
     "build": "npm run build -w packages/content-core && npm run build -w apps/server && npm run build -w apps/admin && npm run build -w apps/site",
     "test": "npm run test -w packages/content-core && npm run test -w apps/server && npm run test -w apps/admin",
     "build-site": "npm run build-site -w apps/site",

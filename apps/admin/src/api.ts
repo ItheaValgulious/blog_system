@@ -4,6 +4,7 @@ import type {
   EditorKeybinding,
   EditorSnippet,
   FileSystemNode,
+  RenderConfig,
   TagInfo
 } from "@blog-system/content-core";
 
@@ -63,6 +64,16 @@ export interface SiteThemeConfigPayload {
   raw: string;
   themeId: string;
   value: Record<string, unknown>;
+}
+
+export interface RenderConfigPayload {
+  raw: string;
+  value: RenderConfig;
+}
+
+export interface RenderStylePayload {
+  directory: string;
+  raw: string;
 }
 
 export interface ClipboardAssetPayload {
@@ -164,6 +175,30 @@ export const api = {
     return request<SiteThemeConfigPayload>("/api/site-theme-config", {
       method: "PUT",
       body: JSON.stringify({ raw, themeId })
+    });
+  },
+  getRenderConfig() {
+    return request<RenderConfigPayload>("/api/render-config");
+  },
+  saveRenderConfig(raw: string) {
+    return request<RenderConfigPayload>("/api/render-config", {
+      method: "PUT",
+      body: JSON.stringify({ raw })
+    });
+  },
+  getRenderStyle(directory: string) {
+    return request<RenderStylePayload>(`/api/render-style?directory=${encodeURIComponent(directory)}`);
+  },
+  saveRenderStyle(directory: string, raw: string) {
+    return request<RenderStylePayload>("/api/render-style", {
+      method: "PUT",
+      body: JSON.stringify({ directory, raw })
+    });
+  },
+  createRenderStyle(fileName: string) {
+    return request<RenderStylePayload & { renderConfig: RenderConfigPayload }>("/api/render-style/create", {
+      method: "POST",
+      body: JSON.stringify({ fileName })
     });
   },
   createFileSystemEntry(

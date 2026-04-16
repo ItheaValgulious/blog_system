@@ -5,7 +5,7 @@ import {
   type ArticleSummary
 } from "@blog-system/content-core";
 
-import type { SitePluginDefinition, SiteThemePluginDefinition } from "./runtime.js";
+import type { SiteBuildContext, SitePluginDefinition, SiteThemePluginDefinition } from "./runtime.js";
 
 function escapeHtml(value: string) {
   return value
@@ -38,10 +38,31 @@ function renderArticleCard(article: ArticleSummary, basePath: string) {
   </article>`;
 }
 
+function renderPageWithContext(
+  context: SiteBuildContext,
+  args: Omit<Parameters<SiteBuildContext["theme"]["renderPage"]>[0], "externalStylesheets">
+) {
+  return context.theme.renderPage({
+    ...args,
+    externalStylesheets: context.externalStylesheets
+  });
+}
+
 const atlasTheme = {
   id: "atlas",
   label: "Atlas",
-  renderPage({ basePath, bodyClass, content, description, headerMode = "brand", navigation, siteDescription, siteTitle, title }) {
+  renderPage({
+    basePath,
+    bodyClass,
+    content,
+    description,
+    externalStylesheets = [],
+    headerMode = "brand",
+    navigation,
+    siteDescription,
+    siteTitle,
+    title
+  }) {
     const headerContent =
       headerMode === "nav-only"
         ? `<header class="site-header nav-only">
@@ -66,6 +87,7 @@ const atlasTheme = {
     <title>${escapeHtml(title)}</title>
     <meta name="description" content="${escapeHtml(description)}">
     <link rel="stylesheet" href="${basePath}/assets/site.css">
+    ${externalStylesheets.map((href) => `<link rel="stylesheet" href="${escapeHtml(href)}">`).join("\n    ")}
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css">
   </head>
   <body class="${bodyClass ?? ""}">
@@ -152,7 +174,7 @@ export const homePlugin: SitePluginDefinition = {
 
     await context.writeHtml(
       "index.html",
-      context.theme.renderPage({
+      renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: body,
         description: context.config.siteDescription,
@@ -208,7 +230,7 @@ export const articlePagesPlugin: SitePluginDefinition = {
 
         await context.writeHtml(
           `${summary.urlPath.replace(context.basePrefix, "").replace(/^\/+/, "")}index.html`,
-          context.theme.renderPage({
+          renderPageWithContext(context, {
             basePath: context.basePrefix,
             content: body,
             description: summary.excerpt,
@@ -242,7 +264,7 @@ export const tagsPlugin: SitePluginDefinition = {
         .join("")}</section>`;
     await context.writeHtml(
       "tags/index.html",
-      context.theme.renderPage({
+      renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: tagIndexBody,
         description: "Browse articles by tag.",
@@ -262,7 +284,7 @@ export const tagsPlugin: SitePluginDefinition = {
             .join("")}</section>`;
         await context.writeHtml(
           `tags/${encodeURIComponent(tag.tag)}/index.html`,
-          context.theme.renderPage({
+          renderPageWithContext(context, {
             basePath: context.basePrefix,
             content: body,
             description: `Articles tagged with ${tag.tag}.`,
@@ -301,7 +323,7 @@ export const treePlugin: SitePluginDefinition = {
     const navigation = enabledNavigation(context);
     await context.writeHtml(
       "tree/index.html",
-      context.theme.renderPage({
+      renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: `<section class="hero-panel"><h1>Directory Tree</h1></section><section class="content-panel">${renderDirectoryTree(context.siteData.directories)}</section>`,
         description: "Browse the content tree.",
@@ -320,7 +342,7 @@ export const treePlugin: SitePluginDefinition = {
             .join("") || "<p>No published articles here yet.</p>"}</section>`;
         await context.writeHtml(
           `tree/${directory.path}/index.html`,
-          context.theme.renderPage({
+          renderPageWithContext(context, {
             basePath: context.basePrefix,
             content: body,
             description: `Directory ${directory.path}.`,
@@ -350,7 +372,7 @@ export const aboutPlugin: SitePluginDefinition = {
       <section class="article-panel"><div class="prose">${rendered.html}</div></section>`;
     await context.writeHtml(
       "about/index.html",
-      context.theme.renderPage({
+      renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: body,
         description: context.config.siteDescription,
@@ -393,7 +415,7 @@ export const searchPlugin: SitePluginDefinition = {
 
     await context.writeHtml(
       "search/index.html",
-      context.theme.renderPage({
+      renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: body,
         description: "Search the knowledge base.",

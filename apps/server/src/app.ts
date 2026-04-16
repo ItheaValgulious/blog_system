@@ -30,6 +30,14 @@ import {
 } from "./editor-config-service.js";
 import { createGitCommit, ensureGitRepository, getGitHistory, getGitOverview, getGitStatus } from "./git-service.js";
 import { publishSite } from "./publish-service.js";
+import {
+  createRenderStyle,
+  getRenderStylesRoot,
+  loadRenderConfig,
+  readRenderStyle,
+  saveRenderConfig,
+  saveRenderStyle
+} from "./render-config-service.js";
 import { loadSiteConfig, saveSiteConfig } from "./site-config-service.js";
 import { loadSiteThemeConfig, saveSiteThemeConfig } from "./site-theme-config-service.js";
 
@@ -273,6 +281,78 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       }
 
       res.json(await saveSiteThemeConfig(settings.configRoot, themeId, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/render-config", async (_req, res, next) => {
+    try {
+      const config = await loadRenderConfig(settings.configRoot);
+      res.json({
+        raw: config.raw,
+        value: config.value
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/render-config", async (req, res, next) => {
+    try {
+      const { raw } = req.body as { raw?: string };
+
+      if (typeof raw !== "string") {
+        res.status(400).json({ error: "raw is required." });
+        return;
+      }
+
+      res.json(await saveRenderConfig(settings.configRoot, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/render-style", async (req, res, next) => {
+    try {
+      const directory = String(req.query.directory ?? "");
+
+      if (!directory) {
+        res.status(400).json({ error: "directory is required." });
+        return;
+      }
+
+      res.json(await readRenderStyle(settings.configRoot, directory));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/render-style", async (req, res, next) => {
+    try {
+      const { directory, raw } = req.body as { directory?: string; raw?: string };
+
+      if (!directory || typeof raw !== "string") {
+        res.status(400).json({ error: "directory and raw are required." });
+        return;
+      }
+
+      res.json(await saveRenderStyle(settings.configRoot, directory, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/render-style/create", async (req, res, next) => {
+    try {
+      const { fileName } = req.body as { fileName?: string };
+
+      if (!fileName?.trim()) {
+        res.status(400).json({ error: "fileName is required." });
+        return;
+      }
+
+      res.json(await createRenderStyle(settings.configRoot, fileName));
     } catch (error) {
       next(error);
     }
@@ -533,6 +613,7 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.use("/content-files", express.static(settings.contentRoot));
   app.use("/media", express.static(settings.assetsRoot));
+  app.use("/render-files", express.static(getRenderStylesRoot(settings.configRoot)));
 
   app.get("/admin/*splat", async (_req, res, next) => {
     try {

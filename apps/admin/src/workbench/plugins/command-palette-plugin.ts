@@ -46,6 +46,14 @@ export const commandPalettePlugin: PluginDefinition = {
       }
     });
     context.registerCommand({
+      id: "preferences.openRenderConfigJson",
+      title: "Preferences: Open Render Config (JSON)",
+      keywords: ["settings", "render", "preview", "css", "json"],
+      handler(api) {
+        void api.openConfigDocument("renderConfig");
+      }
+    });
+    context.registerCommand({
       id: "preferences.openSiteThemeJson",
       title: "Preferences: Open Site Theme (JSON)",
       keywords: ["settings", "site", "theme", "colors", "json"],

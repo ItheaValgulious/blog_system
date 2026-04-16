@@ -2,21 +2,22 @@ import type * as monacoEditor from "monaco-editor";
 
 import type { ArticleRecord, EditorKeybinding, EditorSnippet } from "@blog-system/content-core";
 
-export type SidebarViewId = "explorer" | "search" | "plugins" | "media" | "git";
+export type SidebarViewId = "explorer" | "edit" | "plugins" | "media" | "git";
 export type ConfigDocumentKind =
   | "markdownSnippets"
   | "latexSnippets"
   | "keybindings"
+  | "renderConfig"
   | "siteConfig"
   | "siteThemeAtlas";
-export type WorkbenchDocumentKind = "article" | "config";
+export type WorkbenchDocumentKind = "article" | "config" | "renderStyle";
 export type SnippetLanguageId = "markdown" | "latex";
 
 export interface WorkbenchBaseDocument {
   id: string;
   kind: WorkbenchDocumentKind;
   title: string;
-  language: "markdown" | "json";
+  language: "markdown" | "json" | "css";
   value: string;
   savedValue: string;
   dirty: boolean;
@@ -34,7 +35,16 @@ export interface ConfigWorkbenchDocument extends WorkbenchBaseDocument {
   configKind: ConfigDocumentKind;
 }
 
-export type WorkbenchDocument = ArticleWorkbenchDocument | ConfigWorkbenchDocument;
+export interface RenderStyleWorkbenchDocument extends WorkbenchBaseDocument {
+  kind: "renderStyle";
+  directory: string;
+  editorPath: string;
+}
+
+export type WorkbenchDocument =
+  | ArticleWorkbenchDocument
+  | ConfigWorkbenchDocument
+  | RenderStyleWorkbenchDocument;
 
 export interface ThemeDefinition {
   id: string;
@@ -148,6 +158,7 @@ export interface PluginSetupContext {
 }
 
 export interface NormalizedSnippet extends EditorSnippet {
+  environment: SnippetLanguageId;
   prefix: string[];
 }
 

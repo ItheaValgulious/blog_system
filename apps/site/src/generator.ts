@@ -2,11 +2,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { getEnabledRenderStyleDirectories } from "@blog-system/content-core";
 import { loadWorkspacePaths } from "@blog-system/content-core/node";
 import { loadSiteData, scanArticles } from "@blog-system/content-core/node";
 
 import { sitePlugins } from "./plugins.js";
 import { createWriteHtml, createWriteTextAsset, normalizeBasePath, type SiteBuildContext } from "./runtime.js";
+import { loadRenderConfig, resolveRenderStyleSourcePath, toRenderStyleUrlPath } from "./render-config.js";
 import { loadSiteConfig } from "./site-config.js";
 import { buildSiteCss } from "./styles.js";
 import { loadSiteThemeConfig } from "./theme-config.js";
@@ -95,6 +97,21 @@ async function copyMediaLibrary(assetsRoot: string, distDir: string) {
   }
 }
 
+async function copyEnabledRenderStyles(configRoot: string, distDir: string, directories: string[]) {
+  const targetRoot = path.join(distDir, "render");
+
+  await fs.rm(targetRoot, { recursive: true, force: true });
+  await fs.mkdir(targetRoot, { recursive: true });
+
+  for (const directory of directories) {
+    const sourcePath = resolveRenderStyleSourcePath(configRoot, directory);
+    const targetPath = path.join(targetRoot, directory);
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.copyFile(sourcePath, targetPath);
+  }
+}
+
 async function buildNotFoundPage(context: SiteBuildContext) {
   const navigation = sitePlugins
     .filter((plugin) => context.config.enabledPlugins.includes(plugin.id))
@@ -105,6 +122,7 @@ async function buildNotFoundPage(context: SiteBuildContext) {
     basePath: context.basePrefix,
     content: `<section class="hero-panel"><h1>404</h1><p>The page could not be found.</p></section>`,
     description: "The page could not be found.",
+    externalStylesheets: context.externalStylesheets,
     navigation,
     siteDescription: context.config.siteDescription,
     siteTitle: context.config.siteTitle,
@@ -131,6 +149,8 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   const theme = themePlugin.theme;
   const basePrefix = normalizeBasePath(settings.basePath);
   const themeConfig = await loadSiteThemeConfig(settings.configRoot, theme.id);
+  const renderConfig = await loadRenderConfig(settings.configRoot);
+  const enabledRenderStyleDirectories = getEnabledRenderStyleDirectories(renderConfig);
 
   await fs.rm(settings.distDir, { recursive: true, force: true });
   await fs.mkdir(path.join(settings.distDir, "assets"), { recursive: true });
@@ -141,12 +161,16 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   );
   await copyContentAssets(settings.contentRoot, settings.distDir);
   await copyMediaLibrary(settings.assetsRoot, settings.distDir);
+  await copyEnabledRenderStyles(settings.configRoot, settings.distDir, enabledRenderStyleDirectories);
 
   const siteData = await loadSiteData(settings.contentRoot, basePrefix);
   const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published");
   const context: SiteBuildContext = {
     basePrefix,
     config,
+    externalStylesheets: enabledRenderStyleDirectories.map((directory) =>
+      toRenderStyleUrlPath(directory, basePrefix)
+    ),
     projectRoot: settings.projectRoot,
     publishedArticles,
     settings,
