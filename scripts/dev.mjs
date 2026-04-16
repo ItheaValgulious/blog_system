@@ -17,7 +17,7 @@ const services = [
   },
   {
     name: "admin",
-    args: ["--prefix", "apps/admin", "run", "dev"]
+    args: ["--prefix", "apps/admin", "run", "dev"]  
   },
   {
     name: "site",

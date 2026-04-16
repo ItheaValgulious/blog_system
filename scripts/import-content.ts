@@ -17,6 +17,7 @@ import { unified } from "unified";
 import { visit } from "unist-util-visit";
 
 interface CliOptions {
+  imgFolderPath: string | null;
   sourcePath: string;
   statusOverride: ArticleStatus | null;
 }
@@ -29,7 +30,6 @@ interface TextReplacement {
 
 interface RewrittenMarkdownFile {
   destinationMarkdownPath: string;
-  managedAssetSourcePaths: Set<string>;
   rewrittenContent: string;
 }
 
@@ -45,7 +45,7 @@ const IMAGE_EXTENSIONS = new Set([
 ]);
 
 function printUsage() {
-  console.log("Usage: npm run import-content -- <path> [--status draft|published]");
+  console.log("Usage: npm run import-content -- <path> [--status draft|published] [--img-folder <path>]");
 }
 
 function parseStatus(value: string): ArticleStatus {
@@ -57,6 +57,7 @@ function parseStatus(value: string): ArticleStatus {
 }
 
 function parseCliOptions(argv: string[]): CliOptions {
+  let imgFolderPath: string | null = null;
   let sourcePath: string | null = null;
   let statusOverride: ArticleStatus | null = null;
 
@@ -80,8 +81,25 @@ function parseCliOptions(argv: string[]): CliOptions {
       continue;
     }
 
+    if (argument === "--img-folder") {
+      const nextValue = argv[index + 1];
+
+      if (!nextValue) {
+        throw new Error("Missing value for --img-folder.");
+      }
+
+      imgFolderPath = path.resolve(nextValue);
+      index += 1;
+      continue;
+    }
+
     if (argument.startsWith("--status=")) {
       statusOverride = parseStatus(argument.slice("--status=".length));
+      continue;
+    }
+
+    if (argument.startsWith("--img-folder=")) {
+      imgFolderPath = path.resolve(argument.slice("--img-folder=".length));
       continue;
     }
 
@@ -101,6 +119,7 @@ function parseCliOptions(argv: string[]): CliOptions {
   }
 
   return {
+    imgFolderPath,
     sourcePath,
     statusOverride
   };
@@ -132,19 +151,13 @@ async function pathExists(targetPath: string) {
   }
 }
 
-async function movePath(sourcePath: string, destinationPath: string) {
+async function copyPath(sourcePath: string, destinationPath: string) {
   await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-
-  try {
-    await fs.rename(sourcePath, destinationPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EXDEV") {
-      throw error;
-    }
-
-    await fs.cp(sourcePath, destinationPath, { recursive: true });
-    await fs.rm(sourcePath, { recursive: true, force: true });
-  }
+  await fs.cp(sourcePath, destinationPath, {
+    recursive: true,
+    errorOnExist: true,
+    force: false
+  });
 }
 
 async function collectMarkdownFiles(targetPath: string): Promise<string[]> {
@@ -199,7 +212,7 @@ function isAbsoluteFileReference(value: string) {
   return path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value);
 }
 
-function resolveLocalImagePath(articlePath: string, rawUrl: string) {
+function resolveLocalImagePath(articlePath: string, rawUrl: string, imgFolderPath: string | null) {
   const { pathPart } = splitResourceReference(rawUrl);
 
   if (!pathPart) {
@@ -214,9 +227,11 @@ function resolveLocalImagePath(articlePath: string, rawUrl: string) {
     return null;
   }
 
-  const resolvedPath = isAbsoluteFileReference(pathPart)
-    ? path.resolve(pathPart)
-    : path.resolve(path.dirname(articlePath), pathPart);
+  const resolvedPath = pathPart.startsWith("/") && imgFolderPath
+    ? path.resolve(imgFolderPath, pathPart.replace(/^\/+/, ""))
+    : isAbsoluteFileReference(pathPart)
+      ? path.resolve(pathPart)
+      : path.resolve(path.dirname(articlePath), pathPart);
 
   if (!IMAGE_EXTENSIONS.has(path.extname(resolvedPath).toLowerCase())) {
     return null;
@@ -319,14 +334,14 @@ async function rewriteMarkdownFile(
   rawContent: string,
   articlePath: string,
   assetsRoot: string,
-  assetCache: Map<string, string>
+  assetCache: Map<string, string>,
+  imgFolderPath: string | null
 ) {
-  const managedAssetSourcePaths = new Set<string>();
   const replacements: TextReplacement[] = [];
   const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(rawContent) as any;
 
   const resolveManagedReference = async (rawUrl: string) => {
-    const localImagePath = resolveLocalImagePath(articlePath, rawUrl);
+    const localImagePath = resolveLocalImagePath(articlePath, rawUrl, imgFolderPath);
 
     if (!localImagePath) {
       return null;
@@ -336,7 +351,6 @@ async function rewriteMarkdownFile(
       throw new Error(`Referenced image "${rawUrl}" in "${articlePath}" could not be found.`);
     }
 
-    managedAssetSourcePaths.add(localImagePath);
     return storeManagedAsset(assetsRoot, localImagePath, assetCache);
   };
 
@@ -406,7 +420,6 @@ async function rewriteMarkdownFile(
   await Promise.all(pendingReplacements);
 
   return {
-    managedAssetSourcePaths,
     rewrittenContent: applyTextReplacements(rawContent, replacements)
   };
 }
@@ -456,11 +469,16 @@ async function importContent(options: CliOptions) {
   const markdownFiles = await collectMarkdownFiles(sourcePath);
   const assetCache = new Map<string, string>();
   const rewrittenMarkdownFiles: RewrittenMarkdownFile[] = [];
-  const assetSourcePaths = new Set<string>();
 
   for (const markdownFile of markdownFiles) {
     const rawContent = await fs.readFile(markdownFile, "utf8");
-    const rewritten = await rewriteMarkdownFile(rawContent, markdownFile, workspacePaths.assetsRoot, assetCache);
+    const rewritten = await rewriteMarkdownFile(
+      rawContent,
+      markdownFile,
+      workspacePaths.assetsRoot,
+      assetCache,
+      options.imgFolderPath
+    );
     const relativeFilePath = sourceIsDirectory ? path.relative(sourcePath, markdownFile) : path.basename(markdownFile);
     const destinationMarkdownPath = sourceIsDirectory
       ? path.join(destinationRootPath, relativeFilePath)
@@ -469,18 +487,13 @@ async function importContent(options: CliOptions) {
 
     rewrittenMarkdownFiles.push({
       destinationMarkdownPath,
-      managedAssetSourcePaths: rewritten.managedAssetSourcePaths,
       rewrittenContent: applyStatusOverride(articleRelativePath, rewritten.rewrittenContent, options.statusOverride)
     });
-
-    for (const assetSourcePath of rewritten.managedAssetSourcePaths) {
-      assetSourcePaths.add(assetSourcePath);
-    }
   }
 
   await fs.mkdir(workspacePaths.contentRoot, { recursive: true });
   await fs.mkdir(workspacePaths.assetsRoot, { recursive: true });
-  await movePath(sourcePath, destinationRootPath);
+  await copyPath(sourcePath, destinationRootPath);
 
   for (const rewrittenMarkdownFile of rewrittenMarkdownFiles) {
     await fs.writeFile(
@@ -490,22 +503,16 @@ async function importContent(options: CliOptions) {
     );
   }
 
-  for (const assetSourcePath of assetSourcePaths) {
-    if (sourceIsDirectory && isPathInside(assetSourcePath, sourcePath)) {
-      const movedAssetPath = path.join(destinationRootPath, path.relative(sourcePath, assetSourcePath));
-      await fs.rm(movedAssetPath, { force: true });
-      continue;
-    }
-
-    await fs.rm(assetSourcePath, { force: true });
-  }
-
-  console.log(`Imported "${sourcePath}" into "${destinationRootPath}".`);
+  console.log(`Copied "${sourcePath}" into "${destinationRootPath}".`);
   console.log(`Rewritten Markdown files: ${rewrittenMarkdownFiles.length}`);
   console.log(`Managed media assets: ${assetCache.size}`);
 
   if (options.statusOverride) {
     console.log(`Applied status override: ${options.statusOverride}`);
+  }
+
+  if (options.imgFolderPath) {
+    console.log(`Applied image folder prefix: ${options.imgFolderPath}`);
   }
 }
 
