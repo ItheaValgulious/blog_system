@@ -90,6 +90,35 @@ test("publishing a draft writes the publish date", async () => {
   assert.match(response.body.rawContent, /^status: published/m);
 });
 
+test("publishing keeps an existing date unchanged", async () => {
+  const { agent, contentRoot } = await setupTempApp();
+  const existingDate = "2024-01-02T03:04:05.000Z";
+  await fs.writeFile(
+    path.join(contentRoot, "notes", "dated-draft.md"),
+    `---
+title: Dated Draft
+status: draft
+date: ${existingDate}
+---
+
+# Dated Draft
+`,
+    "utf8"
+  );
+
+  const response = await agent
+    .post("/api/article/status")
+    .send({
+      path: "notes/dated-draft.md",
+      status: "published"
+    })
+    .expect(200);
+
+  assert.equal(response.body.date, existingDate);
+  assert.match(response.body.rawContent, /^date:/m);
+  assert.match(response.body.rawContent, new RegExp(existingDate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
 test("pasting an image stores it in the workspace media library", async () => {
   const { agent, assetsRoot } = await setupTempApp();
   const response = await agent
@@ -111,55 +140,6 @@ test("pasting an image stores it in the workspace media library", async () => {
 
   const files = await fs.readdir(assetsRoot);
   assert.equal(files.length, 1);
-});
-
-test("render config endpoint returns defaults and persists updates", async () => {
-  const { agent, tempRoot } = await setupTempApp();
-
-  const initial = await agent.get("/api/render-config").expect(200);
-  assert.deepEqual(initial.body.value.styles, []);
-
-  const saved = await agent
-    .put("/api/render-config")
-    .send({
-      raw: JSON.stringify(
-        {
-          styles: [
-            {
-              directory: "water.css",
-              enable: true
-            }
-          ]
-        },
-        null,
-        2
-      )
-    })
-    .expect(200);
-
-  assert.equal(saved.body.value.styles[0].directory, "water.css");
-
-  const persistedRaw = await fs.readFile(path.join(tempRoot, "config", "render.json"), "utf8");
-  assert.match(persistedRaw, /"water\.css"/);
-});
-
-test("render style endpoint creates css file and registers it in render.json", async () => {
-  const { agent, tempRoot } = await setupTempApp();
-
-  const created = await agent
-    .post("/api/render-style/create")
-    .send({
-      fileName: "paper"
-    })
-    .expect(200);
-
-  assert.equal(created.body.directory, "paper.css");
-  assert.match(created.body.raw, /config\/render\/paper\.css/);
-  assert.equal(created.body.renderConfig.value.styles[0].directory, "paper.css");
-  assert.equal(created.body.renderConfig.value.styles[0].enable, true);
-
-  const cssRaw = await fs.readFile(path.join(tempRoot, "config", "render", "paper.css"), "utf8");
-  assert.match(cssRaw, /paper\.css/);
 });
 
 test("editor config endpoint accepts VS Code style snippet objects and jsonc", async () => {
@@ -296,4 +276,65 @@ test("directory metadata tags apply to files created beneath the directory", asy
 
   const childRaw = await fs.readFile(path.join(contentRoot, "notes", "tagged", "child.md"), "utf8");
   assert.match(childRaw, /- folder-tag/);
+});
+
+test("creating an article with a duplicate title returns a conflict payload", async () => {
+  const { agent } = await setupTempApp();
+
+  const response = await agent
+    .post("/api/fs/create")
+    .send({
+      parentPath: "notes",
+      entryType: "file",
+      name: "duplicate-title.md",
+      metadata: {
+        title: "Draft Note"
+      }
+    })
+    .expect(409);
+
+  assert.equal(response.body.code, "duplicate_article_title");
+  assert.equal(response.body.conflicts[0].path, "notes/draft.md");
+});
+
+test("config endpoints expose markdown block rules and admin home defaults", async () => {
+  const { agent } = await setupTempApp();
+
+  const markdownBlocks = await agent.get("/api/markdown-block-config").expect(200);
+  assert.deepEqual(markdownBlocks.body.value.rules, []);
+
+  const adminHome = await agent.get("/api/admin-home-config").expect(200);
+  assert.deepEqual(adminHome.body.value.widgetOrder, []);
+  assert.deepEqual(adminHome.body.value.widgets, {});
+});
+
+test("theme group endpoints seed atlas and allow group asset creation", async () => {
+  const { agent, tempRoot } = await setupTempApp();
+
+  const seeded = await agent.get("/api/theme-groups").expect(200);
+  assert.equal(seeded.body.groups[0].groupId, "atlas");
+  assert.equal(seeded.body.groups[0].files.length >= 2, true);
+
+  const createdGroup = await agent
+    .post("/api/theme-group/create")
+    .send({
+      groupId: "chalk"
+    })
+    .expect(200);
+
+  assert.equal(createdGroup.body.groupId, "chalk");
+
+  const createdAsset = await agent
+    .post("/api/theme-asset/create")
+    .send({
+      groupId: "chalk",
+      fileName: "notes",
+      type: "css",
+      adminPreview: true
+    })
+    .expect(200);
+
+  assert.equal(createdAsset.body.fileName, "notes.css");
+  assert.equal(createdAsset.body.adminPreview, true);
+  await fs.access(path.join(tempRoot, "config", "theme", "chalk", "notes.css"));
 });

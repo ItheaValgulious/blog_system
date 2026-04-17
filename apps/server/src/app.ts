@@ -8,12 +8,14 @@ import session from "express-session";
 import { readArticle } from "@blog-system/content-core/node";
 
 import type { ServerSettings } from "./config.js";
+import { loadAdminHomeConfig, saveAdminHomeConfig } from "./admin-home-config-service.js";
 import { listMediaAssets, savePastedImages } from "./asset-service.js";
 import { getDefaultSettings } from "./config.js";
 import {
   createArticleFile,
   createFileSystemEntry,
   deleteFileSystemEntry,
+  DuplicateArticleTitleError,
   ensureContentRoot,
   getTreePayload,
   renameFileSystemEntry,
@@ -30,16 +32,22 @@ import {
 } from "./editor-config-service.js";
 import { createGitCommit, ensureGitRepository, getGitHistory, getGitOverview, getGitStatus } from "./git-service.js";
 import { publishSite } from "./publish-service.js";
-import {
-  createRenderStyle,
-  getRenderStylesRoot,
-  loadRenderConfig,
-  readRenderStyle,
-  saveRenderConfig,
-  saveRenderStyle
-} from "./render-config-service.js";
+import { loadMarkdownBlockConfig, saveMarkdownBlockConfig } from "./markdown-block-config-service.js";
 import { loadSiteConfig, saveSiteConfig } from "./site-config-service.js";
-import { loadSiteThemeConfig, saveSiteThemeConfig } from "./site-theme-config-service.js";
+import {
+  createThemeAsset,
+  createThemeGroup,
+  deleteThemeAsset,
+  deleteThemeGroup,
+  getThemeGroupsRoot,
+  listThemeGroups,
+  readThemeAsset,
+  readThemeGroupConfig,
+  renameThemeAsset,
+  renameThemeGroup,
+  saveThemeAsset,
+  saveThemeGroupConfig
+} from "./theme-group-service.js";
 
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!req.session.isAuthenticated) {
@@ -257,48 +265,15 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
     }
   });
 
-  app.get("/api/site-theme-config", async (req, res, next) => {
+  app.get("/api/markdown-block-config", async (_req, res, next) => {
     try {
-      const themeId = String(req.query.theme ?? "atlas");
-      const config = await loadSiteThemeConfig(settings.configRoot, themeId);
-      res.json({
-        raw: config.raw,
-        themeId,
-        value: config.value
-      });
+      res.json(await loadMarkdownBlockConfig(settings.configRoot));
     } catch (error) {
       next(error);
     }
   });
 
-  app.put("/api/site-theme-config", async (req, res, next) => {
-    try {
-      const { raw, themeId = "atlas" } = req.body as { raw?: string; themeId?: string };
-
-      if (typeof raw !== "string") {
-        res.status(400).json({ error: "raw is required." });
-        return;
-      }
-
-      res.json(await saveSiteThemeConfig(settings.configRoot, themeId, raw));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.get("/api/render-config", async (_req, res, next) => {
-    try {
-      const config = await loadRenderConfig(settings.configRoot);
-      res.json({
-        raw: config.raw,
-        value: config.value
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.put("/api/render-config", async (req, res, next) => {
+  app.put("/api/markdown-block-config", async (req, res, next) => {
     try {
       const { raw } = req.body as { raw?: string };
 
@@ -307,52 +282,198 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
         return;
       }
 
-      res.json(await saveRenderConfig(settings.configRoot, raw));
+      res.json(await saveMarkdownBlockConfig(settings.configRoot, raw));
     } catch (error) {
       next(error);
     }
   });
 
-  app.get("/api/render-style", async (req, res, next) => {
+  app.get("/api/admin-home-config", async (_req, res, next) => {
     try {
-      const directory = String(req.query.directory ?? "");
-
-      if (!directory) {
-        res.status(400).json({ error: "directory is required." });
-        return;
-      }
-
-      res.json(await readRenderStyle(settings.configRoot, directory));
+      res.json(await loadAdminHomeConfig(settings.configRoot));
     } catch (error) {
       next(error);
     }
   });
 
-  app.put("/api/render-style", async (req, res, next) => {
+  app.put("/api/admin-home-config", async (req, res, next) => {
     try {
-      const { directory, raw } = req.body as { directory?: string; raw?: string };
+      const { raw } = req.body as { raw?: string };
 
-      if (!directory || typeof raw !== "string") {
-        res.status(400).json({ error: "directory and raw are required." });
+      if (typeof raw !== "string") {
+        res.status(400).json({ error: "raw is required." });
         return;
       }
 
-      res.json(await saveRenderStyle(settings.configRoot, directory, raw));
+      res.json(await saveAdminHomeConfig(settings.configRoot, raw));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post("/api/render-style/create", async (req, res, next) => {
+  app.get("/api/theme-groups", async (_req, res, next) => {
     try {
-      const { fileName } = req.body as { fileName?: string };
+      res.json(await listThemeGroups(settings.configRoot));
+    } catch (error) {
+      next(error);
+    }
+  });
 
-      if (!fileName?.trim()) {
-        res.status(400).json({ error: "fileName is required." });
+  app.get("/api/theme-group", async (req, res, next) => {
+    try {
+      const groupId = String(req.query.group ?? "");
+
+      if (!groupId) {
+        res.status(400).json({ error: "group is required." });
         return;
       }
 
-      res.json(await createRenderStyle(settings.configRoot, fileName));
+      res.json(await readThemeGroupConfig(settings.configRoot, groupId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/theme-group", async (req, res, next) => {
+    try {
+      const { groupId, raw } = req.body as { groupId?: string; raw?: string };
+
+      if (!groupId || typeof raw !== "string") {
+        res.status(400).json({ error: "groupId and raw are required." });
+        return;
+      }
+
+      res.json(await saveThemeGroupConfig(settings.configRoot, groupId, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/theme-group/create", async (req, res, next) => {
+    try {
+      const { groupId } = req.body as { groupId?: string };
+
+      if (!groupId?.trim()) {
+        res.status(400).json({ error: "groupId is required." });
+        return;
+      }
+
+      res.json(await createThemeGroup(settings.configRoot, groupId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/theme-group/rename", async (req, res, next) => {
+    try {
+      const { groupId, nextGroupId } = req.body as { groupId?: string; nextGroupId?: string };
+
+      if (!groupId || !nextGroupId?.trim()) {
+        res.status(400).json({ error: "groupId and nextGroupId are required." });
+        return;
+      }
+
+      res.json(await renameThemeGroup(settings.configRoot, groupId, nextGroupId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/theme-group/delete", async (req, res, next) => {
+    try {
+      const { groupId } = req.body as { groupId?: string };
+
+      if (!groupId) {
+        res.status(400).json({ error: "groupId is required." });
+        return;
+      }
+
+      res.json(await deleteThemeGroup(settings.configRoot, groupId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/theme-asset", async (req, res, next) => {
+    try {
+      const groupId = String(req.query.group ?? "");
+      const fileName = String(req.query.file ?? "");
+
+      if (!groupId || !fileName) {
+        res.status(400).json({ error: "group and file are required." });
+        return;
+      }
+
+      res.json(await readThemeAsset(settings.configRoot, groupId, fileName));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/theme-asset", async (req, res, next) => {
+    try {
+      const { groupId, fileName, raw } = req.body as { groupId?: string; fileName?: string; raw?: string };
+
+      if (!groupId || !fileName || typeof raw !== "string") {
+        res.status(400).json({ error: "groupId, fileName, and raw are required." });
+        return;
+      }
+
+      res.json(await saveThemeAsset(settings.configRoot, groupId, fileName, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/theme-asset/create", async (req, res, next) => {
+    try {
+      const { adminPreview = false, fileName, groupId, type } = req.body as {
+        adminPreview?: boolean;
+        fileName?: string;
+        groupId?: string;
+        type?: "css" | "js";
+      };
+
+      if (!groupId || !fileName?.trim() || (type !== "css" && type !== "js")) {
+        res.status(400).json({ error: "groupId, fileName, and type are required." });
+        return;
+      }
+
+      res.json(await createThemeAsset(settings.configRoot, groupId, fileName, type, adminPreview === true));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/theme-asset/rename", async (req, res, next) => {
+    try {
+      const { fileName, groupId, nextFileName } = req.body as {
+        fileName?: string;
+        groupId?: string;
+        nextFileName?: string;
+      };
+
+      if (!groupId || !fileName || !nextFileName?.trim()) {
+        res.status(400).json({ error: "groupId, fileName, and nextFileName are required." });
+        return;
+      }
+
+      res.json(await renameThemeAsset(settings.configRoot, groupId, fileName, nextFileName));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/theme-asset/delete", async (req, res, next) => {
+    try {
+      const { fileName, groupId } = req.body as { fileName?: string; groupId?: string };
+
+      if (!groupId || !fileName) {
+        res.status(400).json({ error: "groupId and fileName are required." });
+        return;
+      }
+
+      res.json(await deleteThemeAsset(settings.configRoot, groupId, fileName));
     } catch (error) {
       next(error);
     }
@@ -360,11 +481,12 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.post("/api/fs/create", async (req, res, next) => {
     try {
-      const { parentPath = "", entryType, name, metadata } = req.body as {
+      const { parentPath = "", entryType, name, metadata, allowDuplicateTitle } = req.body as {
         parentPath?: string;
         entryType?: "file" | "directory";
         name?: string;
         metadata?: Record<string, unknown>;
+        allowDuplicateTitle?: boolean;
       };
 
       if ((entryType !== "file" && entryType !== "directory") || !name?.trim()) {
@@ -372,7 +494,11 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
         return;
       }
 
-      res.json(await createFileSystemEntry(settings.contentRoot, parentPath, entryType, name, metadata));
+      res.json(
+        await createFileSystemEntry(settings.contentRoot, parentPath, entryType, name, metadata, {
+          allowDuplicateTitle
+        })
+      );
     } catch (error) {
       next(error);
     }
@@ -380,9 +506,11 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.post("/api/fs/rename", async (req, res, next) => {
     try {
-      const { path: relativePath, nextName } = req.body as {
+      const { path: relativePath, nextName, title, allowDuplicateTitle } = req.body as {
         path?: string;
         nextName?: string;
+        title?: string;
+        allowDuplicateTitle?: boolean;
       };
 
       if (!relativePath || !nextName?.trim()) {
@@ -390,7 +518,12 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
         return;
       }
 
-      res.json(await renameFileSystemEntry(settings.contentRoot, relativePath, nextName));
+      res.json(
+        await renameFileSystemEntry(settings.contentRoot, relativePath, nextName, {
+          allowDuplicateTitle,
+          title
+        })
+      );
     } catch (error) {
       next(error);
     }
@@ -613,7 +746,7 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.use("/content-files", express.static(settings.contentRoot));
   app.use("/media", express.static(settings.assetsRoot));
-  app.use("/render-files", express.static(getRenderStylesRoot(settings.configRoot)));
+  app.use("/theme-files", express.static(getThemeGroupsRoot(settings.configRoot)));
 
   app.get("/admin/*splat", async (_req, res, next) => {
     try {
@@ -626,6 +759,15 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
   });
 
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (error instanceof DuplicateArticleTitleError) {
+      res.status(409).json({
+        code: error.code,
+        conflicts: error.conflicts,
+        error: error.message
+      });
+      return;
+    }
+
     const message = error instanceof Error ? error.message : "Unknown server error.";
     res.status(500).json({ error: message });
   });

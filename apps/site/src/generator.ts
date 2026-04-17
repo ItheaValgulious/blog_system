@@ -2,16 +2,16 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getEnabledRenderStyleDirectories } from "@blog-system/content-core";
+import { rewriteManagedMediaTextReferences, type ThemeAssetConfig } from "@blog-system/content-core";
+import type { ArticleRecord } from "@blog-system/content-core";
 import { loadWorkspacePaths } from "@blog-system/content-core/node";
 import { loadSiteData, scanArticles } from "@blog-system/content-core/node";
 
 import { sitePlugins } from "./plugins.js";
+import { loadMarkdownBlockConfig } from "./markdown-block-config.js";
 import { createWriteHtml, createWriteTextAsset, normalizeBasePath, type SiteBuildContext } from "./runtime.js";
-import { loadRenderConfig, resolveRenderStyleSourcePath, toRenderStyleUrlPath } from "./render-config.js";
 import { loadSiteConfig } from "./site-config.js";
-import { buildSiteCss } from "./styles.js";
-import { loadSiteThemeConfig } from "./theme-config.js";
+import { getThemeGroupsRoot, listEnabledThemeAssets } from "./theme-groups.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFile);
@@ -97,18 +97,34 @@ async function copyMediaLibrary(assetsRoot: string, distDir: string) {
   }
 }
 
-async function copyEnabledRenderStyles(configRoot: string, distDir: string, directories: string[]) {
-  const targetRoot = path.join(distDir, "render");
+async function copyEnabledThemeAssets(
+  configRoot: string,
+  distDir: string,
+  assets: Array<ThemeAssetConfig & { assetPath: string }>,
+  basePrefix: string
+) {
+  const sourceRoot = getThemeGroupsRoot(configRoot);
+  const targetRoot = path.join(distDir, "theme");
 
   await fs.rm(targetRoot, { recursive: true, force: true });
   await fs.mkdir(targetRoot, { recursive: true });
 
-  for (const directory of directories) {
-    const sourcePath = resolveRenderStyleSourcePath(configRoot, directory);
-    const targetPath = path.join(targetRoot, directory);
+  for (const asset of assets) {
+    const assetPath = asset.assetPath;
+    const sourcePath = path.join(sourceRoot, assetPath);
+    const targetPath = path.join(targetRoot, assetPath);
 
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
-    await fs.copyFile(sourcePath, targetPath);
+    if (asset.type === "css" || asset.type === "js") {
+      const raw = await fs.readFile(sourcePath, "utf8");
+      await fs.writeFile(
+        targetPath,
+        rewriteManagedMediaTextReferences(raw, `${basePrefix}/media`),
+        "utf8"
+      );
+    } else {
+      await fs.copyFile(sourcePath, targetPath);
+    }
   }
 }
 
@@ -120,7 +136,7 @@ async function buildNotFoundPage(context: SiteBuildContext) {
 
   const html = context.theme.renderPage({
     basePath: context.basePrefix,
-    content: `<section class="hero-panel"><h1>404</h1><p>The page could not be found.</p></section>`,
+    content: `<section class="subhero-panel"><h1>404</h1><p>The page could not be found.</p></section>`,
     description: "The page could not be found.",
     externalStylesheets: context.externalStylesheets,
     navigation,
@@ -132,45 +148,62 @@ async function buildNotFoundPage(context: SiteBuildContext) {
   await context.writeHtml("404.html", html);
 }
 
+function resolveAboutArticle(publishedArticles: ArticleRecord[]) {
+  const matches = publishedArticles.filter(
+    (article) => article.title.trim().toLowerCase() === "about"
+  );
+
+  if (matches.length > 1) {
+    throw new Error(
+      `Multiple published articles use the title "about": ${matches.map((article) => article.path).join(", ")}`
+    );
+  }
+
+  return matches[0] ?? null;
+}
+
 export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   const settings = {
     ...getSiteSettings(),
     ...customSettings
   };
   const config = await loadSiteConfig(settings.configRoot);
-  const themePlugin =
-    sitePlugins.find((candidate) => candidate.kind === "theme" && candidate.id === config.theme) ??
-    sitePlugins.find((candidate) => candidate.kind === "theme");
+  const themePlugin = sitePlugins.find((candidate) => candidate.kind === "theme");
 
   if (!themePlugin || themePlugin.kind !== "theme") {
-    throw new Error(`Theme plugin "${config.theme}" could not be resolved.`);
+    throw new Error("No site layout theme plugin could be resolved.");
   }
 
   const theme = themePlugin.theme;
   const basePrefix = normalizeBasePath(settings.basePath);
-  const themeConfig = await loadSiteThemeConfig(settings.configRoot, theme.id);
-  const renderConfig = await loadRenderConfig(settings.configRoot);
-  const enabledRenderStyleDirectories = getEnabledRenderStyleDirectories(renderConfig);
+  const markdownBlockConfig = await loadMarkdownBlockConfig(settings.configRoot);
+  const enabledThemeAssets = await listEnabledThemeAssets(settings.configRoot);
 
   await fs.rm(settings.distDir, { recursive: true, force: true });
   await fs.mkdir(path.join(settings.distDir, "assets"), { recursive: true });
-  await fs.writeFile(
-    path.join(settings.distDir, "assets", "site.css"),
-    buildSiteCss(themeConfig, config, basePrefix),
-    "utf8"
-  );
   await copyContentAssets(settings.contentRoot, settings.distDir);
   await copyMediaLibrary(settings.assetsRoot, settings.distDir);
-  await copyEnabledRenderStyles(settings.configRoot, settings.distDir, enabledRenderStyleDirectories);
+  await copyEnabledThemeAssets(
+    settings.configRoot,
+    settings.distDir,
+    enabledThemeAssets,
+    basePrefix
+  );
 
   const siteData = await loadSiteData(settings.contentRoot, basePrefix);
   const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published");
+  const aboutArticle = resolveAboutArticle(publishedArticles);
   const context: SiteBuildContext = {
+    aboutArticle,
     basePrefix,
     config,
-    externalStylesheets: enabledRenderStyleDirectories.map((directory) =>
-      toRenderStyleUrlPath(directory, basePrefix)
-    ),
+    externalScripts: enabledThemeAssets
+      .filter((asset) => asset.type === "js")
+      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    externalStylesheets: enabledThemeAssets
+      .filter((asset) => asset.type === "css")
+      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    markdownBlockConfig,
     projectRoot: settings.projectRoot,
     publishedArticles,
     settings,

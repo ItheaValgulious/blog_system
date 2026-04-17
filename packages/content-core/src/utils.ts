@@ -106,12 +106,18 @@ export function normalizeFrontmatter(
   const { state: legacyState, ...rest } = input as ArticleFrontmatter & {
     state?: unknown;
   };
+  const rawDate = rest.date as unknown;
+  const normalizedDateValue =
+    typeof rawDate === "string"
+      ? rawDate.trim()
+      : rawDate instanceof Date && Number.isFinite(rawDate.valueOf())
+        ? rawDate.toISOString()
+        : undefined;
   const title =
     typeof rest.title === "string" && rest.title.trim()
       ? rest.title.trim()
       : titleFromMarkdownBody(body, relativePath);
-  const date =
-    typeof rest.date === "string" && rest.date.trim() ? rest.date.trim() : undefined;
+  const date = normalizedDateValue ? normalizedDateValue : undefined;
   const top = normalizeTop(rest.top);
   const slug =
     typeof rest.slug === "string" && rest.slug.trim() ? rest.slug.trim() : undefined;

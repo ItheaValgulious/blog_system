@@ -1,11 +1,14 @@
 import {
   renderMarkdownWithKatex,
+  resolveManagedMediaPath,
   rewriteManagedMediaUrls,
   rewriteRelativeAssetUrls,
   type ArticleSummary
 } from "@blog-system/content-core";
 
 import type { SiteBuildContext, SitePluginDefinition, SiteThemePluginDefinition } from "./runtime.js";
+
+const HOME_PAGE_SIZE = 12;
 
 function escapeHtml(value: string) {
   return value
@@ -17,6 +20,10 @@ function escapeHtml(value: string) {
 }
 
 function renderTagRow(article: ArticleSummary, basePath: string) {
+  if (article.tags.length === 0) {
+    return "";
+  }
+
   return article.tags
     .map(
       (tag) =>
@@ -25,27 +32,76 @@ function renderTagRow(article: ArticleSummary, basePath: string) {
     .join("");
 }
 
+function renderArticleMeta(article: ArticleSummary) {
+  return [
+    article.date ? `<span>${escapeHtml(article.date.slice(0, 10))}</span>` : "",
+    article.directory ? `<span>${escapeHtml(article.directory)}</span>` : "<span>root</span>",
+    article.top > 0 ? `<span>top ${article.top}</span>` : ""
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
 function renderArticleCard(article: ArticleSummary, basePath: string) {
-  return `<article class="post-card">
+  return `<article class="post-entry">
+    <div class="entry-pencil-line" aria-hidden="true"></div>
+    <div class="entry-meta">${renderArticleMeta(article)}</div>
     <h2><a href="${article.urlPath}">${escapeHtml(article.title)}</a></h2>
-    <div class="meta-row">
-      <span>${escapeHtml(article.status)}</span>
-      <span>top ${article.top}</span>
-      ${article.date ? `<span>${escapeHtml(article.date.slice(0, 10))}</span>` : ""}
-    </div>
     <p>${escapeHtml(article.excerpt)}</p>
-    <div class="tag-row">${renderTagRow(article, basePath)}</div>
+    <div class="entry-footer">
+      <span class="entry-path">${escapeHtml(article.path)}</span>
+      <div class="tag-row">${renderTagRow(article, basePath)}</div>
+    </div>
   </article>`;
+}
+
+function renderPagination(basePrefix: string, currentPage: number, totalPages: number) {
+  if (totalPages <= 1) {
+    return "";
+  }
+
+  const hrefForPage = (pageNumber: number) =>
+    pageNumber === 1 ? `${basePrefix}/` : `${basePrefix}/page/${pageNumber}/`;
+
+  return `<nav class="pagination" aria-label="Pagination">
+    <a class="pagination-link ${currentPage === 1 ? "is-disabled" : ""}" ${currentPage === 1 ? "aria-disabled=\"true\"" : `href="${hrefForPage(currentPage - 1)}"`}>Previous</a>
+    <div class="pagination-pages">
+      ${Array.from({ length: totalPages }, (_, index) => {
+        const pageNumber = index + 1;
+        return `<a class="pagination-page ${pageNumber === currentPage ? "is-active" : ""}" href="${hrefForPage(pageNumber)}">${pageNumber}</a>`;
+      }).join("")}
+    </div>
+    <a class="pagination-link ${currentPage === totalPages ? "is-disabled" : ""}" ${currentPage === totalPages ? "aria-disabled=\"true\"" : `href="${hrefForPage(currentPage + 1)}"`}>Next</a>
+  </nav>`;
 }
 
 function renderPageWithContext(
   context: SiteBuildContext,
-  args: Omit<Parameters<SiteBuildContext["theme"]["renderPage"]>[0], "externalStylesheets">
+  args: Omit<
+    Parameters<SiteBuildContext["theme"]["renderPage"]>[0],
+    "externalScripts" | "externalStylesheets" | "siteStyleVariables"
+  >
 ) {
   return context.theme.renderPage({
     ...args,
-    externalStylesheets: context.externalStylesheets
+    externalScripts: context.externalScripts,
+    externalStylesheets: context.externalStylesheets,
+    siteStyleVariables: context.config.backgroundImage
+      ? {
+          "--site-background-image": `url("${resolveManagedMediaPath(context.config.backgroundImage, `${context.basePrefix}/media`)}")`
+        }
+      : undefined
   });
+}
+
+function chunkArticles(articles: ArticleSummary[], size: number) {
+  const pages: ArticleSummary[][] = [];
+
+  for (let index = 0; index < articles.length; index += size) {
+    pages.push(articles.slice(index, index + size));
+  }
+
+  return pages.length > 0 ? pages : [[]];
 }
 
 const atlasTheme = {
@@ -56,29 +112,18 @@ const atlasTheme = {
     bodyClass,
     content,
     description,
+    externalScripts = [],
     externalStylesheets = [],
     headerMode = "brand",
     navigation,
     siteDescription,
+    siteStyleVariables = {},
     siteTitle,
     title
   }) {
-    const headerContent =
-      headerMode === "nav-only"
-        ? `<header class="site-header nav-only">
-            <nav class="site-nav centered">
-              ${navigation.map((item) => `<a href="${item.href}">${escapeHtml(item.label)}</a>`).join("")}
-            </nav>
-          </header>`
-        : `<header class="site-header">
-            <div>
-              <a class="site-brand" href="${basePath}/">${escapeHtml(siteTitle)}</a>
-            </div>
-            <nav class="site-nav">
-              ${navigation.map((item) => `<a href="${item.href}">${escapeHtml(item.label)}</a>`).join("")}
-            </nav>
-          </header>`;
-
+    const siteStyleVariableCss = Object.entries(siteStyleVariables)
+      .map(([key, value]) => `${key}: ${value};`)
+      .join(" ");
     return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -86,21 +131,37 @@ const atlasTheme = {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(title)}</title>
     <meta name="description" content="${escapeHtml(description)}">
-    <link rel="stylesheet" href="${basePath}/assets/site.css">
     ${externalStylesheets.map((href) => `<link rel="stylesheet" href="${escapeHtml(href)}">`).join("\n    ")}
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css">
+    ${siteStyleVariableCss ? `<style>:root { ${siteStyleVariableCss} }</style>` : ""}
   </head>
   <body class="${bodyClass ?? ""}">
+    <div class="paper-background">
+      <div class="paper-background__grain"></div>
+      <div class="paper-background__geometry"></div>
+    </div>
     <div class="site-shell">
-      ${headerContent}
+      <header class="site-header ${headerMode === "nav-only" ? "nav-only" : ""}">
+        <a class="site-brand" href="${basePath}/">
+          <span class="site-brand__mark">ED</span>
+          <span class="site-brand__text">${escapeHtml(siteTitle)}</span>
+        </a>
+        <p class="site-intro">${escapeHtml(siteDescription)}</p>
+        <nav class="site-nav">
+          ${navigation.map((item) => `<a href="${item.href}">${escapeHtml(item.label)}</a>`).join("")}
+        </nav>
+      </header>
       <main class="page-shell">
         ${content}
       </main>
       <footer class="site-footer">
-        <span>${escapeHtml(siteTitle)}</span>
-        <span>${escapeHtml(description)}</span>
+        <div class="site-footer__identity">
+          <strong class="site-footer__brand">${escapeHtml(siteTitle)}</strong>
+          <p>${escapeHtml(siteDescription)}</p>
+        </div>
       </footer>
     </div>
+    ${externalScripts.map((src) => `<script src="${escapeHtml(src)}"></script>`).join("\n    ")}
   </body>
 </html>`;
   }
@@ -164,25 +225,50 @@ export const homePlugin: SitePluginDefinition = {
   }),
   async run(context) {
     const navigation = enabledNavigation(context);
-    const body = `<section class="hero-panel">
-      <h1>${escapeHtml(context.config.siteTitle)}</h1>
-      <p>${escapeHtml(context.config.siteDescription)}</p>
-    </section>
-    <section class="content-panel">
-      ${context.siteData.articles.map((article) => renderArticleCard(article, context.basePrefix)).join("")}
-    </section>`;
+    const pages = chunkArticles(context.siteData.articles, HOME_PAGE_SIZE);
 
-    await context.writeHtml(
-      "index.html",
-      renderPageWithContext(context, {
-        basePath: context.basePrefix,
-        content: body,
-        description: context.config.siteDescription,
-        headerMode: "nav-only",
-        navigation,
-        siteDescription: context.config.siteDescription,
-        siteTitle: context.config.siteTitle,
-        title: context.config.siteTitle
+    await Promise.all(
+      pages.map(async (articles, index) => {
+        const pageNumber = index + 1;
+        const body = `${pageNumber === 1
+          ? `<section class="hero-notebook">
+              <div class="hero-notebook__lead">
+                <h1>${escapeHtml(context.config.siteTitle)}</h1>
+                <p>${escapeHtml(context.config.siteDescription)}</p>
+              </div>
+              <div class="hero-notebook__metrics">
+                <span><strong>${context.siteData.articles.length}</strong> articles</span>
+                <span><strong>${context.siteData.tags.length}</strong> tags</span>
+              </div>
+            </section>`
+          : `<section class="subhero-panel">
+              <h1>Page ${pageNumber}</h1>
+              <p>${escapeHtml(context.config.siteDescription)}</p>
+            </section>`}
+          <section class="feed-section">
+            <div class="feed-section__header">
+              <h2>Recent notes</h2>
+              <p>${pageNumber === 1 ? "Newest entries." : `Page ${pageNumber} of ${pages.length}.`}</p>
+            </div>
+            <div class="post-list">
+              ${articles.map((article) => renderArticleCard(article, context.basePrefix)).join("") || "<p>No published articles yet.</p>"}
+            </div>
+            ${renderPagination(context.basePrefix, pageNumber, pages.length)}
+          </section>`;
+
+        await context.writeHtml(
+          pageNumber === 1 ? "index.html" : `page/${pageNumber}/index.html`,
+          renderPageWithContext(context, {
+            basePath: context.basePrefix,
+            content: body,
+            description: context.config.siteDescription,
+            headerMode: pageNumber === 1 ? "brand" : "nav-only",
+            navigation,
+            siteDescription: context.config.siteDescription,
+            siteTitle: context.config.siteTitle,
+            title: pageNumber === 1 ? context.config.siteTitle : `${context.config.siteTitle} - Page ${pageNumber}`
+          })
+        );
       })
     );
   }
@@ -196,30 +282,28 @@ export const articlePagesPlugin: SitePluginDefinition = {
     const navigation = enabledNavigation(context);
 
     await Promise.all(
-      context.publishedArticles.map(async (record, index) => {
+      context.publishedArticles.map(async (record) => {
         const summary = context.siteData.articles.find((article) => article.path === record.path)!;
-        const rendered = await renderMarkdownWithKatex(record.body);
+        const rendered = await renderMarkdownWithKatex(record.body, context.markdownBlockConfig);
         const html = rewriteManagedMediaUrls(
           rewriteRelativeAssetUrls(rendered.html, record.directory, `${context.basePrefix}/content`),
           `${context.basePrefix}/media`
         );
-        const previous = context.siteData.articles[index + 1];
-        const next = context.siteData.articles[index - 1];
-        const body = `<section class="hero-panel">
+        const index = context.siteData.articles.findIndex((article) => article.path === summary.path);
+        const previous = index >= 0 ? context.siteData.articles[index + 1] ?? null : null;
+        const next = index >= 0 ? context.siteData.articles[index - 1] ?? null : null;
+        const body = `<section class="article-hero">
+          <span class="hero-note">${summary.date ? escapeHtml(summary.date.slice(0, 10)) : escapeHtml(summary.path)}</span>
           <h1>${escapeHtml(summary.title)}</h1>
-          <div class="meta-row">
-            <span>${escapeHtml(summary.status)}</span>
-            <span>top ${summary.top}</span>
-            ${summary.date ? `<span>${escapeHtml(summary.date.slice(0, 10))}</span>` : ""}
-          </div>
+          <div class="entry-meta article-hero__meta">${renderArticleMeta(summary)}</div>
           <div class="tag-row">${renderTagRow(summary, context.basePrefix)}</div>
         </section>
         <section class="article-layout">
           <article class="article-panel">
             <div class="prose">${html}</div>
             <div class="pager-row">
-              ${previous ? `<a href="${previous.urlPath}">Older: ${escapeHtml(previous.title)}</a>` : "<span></span>"}
-              ${next ? `<a href="${next.urlPath}">Newer: ${escapeHtml(next.title)}</a>` : "<span></span>"}
+              ${previous ? `<a href="${previous.urlPath}"><span>Older</span><strong>${escapeHtml(previous.title)}</strong></a>` : `<span class="pager-row__empty"></span>`}
+              ${next ? `<a href="${next.urlPath}"><span>Newer</span><strong>${escapeHtml(next.title)}</strong></a>` : `<span class="pager-row__empty"></span>`}
             </div>
           </article>
           <aside class="side-panel">
@@ -255,13 +339,13 @@ export const tagsPlugin: SitePluginDefinition = {
   }),
   async run(context) {
     const navigation = enabledNavigation(context);
-    const tagIndexBody = `<section class="hero-panel"><h1>Tags</h1></section>
-      <section class="content-panel">${context.siteData.tags
+    const tagIndexBody = `<section class="subhero-panel"><h1>Tags</h1><p>Browse notes by subject marker.</p></section>
+      <section class="content-section"><div class="tag-sheet">${context.siteData.tags
         .map(
           (tag) =>
             `<a class="tag-chip" href="${context.basePrefix}/tags/${encodeURIComponent(tag.tag)}/">${escapeHtml(tag.tag)} (${tag.count})</a>`
         )
-        .join("")}</section>`;
+        .join("")}</div></section>`;
     await context.writeHtml(
       "tags/index.html",
       renderPageWithContext(context, {
@@ -278,10 +362,10 @@ export const tagsPlugin: SitePluginDefinition = {
     await Promise.all(
       context.siteData.tags.map(async (tag) => {
         const matchingArticles = context.siteData.articles.filter((article) => article.tags.includes(tag.tag));
-        const body = `<section class="hero-panel"><h1># ${escapeHtml(tag.tag)}</h1></section>
-          <section class="content-panel">${matchingArticles
+        const body = `<section class="subhero-panel"><h1># ${escapeHtml(tag.tag)}</h1></section>
+          <section class="content-section"><div class="post-list">${matchingArticles
             .map((article) => renderArticleCard(article, context.basePrefix))
-            .join("")}</section>`;
+            .join("")}</div></section>`;
         await context.writeHtml(
           `tags/${encodeURIComponent(tag.tag)}/index.html`,
           renderPageWithContext(context, {
@@ -325,7 +409,7 @@ export const treePlugin: SitePluginDefinition = {
       "tree/index.html",
       renderPageWithContext(context, {
         basePath: context.basePrefix,
-        content: `<section class="hero-panel"><h1>Directory Tree</h1></section><section class="content-panel">${renderDirectoryTree(context.siteData.directories)}</section>`,
+        content: `<section class="subhero-panel"><h1>Directory Tree</h1><p>Trace the notebook structure.</p></section><section class="content-section">${renderDirectoryTree(context.siteData.directories)}</section>`,
         description: "Browse the content tree.",
         navigation,
         siteDescription: context.config.siteDescription,
@@ -336,10 +420,10 @@ export const treePlugin: SitePluginDefinition = {
 
     await Promise.all(
       flattenDirectories(context.siteData.directories).map(async (directory) => {
-        const body = `<section class="hero-panel"><h1>${escapeHtml(directory.path)}</h1></section>
-          <section class="content-panel">${directory.articles
+        const body = `<section class="subhero-panel"><h1>${escapeHtml(directory.path)}</h1></section>
+          <section class="content-section"><div class="post-list">${directory.articles
             .map((article) => renderArticleCard(article, context.basePrefix))
-            .join("") || "<p>No published articles here yet.</p>"}</section>`;
+            .join("") || "<p>No published articles here yet.</p>"}</div></section>`;
         await context.writeHtml(
           `tree/${directory.path}/index.html`,
           renderPageWithContext(context, {
@@ -361,25 +445,43 @@ export const aboutPlugin: SitePluginDefinition = {
   id: "about",
   kind: "page",
   label: "About",
-  getNavigationItem: (context) => ({
-    href: `${context.basePrefix}/about/`,
-    label: context.config.about.title
-  }),
+  getNavigationItem: (context) =>
+    context.aboutArticle
+      ? {
+          href: `${context.basePrefix}/about/`,
+          label: "About"
+        }
+      : null,
   async run(context) {
+    if (!context.aboutArticle) {
+      return;
+    }
+
     const navigation = enabledNavigation(context);
-    const rendered = await renderMarkdownWithKatex(context.config.about.body);
-    const body = `<section class="hero-panel"><h1>${escapeHtml(context.config.about.title)}</h1></section>
-      <section class="article-panel"><div class="prose">${rendered.html}</div></section>`;
+    const rendered = await renderMarkdownWithKatex(
+      context.aboutArticle.body,
+      context.markdownBlockConfig
+    );
+    const html = rewriteManagedMediaUrls(
+      rewriteRelativeAssetUrls(
+        rendered.html,
+        context.aboutArticle.directory,
+        `${context.basePrefix}/content`
+      ),
+      `${context.basePrefix}/media`
+    );
+    const body = `<section class="subhero-panel"><h1>${escapeHtml(context.aboutArticle.title)}</h1></section>
+      <section class="article-panel article-panel--single"><div class="prose">${html}</div></section>`;
     await context.writeHtml(
       "about/index.html",
       renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: body,
-        description: context.config.siteDescription,
+        description: context.aboutArticle.excerpt,
         navigation,
         siteDescription: context.config.siteDescription,
         siteTitle: context.config.siteTitle,
-        title: context.config.about.title
+        title: context.aboutArticle.title
       })
     );
   }
@@ -402,14 +504,14 @@ export const searchPlugin: SitePluginDefinition = {
       title: article.title,
       urlPath: article.urlPath
     }));
-    const searchScript = `const input = document.querySelector('[data-search-input]'); const results = document.querySelector('[data-search-results]'); let index = []; fetch('${context.basePrefix}/assets/search-index.json').then((response) => response.json()).then((payload) => { index = payload; }); input?.addEventListener('input', () => { const query = (input.value || '').trim().toLowerCase(); const matches = query ? index.filter((item) => item.title.toLowerCase().includes(query) || item.path.toLowerCase().includes(query) || item.tags.some((tag) => tag.toLowerCase().includes(query)) || item.excerpt.toLowerCase().includes(query)) : []; results.innerHTML = matches.map((item) => '<article class=\"post-card\"><h2><a href=\"' + item.urlPath + '\">' + item.title + '</a></h2><p>' + item.excerpt + '</p></article>').join('') || '<p>No matches.</p>'; });`;
+    const searchScript = `const input = document.querySelector('[data-search-input]'); const results = document.querySelector('[data-search-results]'); let index = []; fetch('${context.basePrefix}/assets/search-index.json').then((response) => response.json()).then((payload) => { index = payload; }); input?.addEventListener('input', () => { const query = (input.value || '').trim().toLowerCase(); const matches = query ? index.filter((item) => item.title.toLowerCase().includes(query) || item.path.toLowerCase().includes(query) || item.tags.some((tag) => tag.toLowerCase().includes(query)) || item.excerpt.toLowerCase().includes(query)) : []; results.innerHTML = matches.map((item) => '<article class="post-entry"><div class="entry-meta"><span>' + item.path + '</span></div><h2><a href="' + item.urlPath + '">' + item.title + '</a></h2><p>' + item.excerpt + '</p></article>').join('') || '<p>No matches.</p>'; });`;
     await context.writeTextAsset("assets/search-index.json", `${JSON.stringify(searchIndex, null, 2)}\n`);
     await context.writeTextAsset("assets/search.js", searchScript);
 
-    const body = `<section class="hero-panel"><h1>Search</h1><p>Find articles by title, path, tag, or excerpt.</p></section>
-      <section class="content-panel">
+    const body = `<section class="subhero-panel"><h1>Search</h1><p>Look up titles, tags, and paths.</p></section>
+      <section class="content-section">
         <input class="search-input" data-search-input placeholder="Search articles">
-        <div data-search-results><p>Type to search.</p></div>
+        <div class="post-list" data-search-results><p>Type to search.</p></div>
       </section>
       <script src="${context.basePrefix}/assets/search.js"></script>`;
 

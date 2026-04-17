@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyMarkdownBlockRules,
   createDefaultSlug,
   extractMarkdownBlocks,
-  findDuplicateRenderStyleDirectories,
   normalizeArticleForSave,
-  normalizeRenderConfig,
+  normalizeAdminHomeConfig,
+  normalizeMarkdownBlockConfig,
   renderMarkdown,
   renderMarkdownFragmentWithKatex,
   renderMarkdownWithKatex,
@@ -63,6 +64,19 @@ summary: keep me?
   assert.doesNotMatch(record.rawContent, /^summary:/m);
 });
 
+test("normalizeArticleForSave preserves unquoted yaml dates", () => {
+  const record = normalizeArticleForSave(
+    "notes/date.md",
+    `---
+date: 2024-01-02T03:04:05.000Z
+---
+
+# Date`
+  );
+
+  assert.equal(record.date, "2024-01-02T03:04:05.000Z");
+});
+
 test("createDefaultSlug uses title and date", () => {
   assert.equal(createDefaultSlug("Hello World", "2026-04-13T10:00:00.000Z"), "hello-world-2026-04-13");
 });
@@ -109,35 +123,6 @@ test("validateEditorConfigShape allows overlapping VS Code style keybindings", (
 
   assert.equal(result.valid, true);
   assert.deepEqual(result.errors, []);
-});
-
-test("normalizeRenderConfig trims render style entries", () => {
-  const config = normalizeRenderConfig({
-    styles: [
-      {
-        directory: " nested\\water.css ",
-        enable: true
-      }
-    ]
-  });
-
-  assert.deepEqual(config.styles, [
-    {
-      directory: "nested/water.css",
-      enable: true
-    }
-  ]);
-});
-
-test("findDuplicateRenderStyleDirectories reports repeated directories", () => {
-  const duplicates = findDuplicateRenderStyleDirectories({
-    styles: [
-      { directory: "water.css", enable: true },
-      { directory: "Water.css", enable: false }
-    ]
-  });
-
-  assert.deepEqual(duplicates, ["Water.css"]);
 });
 
 test("renderMarkdown outputs math placeholders for preview", async () => {
@@ -216,4 +201,94 @@ test("renderMarkdownFragmentWithKatex renders math html", async () => {
   const html = await renderMarkdownFragmentWithKatex("$$\\n\\frac{1}{2}\\n$$");
 
   assert.match(html, /katex/);
+});
+
+test("applyMarkdownBlockRules converts nested custom markers into html tags", () => {
+  const markdown = [
+    "::cbox",
+    "outside",
+    "::pbox",
+    "inside",
+    "::/pbox",
+    "::/cbox"
+  ].join("\n");
+  const config = normalizeMarkdownBlockConfig({
+    rules: [
+      { start: "::cbox", end: "::/cbox", tag: "div", class: ["cbox"] },
+      { start: "::pbox", end: "::/pbox", tag: "div", class: ["pbox"] }
+    ]
+  });
+
+  const output = applyMarkdownBlockRules(markdown, config);
+
+  assert.equal(
+    output,
+    ["<div class=\"cbox\">", "outside", "<div class=\"pbox\">", "inside", "</div>", "</div>"].join("\n")
+  );
+});
+
+test("renderMarkdownWithKatex supports bracketed marker syntax", async () => {
+  const rendered = await renderMarkdownWithKatex(
+    ["[conc]", "", "hello", "", "[/conc]"].join("\n"),
+    {
+      rules: [
+        {
+          start: "[conc]",
+          end: "[/conc]",
+          tag: "div",
+          class: ["cbox"]
+        }
+      ]
+    }
+  );
+
+  assert.match(rendered.html, /class="cbox"/);
+  assert.match(rendered.html, /hello/);
+});
+
+test("applyMarkdownBlockRules supports identical start and end markers as toggles", () => {
+  const output = applyMarkdownBlockRules(
+    ["%%box%%", "inside", "%%box%%"].join("\n"),
+    {
+      rules: [
+        {
+          start: "%%box%%",
+          end: "%%box%%",
+          tag: "div",
+          class: ["bbox"]
+        }
+      ]
+    }
+  );
+
+  assert.equal(output, ["<div class=\"bbox\">", "inside", "</div>"].join("\n"));
+});
+
+test("applyMarkdownBlockRules throws when markers close out of order", () => {
+  assert.throws(
+    () =>
+      applyMarkdownBlockRules(
+        ["::cbox", "::/pbox"].join("\n"),
+        {
+          rules: [
+            { start: "::cbox", end: "::/cbox", tag: "div", class: ["cbox"] },
+            { start: "::pbox", end: "::/pbox", tag: "div", class: ["pbox"] }
+          ]
+        }
+      ),
+    /must close/
+  );
+});
+
+test("normalizeAdminHomeConfig keeps widget order unique", () => {
+  const config = normalizeAdminHomeConfig({
+    widgetOrder: ["todo-list", "todo-list", "notes"],
+    widgets: {
+      "todo-list": {
+        items: []
+      }
+    }
+  });
+
+  assert.deepEqual(config.widgetOrder, ["todo-list", "notes"]);
 });

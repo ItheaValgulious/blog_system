@@ -18,7 +18,7 @@ export default defineConfig({
         target: "http://localhost:8787",
         changeOrigin: true
       },
-      "/render-files": {
+      "/theme-files": {
         target: "http://localhost:8787",
         changeOrigin: true
       }

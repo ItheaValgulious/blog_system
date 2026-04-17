@@ -7,6 +7,7 @@ import { coreWorkbenchPlugin } from "./plugins/core-workbench-plugin";
 import { mediaLibraryPlugin } from "./plugins/media-library-plugin";
 import { snippetActionsPlugin } from "./plugins/snippet-actions-plugin";
 import { themePlugin } from "./plugins/theme-plugin";
+import { todoHomePlugin } from "./plugins/todo-home-plugin";
 import { topFrontmatterPlugin } from "./plugins/top-frontmatter-plugin";
 
 export const builtInPlugins: PluginDefinition[] = [
@@ -17,6 +18,7 @@ export const builtInPlugins: PluginDefinition[] = [
   clipboardImagePlugin,
   createMetadataPlugin,
   topFrontmatterPlugin,
+  todoHomePlugin,
   mediaLibraryPlugin,
   gitPlugin
 ];

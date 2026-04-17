@@ -38,27 +38,19 @@ export const commandPalettePlugin: PluginDefinition = {
       }
     });
     context.registerCommand({
+      id: "preferences.openMarkdownBlockConfigJson",
+      title: "Preferences: Open Markdown Block Rules (JSON)",
+      keywords: ["settings", "markdown", "block", "rules", "json"],
+      handler(api) {
+        void api.openConfigDocument("markdownBlockConfig");
+      }
+    });
+    context.registerCommand({
       id: "preferences.openSiteConfigJson",
       title: "Preferences: Open Site Config (JSON)",
       keywords: ["settings", "site", "plugins", "theme", "json"],
       handler(api) {
         void api.openConfigDocument("siteConfig");
-      }
-    });
-    context.registerCommand({
-      id: "preferences.openRenderConfigJson",
-      title: "Preferences: Open Render Config (JSON)",
-      keywords: ["settings", "render", "preview", "css", "json"],
-      handler(api) {
-        void api.openConfigDocument("renderConfig");
-      }
-    });
-    context.registerCommand({
-      id: "preferences.openSiteThemeJson",
-      title: "Preferences: Open Site Theme (JSON)",
-      keywords: ["settings", "site", "theme", "colors", "json"],
-      handler(api) {
-        void api.openConfigDocument("siteThemeAtlas");
       }
     });
   }

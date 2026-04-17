@@ -19,5 +19,13 @@ export const themePlugin: PluginDefinition = {
         api.showThemePicker();
       }
     });
+    context.registerCommand({
+      id: "theme.createThemeGroup",
+      title: "Theme: Create Theme Group",
+      keywords: ["theme", "group", "css", "js", "create"],
+      handler(api) {
+        api.startThemeGroupCreate();
+      }
+    });
   }
 };

@@ -15,6 +15,7 @@ import {
   normalizeTags,
   normalizeTop,
   serializeArticle,
+  titleFromFileName,
   toPosixPath,
   toArticleSummary,
   type ArticleRecord
@@ -26,6 +27,21 @@ interface FileSystemMetadataPayload {
   tags?: string[];
   title?: string;
   top?: number;
+}
+
+export interface DuplicateArticleTitleConflict {
+  path: string;
+  title: string;
+}
+
+export class DuplicateArticleTitleError extends Error {
+  readonly code = "duplicate_article_title";
+  readonly conflicts: DuplicateArticleTitleConflict[];
+
+  constructor(title: string, conflicts: DuplicateArticleTitleConflict[]) {
+    super(`Article title "${title}" already exists.`);
+    this.conflicts = conflicts;
+  }
 }
 
 function buildArticleTemplate(
@@ -74,9 +90,13 @@ async function applyPublishTransitionDate(
     const previous = await readArticle(contentRoot, nextRecord.path);
 
     if (previous.status === "draft" && nextRecord.status === "published") {
+      const nextDate =
+        typeof nextRecord.frontmatter.date === "string" && nextRecord.frontmatter.date.trim()
+          ? nextRecord.frontmatter.date.trim()
+          : new Date().toISOString();
       const frontmatter = {
         ...nextRecord.frontmatter,
-        date: new Date().toISOString(),
+        date: nextDate,
         status: "published" as const
       };
 
@@ -123,7 +143,10 @@ export async function updateArticleStatus(
   const nextFrontmatter = {
     ...article.frontmatter,
     status,
-    date: status === "published" && article.status === "draft" ? new Date().toISOString() : article.frontmatter.date
+    date:
+      status === "published" && article.status === "draft" && !article.frontmatter.date
+        ? new Date().toISOString()
+        : article.frontmatter.date
   };
   const serialized = serializeArticle({
     frontmatter: nextFrontmatter,
@@ -307,6 +330,65 @@ async function assertTargetAvailable(absolutePath: string) {
   }
 }
 
+function normalizeComparableTitle(title: string) {
+  return title.trim().toLowerCase();
+}
+
+async function findDuplicateArticleTitleConflicts(
+  contentRoot: string,
+  title: string,
+  options?: { excludePath?: string }
+) {
+  const comparableTitle = normalizeComparableTitle(title);
+
+  if (!comparableTitle) {
+    return [];
+  }
+
+  const normalizedExcludePath = options?.excludePath ? normalizeRelativeEntryPath(options.excludePath) : null;
+  const articles = await scanArticles(contentRoot);
+
+  return articles
+    .filter(
+      (article) =>
+        normalizeComparableTitle(article.title) === comparableTitle &&
+        article.path !== normalizedExcludePath
+    )
+    .map((article) => ({
+      path: article.path,
+      title: article.title
+    }));
+}
+
+async function assertNoDuplicateArticleTitle(
+  contentRoot: string,
+  title: string,
+  options?: {
+    allowDuplicateTitle?: boolean;
+    excludePath?: string;
+  }
+) {
+  if (options?.allowDuplicateTitle) {
+    return;
+  }
+
+  const conflicts = await findDuplicateArticleTitleConflicts(contentRoot, title, {
+    excludePath: options?.excludePath
+  });
+
+  if (conflicts.length > 0) {
+    throw new DuplicateArticleTitleError(title, conflicts);
+  }
+}
+
+function resolveArticleTitleForCreate(name: string, metadata?: Record<string, unknown>) {
+  if (typeof metadata?.title === "string" && metadata.title.trim()) {
+    return metadata.title.trim();
+  }
+
+  return titleFromFileName(name);
+}
+
 async function isDirectory(absolutePath: string) {
   const stats = await fs.stat(absolutePath);
   return stats.isDirectory();
@@ -317,7 +399,10 @@ export async function createFileSystemEntry(
   parentPath: string,
   entryType: "file" | "directory",
   name: string,
-  metadata?: Record<string, unknown>
+  metadata?: Record<string, unknown>,
+  options?: {
+    allowDuplicateTitle?: boolean;
+  }
 ) {
   const normalizedParentPath = normalizeRelativeEntryPath(parentPath);
   const relativePath = joinRelativePath(normalizedParentPath, name);
@@ -342,6 +427,16 @@ export async function createFileSystemEntry(
     return { path: relativePath };
   }
 
+  if (relativePath.toLowerCase().endsWith(".md")) {
+    await assertNoDuplicateArticleTitle(
+      contentRoot,
+      resolveArticleTitleForCreate(name, metadata),
+      {
+        allowDuplicateTitle: options?.allowDuplicateTitle
+      }
+    );
+  }
+
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
   const initialContent = relativePath.toLowerCase().endsWith(".md")
     ? buildArticleTemplate(name, {
@@ -360,7 +455,11 @@ export async function createFileSystemEntry(
 export async function renameFileSystemEntry(
   contentRoot: string,
   relativePath: string,
-  nextName: string
+  nextName: string,
+  options?: {
+    allowDuplicateTitle?: boolean;
+    title?: string;
+  }
 ) {
   const normalizedSourcePath = normalizeRelativeEntryPath(relativePath);
   const sourceAbsolutePath = resolveContentPath(contentRoot, normalizedSourcePath);
@@ -370,6 +469,19 @@ export async function renameFileSystemEntry(
   const normalizedParentPath = parentPath === "." ? "" : parentPath;
   const nextRelativePath = joinRelativePath(normalizedParentPath, nextName);
   const nextAbsolutePath = resolveContentPath(contentRoot, nextRelativePath);
+
+  if (normalizedSourcePath.toLowerCase().endsWith(".md")) {
+    const currentArticle = await readArticle(contentRoot, normalizedSourcePath);
+    const nextTitle =
+      typeof options?.title === "string" && options.title.trim()
+        ? options.title.trim()
+        : currentArticle.title;
+
+    await assertNoDuplicateArticleTitle(contentRoot, nextTitle, {
+      allowDuplicateTitle: options?.allowDuplicateTitle,
+      excludePath: normalizedSourcePath
+    });
+  }
 
   if (normalizedSourcePath === nextRelativePath) {
     return { path: normalizedSourcePath };

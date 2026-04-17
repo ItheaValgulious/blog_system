@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { ArticleRecord, SiteData } from "@blog-system/content-core";
+import type { ArticleRecord, MarkdownBlockConfig, SiteData } from "@blog-system/content-core";
 
 import type { SiteBuildSettings } from "./generator.js";
 import type { SiteConfig } from "./site-config.js";
@@ -16,10 +16,12 @@ export interface SiteThemeRenderArgs {
   bodyClass?: string;
   content: string;
   description: string;
+  externalScripts?: string[];
   externalStylesheets?: string[];
   headerMode?: "brand" | "nav-only";
   navigation: SiteNavigationItem[];
   siteDescription: string;
+  siteStyleVariables?: Record<string, string>;
   siteTitle: string;
   title: string;
 }
@@ -31,9 +33,12 @@ export interface SiteThemeDefinition {
 }
 
 export interface SiteBuildContext {
+  aboutArticle: ArticleRecord | null;
   basePrefix: string;
   config: SiteConfig;
+  externalScripts: string[];
   externalStylesheets: string[];
+  markdownBlockConfig: MarkdownBlockConfig;
   projectRoot: string;
   publishedArticles: ArticleRecord[];
   settings: SiteBuildSettings;

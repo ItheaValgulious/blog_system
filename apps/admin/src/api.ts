@@ -1,12 +1,31 @@
 import type {
+  AdminHomeConfig,
   ArticleRecord,
   ContentTreeNode,
   EditorKeybinding,
   EditorSnippet,
   FileSystemNode,
-  RenderConfig,
+  MarkdownBlockConfig,
+  ThemeGroupConfig,
+  ThemeGroupSummary,
   TagInfo
 } from "@blog-system/content-core";
+
+export class ApiRequestError extends Error {
+  readonly code?: string;
+  readonly conflicts?: Array<{ path: string; title: string }>;
+  readonly status: number;
+
+  constructor(
+    status: number,
+    payload: { code?: string; conflicts?: Array<{ path: string; title: string }>; error?: string } | null
+  ) {
+    super(payload?.error ?? `Request failed with ${status}`);
+    this.status = status;
+    this.code = payload?.code;
+    this.conflicts = payload?.conflicts;
+  }
+}
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
@@ -19,8 +38,12 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? `Request failed with ${response.status}`);
+    const payload = (await response.json().catch(() => null)) as {
+      code?: string;
+      conflicts?: Array<{ path: string; title: string }>;
+      error?: string;
+    } | null;
+    throw new ApiRequestError(response.status, payload);
   }
 
   return (await response.json()) as T;
@@ -60,20 +83,34 @@ export interface SiteConfigPayload {
   value: Record<string, unknown>;
 }
 
-export interface SiteThemeConfigPayload {
+export interface MarkdownBlockConfigPayload {
   raw: string;
-  themeId: string;
-  value: Record<string, unknown>;
+  value: MarkdownBlockConfig;
 }
 
-export interface RenderConfigPayload {
-  raw: string;
-  value: RenderConfig;
+export interface ThemeGroupsPayload {
+  groups: ThemeGroupSummary[];
 }
 
-export interface RenderStylePayload {
-  directory: string;
+export interface ThemeGroupPayload {
+  groupId: string;
   raw: string;
+  value: ThemeGroupConfig;
+}
+
+export interface ThemeAssetPayload {
+  adminPreview: boolean;
+  assetPath: string;
+  fileName: string;
+  groupId: string;
+  language: "css" | "javascript";
+  raw: string;
+  type: "css" | "js";
+}
+
+export interface AdminHomeConfigPayload {
+  raw: string;
+  value: AdminHomeConfig;
 }
 
 export interface ClipboardAssetPayload {
@@ -168,44 +205,91 @@ export const api = {
       body: JSON.stringify({ raw })
     });
   },
-  getSiteThemeConfig(themeId: string) {
-    return request<SiteThemeConfigPayload>(`/api/site-theme-config?theme=${encodeURIComponent(themeId)}`);
+  getMarkdownBlockConfig() {
+    return request<MarkdownBlockConfigPayload>("/api/markdown-block-config");
   },
-  saveSiteThemeConfig(themeId: string, raw: string) {
-    return request<SiteThemeConfigPayload>("/api/site-theme-config", {
-      method: "PUT",
-      body: JSON.stringify({ raw, themeId })
-    });
-  },
-  getRenderConfig() {
-    return request<RenderConfigPayload>("/api/render-config");
-  },
-  saveRenderConfig(raw: string) {
-    return request<RenderConfigPayload>("/api/render-config", {
+  saveMarkdownBlockConfig(raw: string) {
+    return request<MarkdownBlockConfigPayload>("/api/markdown-block-config", {
       method: "PUT",
       body: JSON.stringify({ raw })
     });
   },
-  getRenderStyle(directory: string) {
-    return request<RenderStylePayload>(`/api/render-style?directory=${encodeURIComponent(directory)}`);
+  getAdminHomeConfig() {
+    return request<AdminHomeConfigPayload>("/api/admin-home-config");
   },
-  saveRenderStyle(directory: string, raw: string) {
-    return request<RenderStylePayload>("/api/render-style", {
+  saveAdminHomeConfig(raw: string) {
+    return request<AdminHomeConfigPayload>("/api/admin-home-config", {
       method: "PUT",
-      body: JSON.stringify({ directory, raw })
+      body: JSON.stringify({ raw })
     });
   },
-  createRenderStyle(fileName: string) {
-    return request<RenderStylePayload & { renderConfig: RenderConfigPayload }>("/api/render-style/create", {
+  listThemeGroups() {
+    return request<ThemeGroupsPayload>("/api/theme-groups");
+  },
+  getThemeGroup(groupId: string) {
+    return request<ThemeGroupPayload>(`/api/theme-group?group=${encodeURIComponent(groupId)}`);
+  },
+  saveThemeGroup(groupId: string, raw: string) {
+    return request<ThemeGroupPayload>("/api/theme-group", {
+      method: "PUT",
+      body: JSON.stringify({ groupId, raw })
+    });
+  },
+  createThemeGroup(groupId: string) {
+    return request<ThemeGroupPayload>("/api/theme-group/create", {
       method: "POST",
-      body: JSON.stringify({ fileName })
+      body: JSON.stringify({ groupId })
+    });
+  },
+  renameThemeGroup(groupId: string, nextGroupId: string) {
+    return request<ThemeGroupPayload>("/api/theme-group/rename", {
+      method: "POST",
+      body: JSON.stringify({ groupId, nextGroupId })
+    });
+  },
+  deleteThemeGroup(groupId: string) {
+    return request<{ groupId: string }>("/api/theme-group/delete", {
+      method: "POST",
+      body: JSON.stringify({ groupId })
+    });
+  },
+  getThemeAsset(groupId: string, fileName: string) {
+    return request<ThemeAssetPayload>(
+      `/api/theme-asset?group=${encodeURIComponent(groupId)}&file=${encodeURIComponent(fileName)}`
+    );
+  },
+  saveThemeAsset(groupId: string, fileName: string, raw: string) {
+    return request<ThemeAssetPayload>("/api/theme-asset", {
+      method: "PUT",
+      body: JSON.stringify({ groupId, fileName, raw })
+    });
+  },
+  createThemeAsset(groupId: string, fileName: string, type: "css" | "js", adminPreview: boolean) {
+    return request<ThemeAssetPayload>("/api/theme-asset/create", {
+      method: "POST",
+      body: JSON.stringify({ groupId, fileName, type, adminPreview })
+    });
+  },
+  renameThemeAsset(groupId: string, fileName: string, nextFileName: string) {
+    return request<ThemeAssetPayload>("/api/theme-asset/rename", {
+      method: "POST",
+      body: JSON.stringify({ groupId, fileName, nextFileName })
+    });
+  },
+  deleteThemeAsset(groupId: string, fileName: string) {
+    return request<{ assetPath: string; fileName: string; groupId: string }>("/api/theme-asset/delete", {
+      method: "POST",
+      body: JSON.stringify({ groupId, fileName })
     });
   },
   createFileSystemEntry(
     parentPath: string,
     entryType: "file" | "directory",
     name: string,
-    metadata?: Record<string, string>
+    metadata?: Record<string, string>,
+    options?: {
+      allowDuplicateTitle?: boolean;
+    }
   ) {
     return request<{ path: string }>("/api/fs/create", {
       method: "POST",
@@ -213,16 +297,26 @@ export const api = {
         parentPath,
         entryType,
         name,
-        metadata
+        metadata,
+        allowDuplicateTitle: options?.allowDuplicateTitle
       })
     });
   },
-  renameFileSystemEntry(path: string, nextName: string) {
+  renameFileSystemEntry(
+    path: string,
+    nextName: string,
+    options?: {
+      allowDuplicateTitle?: boolean;
+      title?: string;
+    }
+  ) {
     return request<{ path: string }>("/api/fs/rename", {
       method: "POST",
       body: JSON.stringify({
         path,
-        nextName
+        nextName,
+        title: options?.title,
+        allowDuplicateTitle: options?.allowDuplicateTitle
       })
     });
   },

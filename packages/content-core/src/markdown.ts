@@ -12,6 +12,8 @@ import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
 
+import type { MarkdownBlockConfig, MarkdownBlockRule } from "./markdown-block-config.js";
+import { applyMarkdownBlockRules } from "./markdown-block-config.js";
 import type { ArticleRenderResult, HeadingItem, MarkdownBlock } from "./types.js";
 
 interface HtmlTagBoundary {
@@ -179,9 +181,14 @@ export function extractHeadings(markdown: string): HeadingItem[] {
 
 async function renderMarkdownInternal(
   markdown: string,
-  options: { hydrateMathOnServer: boolean; includeHeadings?: boolean }
+  options: {
+    hydrateMathOnServer: boolean;
+    includeHeadings?: boolean;
+    markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null;
+  }
 ): Promise<ArticleRenderResult> {
-  const headings = options.includeHeadings === false ? [] : extractHeadings(markdown);
+  const preparedMarkdown = applyMarkdownBlockRules(markdown, options.markdownBlockConfig);
+  const headings = options.includeHeadings === false ? [] : extractHeadings(preparedMarkdown);
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
@@ -192,13 +199,13 @@ async function renderMarkdownInternal(
     .use(rehypeSlug);
 
   if (options.hydrateMathOnServer) {
-    processor.use(rehypeKatex);
+    processor.use(rehypeKatex, { strict: "ignore" });
   }
 
   const processed = await processor
     .use(rehypeHighlight)
     .use(rehypeStringify, { allowDangerousHtml: true })
-    .process(markdown);
+    .process(preparedMarkdown);
 
   return {
     html: String(processed),
@@ -207,26 +214,46 @@ async function renderMarkdownInternal(
 }
 
 export async function renderMarkdownWithMathPlaceholders(
-  markdown: string
+  markdown: string,
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
 ): Promise<ArticleRenderResult> {
-  return renderMarkdownInternal(markdown, { hydrateMathOnServer: false, includeHeadings: true });
+  return renderMarkdownInternal(markdown, {
+    hydrateMathOnServer: false,
+    includeHeadings: true,
+    markdownBlockConfig
+  });
 }
 
-export async function renderMarkdownWithKatex(markdown: string): Promise<ArticleRenderResult> {
-  return renderMarkdownInternal(markdown, { hydrateMathOnServer: true, includeHeadings: true });
+export async function renderMarkdownWithKatex(
+  markdown: string,
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+): Promise<ArticleRenderResult> {
+  return renderMarkdownInternal(markdown, {
+    hydrateMathOnServer: true,
+    includeHeadings: true,
+    markdownBlockConfig
+  });
 }
 
-export async function renderMarkdownFragmentWithKatex(markdown: string): Promise<string> {
+export async function renderMarkdownFragmentWithKatex(
+  markdown: string,
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+): Promise<string> {
   const rendered = await renderMarkdownInternal(markdown, {
     hydrateMathOnServer: true,
-    includeHeadings: false
+    includeHeadings: false,
+    markdownBlockConfig
   });
 
   return rendered.html;
 }
 
-export function extractMarkdownBlocks(markdown: string): MarkdownBlock[] {
-  const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(markdown) as any;
+export function extractMarkdownBlocks(
+  markdown: string,
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+): MarkdownBlock[] {
+  const preparedMarkdown = applyMarkdownBlockRules(markdown, markdownBlockConfig);
+  const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(preparedMarkdown) as any;
   const children = Array.isArray(tree.children) ? tree.children : [];
   const blocks: MarkdownBlock[] = [];
   let index = 0;
@@ -267,7 +294,7 @@ export function extractMarkdownBlocks(markdown: string): MarkdownBlock[] {
 
       if (matchIndex !== -1) {
         const mergedBlock = createMarkdownBlock(
-          markdown,
+          preparedMarkdown,
           child?.position?.start?.offset,
           children[matchIndex]?.position?.end?.offset,
           child?.position?.start?.line,
@@ -283,7 +310,7 @@ export function extractMarkdownBlocks(markdown: string): MarkdownBlock[] {
     }
 
     const block = createMarkdownBlock(
-      markdown,
+      preparedMarkdown,
       child?.position?.start?.offset,
       child?.position?.end?.offset,
       child?.position?.start?.line,
@@ -297,22 +324,25 @@ export function extractMarkdownBlocks(markdown: string): MarkdownBlock[] {
     index += 1;
   }
 
-  if (blocks.length === 0 && markdown.trim().length > 0) {
-    const lineCount = markdown.split(/\r?\n/).length;
+  if (blocks.length === 0 && preparedMarkdown.trim().length > 0) {
+    const lineCount = preparedMarkdown.split(/\r?\n/).length;
     blocks.push({
       startLine: 1,
       endLine: lineCount,
       startOffset: 0,
-      endOffset: markdown.length,
-      source: markdown
+      endOffset: preparedMarkdown.length,
+      source: preparedMarkdown
     });
   }
 
   return blocks;
 }
 
-export async function renderMarkdown(markdown: string): Promise<ArticleRenderResult> {
-  return renderMarkdownWithMathPlaceholders(markdown);
+export async function renderMarkdown(
+  markdown: string,
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+): Promise<ArticleRenderResult> {
+  return renderMarkdownWithMathPlaceholders(markdown, markdownBlockConfig);
 }
 
 export function rewriteRelativeAssetUrls(
@@ -366,4 +396,11 @@ export function resolveManagedMediaPath(value: string, mediaBasePath: string) {
   }
 
   return `${normalizeBasePath(mediaBasePath)}/${value.slice("@media/".length)}`.replace(/\/{2,}/g, "/");
+}
+
+export function rewriteManagedMediaTextReferences(content: string, mediaBasePath: string) {
+  const normalizedBase = normalizeBasePath(mediaBasePath);
+  return content.replace(/@media\/([A-Za-z0-9._/-]+)/g, (_match, assetPath: string) =>
+    `${normalizedBase}/${assetPath}`.replace(/\/{2,}/g, "/")
+  );
 }

@@ -434,7 +434,9 @@ function applyStatusOverride(relativePath: string, rawContent: string, statusOve
     ...article.frontmatter,
     status: statusOverride,
     date:
-      statusOverride === "published" && article.status !== "published"
+      statusOverride === "published" &&
+      article.status !== "published" &&
+      !article.frontmatter.date
         ? new Date().toISOString()
         : article.frontmatter.date
   };

@@ -9,9 +9,11 @@ import "./monaco-environment";
 import {
   extractMarkdownBlocks,
   highlightThemeCss,
+  normalizeAdminHomeConfig,
   normalizeEditorConfig,
   parseArticleSource,
   renderMarkdownFragmentWithKatex,
+  rewriteManagedMediaTextReferences,
   rewriteManagedMediaUrls,
   rewriteRelativeAssetUrls,
   type ArticleRecord,
@@ -21,17 +23,20 @@ import {
 
 import {
   api,
+  ApiRequestError,
+  type AdminHomeConfigPayload,
   type EditorConfigPayload,
   type GitChangedFilePayload,
   type GitCommitPayload,
+  type MarkdownBlockConfigPayload,
   type MediaAssetPayload,
-  type RenderConfigPayload,
-  type RenderStylePayload,
   type SiteConfigPayload,
-  type SiteThemeConfigPayload,
+  type ThemeAssetPayload,
+  type ThemeGroupsPayload,
   type TreePayload
 } from "./api";
 import { jsonSchemas } from "./editor-config-schema";
+import { HomeDashboard } from "./home-dashboard";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
@@ -43,11 +48,13 @@ import type {
   CreateDialogContributionDefinition,
   ConfigDocumentKind,
   ConfigWorkbenchDocument,
+  HomeWidgetContributionDefinition,
+  HomeWorkbenchDocument,
   NormalizedEditorConfig,
   NormalizedSnippet,
-  RenderStyleWorkbenchDocument,
   SidebarViewContributionDefinition,
   SidebarViewId,
+  ThemeAssetWorkbenchDocument,
   WorkbenchApi,
   WorkbenchDocument
 } from "./workbench/types";
@@ -55,8 +62,10 @@ import type {
 loader.config({ monaco: monacoEditor });
 
 const PREVIEW_UPDATE_DEBOUNCE_MS = 180;
+const GIT_REFRESH_INTERVAL_MS = 15000;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";
 const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
+const HOME_DOCUMENT_ID = "home:dashboard";
 
 interface PreviewSourceParseResult {
   body: string;
@@ -79,7 +88,7 @@ interface RenderedPreviewBlock {
   element: HTMLElement;
 }
 
-const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "siteConfig" | "siteThemeAtlas" | "renderConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
+const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "markdownBlockConfig" | "siteConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
   markdownSnippets: {
     title: "markdown.snippets.json",
     path: "config/markdown.snippets.json",
@@ -97,38 +106,42 @@ const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "siteConfig" | "s
   }
 };
 
+const MARKDOWN_BLOCK_CONFIG_DOCUMENT_META = {
+  title: "markdown-blocks.json",
+  path: "config/markdown-blocks.json"
+} as const;
+
 const SITE_CONFIG_DOCUMENT_META = {
   title: "site.json",
   path: "config/site.json"
 } as const;
 
-const SITE_THEME_DOCUMENT_META = {
-  title: "site-theme.atlas.json",
-  path: "config/site-theme.atlas.json",
-  themeId: "atlas"
-} as const;
-
-const RENDER_CONFIG_DOCUMENT_META = {
-  title: "render.json",
-  path: "config/render.json"
-} as const;
-
-function normalizeRenderStyleDirectory(value: string) {
-  const trimmed = value.trim().replace(/\\/g, "/").replace(/^config\/render\/+/i, "").replace(/^render\/+/i, "");
+function normalizeThemeGroupId(value: string) {
+  const trimmed = value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/");
 
   if (!trimmed) {
     return null;
   }
 
-  return trimmed.toLowerCase().endsWith(".css") ? trimmed : `${trimmed}.css`;
+  return trimmed
+    .split("/")
+    .map((segment) =>
+      segment
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+    )
+    .filter(Boolean)
+    .join("/");
 }
 
-function getRenderStyleDocumentPath(directory: string) {
-  return `config/render/${directory}`;
+function getThemeGroupDocumentPath(groupId: string) {
+  return `config/theme/${groupId}/theme.json`;
 }
 
-function getRenderStyleTitle(directory: string) {
-  return directory.split("/").pop() ?? directory;
+function getThemeAssetDocumentPath(groupId: string, fileName: string) {
+  return `config/theme/${groupId}/${fileName}`;
 }
 
 function getDocumentPath(document: WorkbenchDocument | null, fallbackPath: string | null) {
@@ -136,11 +149,15 @@ function getDocumentPath(document: WorkbenchDocument | null, fallbackPath: strin
     return fallbackPath ?? "";
   }
 
+  if (document.kind === "home") {
+    return fallbackPath ?? "";
+  }
+
   if (document.kind === "article") {
     return document.articlePath;
   }
 
-  if (document.kind === "renderStyle") {
+  if (document.kind === "themeAsset") {
     return document.editorPath;
   }
 
@@ -357,12 +374,10 @@ const DEFAULT_KEYBINDINGS = normalizeEditorConfig({
 
 function getConfigDocumentPath(kind: ConfigDocumentKind) {
   switch (kind) {
+    case "markdownBlockConfig":
+      return MARKDOWN_BLOCK_CONFIG_DOCUMENT_META.path;
     case "siteConfig":
       return SITE_CONFIG_DOCUMENT_META.path;
-    case "siteThemeAtlas":
-      return SITE_THEME_DOCUMENT_META.path;
-    case "renderConfig":
-      return RENDER_CONFIG_DOCUMENT_META.path;
     default:
       return CONFIG_DOCUMENT_META[kind].path;
   }
@@ -370,12 +385,10 @@ function getConfigDocumentPath(kind: ConfigDocumentKind) {
 
 function getConfigDocumentTitle(kind: ConfigDocumentKind) {
   switch (kind) {
+    case "markdownBlockConfig":
+      return MARKDOWN_BLOCK_CONFIG_DOCUMENT_META.title;
     case "siteConfig":
       return SITE_CONFIG_DOCUMENT_META.title;
-    case "siteThemeAtlas":
-      return SITE_THEME_DOCUMENT_META.title;
-    case "renderConfig":
-      return RENDER_CONFIG_DOCUMENT_META.title;
     default:
       return CONFIG_DOCUMENT_META[kind].title;
   }
@@ -385,9 +398,9 @@ function getJsonSchemaDefinitions() {
   return [
     { uri: "inmemory://schemas/snippets.json", fileMatch: [CONFIG_DOCUMENT_META.markdownSnippets.path, CONFIG_DOCUMENT_META.latexSnippets.path], schema: jsonSchemas.snippetSchema as object },
     { uri: "inmemory://schemas/keybindings.json", fileMatch: [CONFIG_DOCUMENT_META.keybindings.path], schema: jsonSchemas.keybindingSchema as object },
+    { uri: "inmemory://schemas/markdown-blocks.json", fileMatch: [MARKDOWN_BLOCK_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.markdownBlockConfigSchema as object },
+    { uri: "inmemory://schemas/theme-group.json", fileMatch: ["config/theme/*/theme.json"], schema: jsonSchemas.themeGroupConfigSchema as object },
     { uri: "inmemory://schemas/site.json", fileMatch: [SITE_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.siteConfigSchema as object },
-    { uri: "inmemory://schemas/render.json", fileMatch: [RENDER_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.renderConfigSchema as object },
-    { uri: "inmemory://schemas/site-theme.json", fileMatch: [SITE_THEME_DOCUMENT_META.path], schema: jsonSchemas.siteThemeConfigSchema as object }
   ];
 }
 
@@ -402,8 +415,11 @@ function hashText(value: string) {
   return (hash >>> 0).toString(36);
 }
 
-function parsePreviewBlocks(markdown: string): ParsedPreviewBlock[] {
-  return extractMarkdownBlocks(markdown).map((block) => ({
+function parsePreviewBlocks(
+  markdown: string,
+  markdownBlockConfig: MarkdownBlockConfigPayload["value"] | null
+): ParsedPreviewBlock[] {
+  return extractMarkdownBlocks(markdown, markdownBlockConfig).map((block) => ({
     hash: `${hashText(block.source)}:${block.source.length}`,
     source: block.source,
     startLine: block.startLine,
@@ -441,6 +457,58 @@ function findPreviewBlockByLine(blocks: RenderedPreviewBlock[], lineNumber: numb
   return blocks.find((block) => block.startLine > lineNumber) ?? blocks[blocks.length - 1] ?? null;
 }
 
+function findPreviewAnchorElement(
+  blockElement: HTMLElement,
+  lineRatio: number,
+  viewportHeight: number
+) {
+  const maxHeight = Math.max(viewportHeight / 10, 48);
+  let currentElement = blockElement;
+  let currentRatio = Math.min(1, Math.max(0, Number.isFinite(lineRatio) ? lineRatio : 0));
+
+  while (currentElement.offsetHeight > maxHeight) {
+    const childElements = Array.from(currentElement.children).filter(
+      (child): child is HTMLElement => child instanceof HTMLElement && child.offsetHeight > 0
+    );
+
+    if (childElements.length === 0) {
+      break;
+    }
+
+    const totalHeight = childElements.reduce((sum, child) => sum + child.offsetHeight, 0);
+    if (totalHeight <= 0) {
+      break;
+    }
+
+    const targetHeight = totalHeight * currentRatio;
+    let consumedHeight = 0;
+    let nextElement = childElements[childElements.length - 1];
+
+    for (const childElement of childElements) {
+      const nextConsumedHeight = consumedHeight + childElement.offsetHeight;
+
+      if (targetHeight <= nextConsumedHeight) {
+        nextElement = childElement;
+        currentRatio =
+          childElement.offsetHeight > 0
+            ? Math.min(1, Math.max(0, (targetHeight - consumedHeight) / childElement.offsetHeight))
+            : 0;
+        break;
+      }
+
+      consumedHeight = nextConsumedHeight;
+    }
+
+    if (nextElement === currentElement) {
+      break;
+    }
+
+    currentElement = nextElement;
+  }
+
+  return currentElement;
+}
+
 function parsePreviewSource(articlePath: string, rawContent: string): PreviewSourceParseResult {
   try {
     const parsed = parseArticleSource(articlePath, rawContent);
@@ -473,12 +541,16 @@ function isArticleDocument(document: WorkbenchDocument | null): document is Arti
   return Boolean(document && document.kind === "article");
 }
 
+function isHomeDocument(document: WorkbenchDocument | null): document is HomeWorkbenchDocument {
+  return Boolean(document && document.kind === "home");
+}
+
 function isConfigDocument(document: WorkbenchDocument | null): document is ConfigWorkbenchDocument {
   return Boolean(document && document.kind === "config");
 }
 
-function isRenderStyleDocument(document: WorkbenchDocument | null): document is RenderStyleWorkbenchDocument {
-  return Boolean(document && document.kind === "renderStyle");
+function isThemeAssetDocument(document: WorkbenchDocument | null): document is ThemeAssetWorkbenchDocument {
+  return Boolean(document && document.kind === "themeAsset");
 }
 
 function buildNormalizedEditorConfig(configPayload: EditorConfigPayload | null): NormalizedEditorConfig {
@@ -492,16 +564,17 @@ function buildNormalizedEditorConfig(configPayload: EditorConfigPayload | null):
 
 function buildConfigDocument(
   kind: ConfigDocumentKind,
-  payload: EditorConfigPayload | SiteConfigPayload | SiteThemeConfigPayload | RenderConfigPayload
+  payload:
+    | EditorConfigPayload
+    | MarkdownBlockConfigPayload
+    | SiteConfigPayload
 ): ConfigWorkbenchDocument {
   const value =
-    kind === "siteConfig"
+    kind === "markdownBlockConfig"
+      ? (payload as MarkdownBlockConfigPayload).raw
+      : kind === "siteConfig"
       ? (payload as SiteConfigPayload).raw
-      : kind === "siteThemeAtlas"
-        ? (payload as SiteThemeConfigPayload).raw
-        : kind === "renderConfig"
-          ? (payload as RenderConfigPayload).raw
-          : CONFIG_DOCUMENT_META[kind].read(payload as EditorConfigPayload);
+      : CONFIG_DOCUMENT_META[kind].read(payload as EditorConfigPayload);
 
   return {
     id: `config:${kind}`,
@@ -511,6 +584,19 @@ function buildConfigDocument(
     language: "json",
     value,
     savedValue: value,
+    dirty: false,
+    previewable: false
+  };
+}
+
+function buildHomeDocument(): HomeWorkbenchDocument {
+  return {
+    id: HOME_DOCUMENT_ID,
+    kind: "home",
+    title: "Admin Home",
+    language: "json",
+    value: "",
+    savedValue: "",
     dirty: false,
     previewable: false
   };
@@ -531,14 +617,16 @@ function buildArticleDocument(record: ArticleRecord): ArticleWorkbenchDocument {
   };
 }
 
-function buildRenderStyleDocument(payload: RenderStylePayload): RenderStyleWorkbenchDocument {
+function buildThemeAssetDocument(payload: ThemeAssetPayload): ThemeAssetWorkbenchDocument {
   return {
-    id: `render-style:${payload.directory}`,
-    kind: "renderStyle",
-    directory: payload.directory,
-    editorPath: getRenderStyleDocumentPath(payload.directory),
-    title: getRenderStyleTitle(payload.directory),
-    language: "css",
+    id: `theme-asset:${payload.assetPath}`,
+    kind: "themeAsset",
+    assetPath: payload.assetPath,
+    fileName: payload.fileName,
+    groupId: payload.groupId,
+    editorPath: getThemeAssetDocumentPath(payload.groupId, payload.fileName),
+    title: payload.fileName,
+    language: payload.language,
     value: payload.raw,
     savedValue: payload.raw,
     dirty: false,
@@ -557,7 +645,7 @@ function upsertDocument(documents: WorkbenchDocument[], nextDocument: WorkbenchD
 }
 
 function closeDocument(documents: WorkbenchDocument[], documentId: string) {
-  return documents.filter((document) => document.id !== documentId);
+  return documents.filter((document) => document.id === HOME_DOCUMENT_ID || document.id !== documentId);
 }
 
 function getParentPath(path: string) {
@@ -734,6 +822,22 @@ function removeDocuments(documents: WorkbenchDocument[], targetPath: string) {
   return documents.filter((document) => document.kind !== "article" || !matchesPathPrefix(document.articlePath, targetPath));
 }
 
+function isWorkbenchTabShortcutEvent(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "code" | "key">) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) {
+    return false;
+  }
+
+  return (
+    /^Digit[1-9]$/.test(event.code) ||
+    event.code === "PageUp" ||
+    event.code === "PageDown" ||
+    event.key === "PageUp" ||
+    event.key === "PageDown" ||
+    event.code === "KeyW" ||
+    event.key.toLowerCase() === "w"
+  );
+}
+
 function LoginView({
   busy,
   error,
@@ -780,7 +884,9 @@ function LoginView({
 }
 
 function CommandPalette({
+  emptyMessage,
   open,
+  onSubmitQuery,
   title,
   placeholder,
   query,
@@ -791,7 +897,9 @@ function CommandPalette({
   onSelectIndex,
   onExecute
 }: {
+  emptyMessage?: string;
   open: boolean;
+  onSubmitQuery?: () => void;
   title: string;
   placeholder: string;
   query: string;
@@ -822,15 +930,17 @@ function CommandPalette({
         onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            onSelectIndex(Math.min(selectedIndex + 1, items.length - 1));
+            onSelectIndex(items.length === 0 ? 0 : Math.min(selectedIndex + 1, items.length - 1));
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
-            onSelectIndex(Math.max(selectedIndex - 1, 0));
+            onSelectIndex(items.length === 0 ? 0 : Math.max(selectedIndex - 1, 0));
           } else if (event.key === "Enter") {
             event.preventDefault();
             const activeItem = items[selectedIndex];
             if (activeItem) {
               onExecute(activeItem.id);
+            } else {
+              onSubmitQuery?.();
             }
           } else if (event.key === "Escape") {
             event.preventDefault();
@@ -842,7 +952,7 @@ function CommandPalette({
         <input className="command-palette-input" placeholder={placeholder} ref={inputRef} value={query} onChange={(event) => onQueryChange(event.target.value)} />
         <div className="command-palette-results">
           {items.length === 0 ? (
-            <div className="command-item empty">No results.</div>
+            <div className="command-item empty">{emptyMessage ?? "No results."}</div>
           ) : (
             items.map((item, index) => (
               <button className={`command-item ${index === selectedIndex ? "is-active" : ""}`} key={item.id} onClick={() => onExecute(item.id)} onMouseEnter={() => onSelectIndex(index)} type="button">
@@ -867,16 +977,17 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) ?? 280));
   const [previewWidth, setPreviewWidth] = useState(() => Number(window.localStorage.getItem(PREVIEW_WIDTH_STORAGE_KEY) ?? 420));
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [commandPaletteMode, setCommandPaletteMode] = useState<"commands" | "themes">("commands");
+  const [commandPaletteMode, setCommandPaletteMode] = useState<"commands" | "themeGroupCreate" | "themes">("commands");
   const [commandQuery, setCommandQuery] = useState("");
   const [selectedPaletteIndex, setSelectedPaletteIndex] = useState(0);
   const [treePayload, setTreePayload] = useState<TreePayload | null>(null);
+  const [adminHomePayload, setAdminHomePayload] = useState<AdminHomeConfigPayload | null>(null);
   const [configPayload, setConfigPayload] = useState<EditorConfigPayload | null>(null);
-  const [renderConfigPayload, setRenderConfigPayload] = useState<RenderConfigPayload | null>(null);
+  const [markdownBlockConfigPayload, setMarkdownBlockConfigPayload] = useState<MarkdownBlockConfigPayload | null>(null);
+  const [themeGroupsPayload, setThemeGroupsPayload] = useState<ThemeGroupsPayload | null>(null);
   const [siteConfigPayload, setSiteConfigPayload] = useState<SiteConfigPayload | null>(null);
-  const [siteThemeConfigPayload, setSiteThemeConfigPayload] = useState<SiteThemeConfigPayload | null>(null);
-  const [documents, setDocuments] = useState<WorkbenchDocument[]>([]);
-  const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<WorkbenchDocument[]>(() => [buildHomeDocument()]);
+  const [activeDocumentId, setActiveDocumentId] = useState<string | null>(HOME_DOCUMENT_ID);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -884,6 +995,7 @@ export function App() {
   const [gitChangedFiles, setGitChangedFiles] = useState<GitChangedFilePayload[]>([]);
   const [gitCommits, setGitCommits] = useState<GitCommitPayload[]>([]);
   const [gitCommitMessage, setGitCommitMessage] = useState("Update content and assets");
+  const [gitRefreshBusy, setGitRefreshBusy] = useState(false);
   const [gitInitialized, setGitInitialized] = useState(true);
   const [tagFilter, setTagFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
@@ -900,6 +1012,16 @@ export function App() {
   });
   const [selectedTreePath, setSelectedTreePath] = useState<string | null>(null);
   const [contextMenuState, setContextMenuState] = useState<{ path: string; x: number; y: number } | null>(null);
+  const [themeContextMenuState, setThemeContextMenuState] = useState<
+    | {
+        groupId?: string;
+        fileName?: string;
+        kind: "asset" | "group" | "root";
+        x: number;
+        y: number;
+      }
+    | null
+  >(null);
   const [treeClipboard, setTreeClipboard] = useState<{ path: string; mode: "copy" | "move" } | null>(null);
   const [fileDialog, setFileDialog] = useState<{
     entryType: "file" | "directory";
@@ -908,6 +1030,30 @@ export function App() {
     path: string;
     value: string;
     metadata: Record<string, string>;
+  } | null>(null);
+  const [themeGroupDialog, setThemeGroupDialog] = useState<{
+    groupId: string;
+    mode: "delete" | "rename";
+    value: string;
+  } | null>(null);
+  const [themeAssetDialog, setThemeAssetDialog] = useState<{
+    adminPreview: boolean;
+    currentFileName?: string;
+    fileName: string;
+    groupId: string;
+    mode: "create" | "delete" | "rename";
+    type: "css" | "js";
+  } | null>(null);
+  const [titleConflictState, setTitleConflictState] = useState<{
+    conflicts: Array<{ path: string; title: string }>;
+    fileDialog: {
+      entryType: "file" | "directory";
+      fileKind?: "article" | "asset";
+      mode: "create-file" | "create-directory" | "rename" | "delete";
+      path: string;
+      value: string;
+      metadata: Record<string, string>;
+    };
   } | null>(null);
   const [previewSourceText, setPreviewSourceText] = useState("");
   const [editorReadyVersion, setEditorReadyVersion] = useState(0);
@@ -925,6 +1071,8 @@ export function App() {
   const schedulePreviewCursorSyncRef = useRef<(() => void) | null>(null);
   const previewUpdateTimerRef = useRef<number | null>(null);
   const previewRenderRequestRef = useRef(0);
+  const adminHomeSaveTimerRef = useRef<number | null>(null);
+  const gitRefreshInFlightRef = useRef(false);
   const draftValuesRef = useRef<Record<string, string>>({});
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
   const treeRootRef = useRef<HTMLDivElement | null>(null);
@@ -956,47 +1104,54 @@ export function App() {
         .filter((contribution): contribution is CreateDialogContributionDefinition => contribution.kind === "create-dialog"),
     [pluginRuntime]
   );
+  const homeWidgetContributions = useMemo(
+    () =>
+      pluginRuntime
+        .getWorkbenchContributions()
+        .filter((contribution): contribution is HomeWidgetContributionDefinition => contribution.kind === "home-widget"),
+    [pluginRuntime]
+  );
   const activeTheme = pluginRuntime.getTheme(themeId) ?? availableThemes[0] ?? null;
-  const previewRenderStyles = useMemo(
-    () => renderConfigPayload?.value.styles ?? [],
-    [renderConfigPayload]
+  const enabledThemeGroups = useMemo(
+    () => (themeGroupsPayload?.groups ?? []).filter((group) => group.enable),
+    [themeGroupsPayload]
+  );
+  const previewThemeCssAssets = useMemo(
+    () =>
+      enabledThemeGroups.flatMap((group) =>
+        group.files
+          .filter((file) => file.type === "css" && file.adminPreview)
+          .map((file) => ({
+            assetPath: `${group.groupId}/${file.fileName}`,
+            fileName: file.fileName,
+            groupId: group.groupId
+          }))
+      ),
+    [enabledThemeGroups]
+  );
+  const previewThemeScriptAssets = useMemo(
+    () =>
+      enabledThemeGroups.flatMap((group) =>
+        group.files
+          .filter((file) => file.type === "js" && file.adminPreview)
+          .map((file) => ({
+            assetPath: `${group.groupId}/${file.fileName}`,
+            fileName: file.fileName,
+            groupId: group.groupId
+          }))
+      ),
+    [enabledThemeGroups]
   );
   const commandItems = useMemo(() => {
     const query = deferredCommandQuery.trim().toLowerCase();
-    const renderStyleQueryCandidate = deferredCommandQuery.trim();
-    const requestedRenderStyleDirectory =
-      renderStyleQueryCandidate.length > 0 &&
-      (!renderStyleQueryCandidate.includes(" ") ||
-        renderStyleQueryCandidate.toLowerCase().endsWith(".css") ||
-        renderStyleQueryCandidate.includes("/") ||
-        renderStyleQueryCandidate.includes("\\"))
-        ? normalizeRenderStyleDirectory(renderStyleQueryCandidate)
-        : null;
     const base = availableCommands.map((command) => ({
       id: command.id,
       title: command.title,
       description: command.keywords?.join(", "),
       haystack: `${command.title} ${command.id} ${(command.keywords ?? []).join(" ")}`.toLowerCase()
     }));
-    const filtered = query ? base.filter((command) => command.haystack.includes(query)) : base;
-    const renderStyleCommand =
-      requestedRenderStyleDirectory && query
-        ? [
-            {
-              id: `render-style:create:${requestedRenderStyleDirectory}`,
-              title: (renderConfigPayload?.value.styles.some(
-                (style) => style.directory.toLowerCase() === requestedRenderStyleDirectory.toLowerCase()
-              ) ?? false)
-                ? `Open Render CSS: ${requestedRenderStyleDirectory}`
-                : `Create Render CSS: ${requestedRenderStyleDirectory}`,
-              description: `Edit config/render/${requestedRenderStyleDirectory}`,
-              haystack: requestedRenderStyleDirectory.toLowerCase()
-            }
-          ]
-        : [];
-
-    return [...renderStyleCommand, ...filtered];
-  }, [availableCommands, deferredCommandQuery, renderConfigPayload]);
+    return query ? base.filter((command) => command.haystack.includes(query)) : base;
+  }, [availableCommands, deferredCommandQuery]);
   const themeItems = useMemo(() => {
     const query = deferredCommandQuery.trim().toLowerCase();
     const base = availableThemes.map((theme) => ({
@@ -1007,7 +1162,34 @@ export function App() {
     }));
     return query ? base.filter((theme) => theme.haystack.includes(query)) : base;
   }, [availableThemes, deferredCommandQuery]);
-  const paletteItems = commandPaletteMode === "commands" ? commandItems : themeItems;
+  const themeGroupCreateItems = useMemo(() => {
+    if (commandPaletteMode !== "themeGroupCreate") {
+      return [];
+    }
+
+    const normalizedGroupId = normalizeThemeGroupId(deferredCommandQuery);
+    if (!normalizedGroupId) {
+      return [];
+    }
+
+    const existing = (themeGroupsPayload?.groups ?? []).some(
+      (group) => group.groupId.toLowerCase() === normalizedGroupId.toLowerCase()
+    );
+
+    return [
+      {
+        id: "theme-group:create-input",
+        title: `${existing ? "Open" : "Create"} ${normalizedGroupId}`,
+        description: `config/theme/${normalizedGroupId}/theme.json`
+      }
+    ];
+  }, [commandPaletteMode, deferredCommandQuery, themeGroupsPayload]);
+  const paletteItems =
+    commandPaletteMode === "commands"
+      ? commandItems
+      : commandPaletteMode === "themes"
+        ? themeItems
+        : themeGroupCreateItems;
   const activeMetadataDialogFields = useMemo(() => {
     if (!fileDialog || fileDialog.mode === "delete") {
       return [];
@@ -1038,6 +1220,22 @@ export function App() {
     },
     [createDialogContributions]
   );
+
+  const requestWorkbenchKeyboardLock = useCallback(() => {
+    const keyboardApi = (navigator as Navigator & {
+      keyboard?: {
+        lock: (codes?: string[]) => Promise<void>;
+        unlock: () => void;
+      };
+    }).keyboard;
+
+    if (!keyboardApi?.lock) {
+      return;
+    }
+
+    const codes = ["KeyW", "PageUp", "PageDown", ...Array.from({ length: 9 }, (_, index) => `Digit${index + 1}`)];
+    void keyboardApi.lock(codes).catch(() => undefined);
+  }, []);
 
   const syncEditorValuePreservingView = useCallback((nextValue: string) => {
     const editor = editorRef.current;
@@ -1149,7 +1347,7 @@ export function App() {
     const htmlElement = document.createElement("html");
     const bodyElement = document.createElement("body");
     const proseElement = document.createElement("div");
-    proseElement.className = "preview-prose";
+    proseElement.className = "prose preview-prose";
     bodyElement.appendChild(proseElement);
     htmlElement.appendChild(bodyElement);
 
@@ -1177,7 +1375,7 @@ export function App() {
     }, PREVIEW_UPDATE_DEBOUNCE_MS);
   }, []);
 
-  const openPalette = (mode: "commands" | "themes") => {
+  const openPalette = (mode: "commands" | "themeGroupCreate" | "themes") => {
     setCommandPaletteMode(mode);
     setCommandQuery("");
     setSelectedPaletteIndex(0);
@@ -1224,14 +1422,6 @@ export function App() {
     return payload;
   };
 
-  const loadRenderConfig = async () => {
-    const payload = await api.getRenderConfig();
-    startTransition(() => {
-      setRenderConfigPayload(payload);
-    });
-    return payload;
-  };
-
   const loadSiteConfig = async () => {
     const payload = await api.getSiteConfig();
     startTransition(() => {
@@ -1240,13 +1430,58 @@ export function App() {
     return payload;
   };
 
-  const loadSiteThemeConfig = async () => {
-    const payload = await api.getSiteThemeConfig(SITE_THEME_DOCUMENT_META.themeId);
+  const loadMarkdownBlockConfig = async () => {
+    const payload = await api.getMarkdownBlockConfig();
     startTransition(() => {
-      setSiteThemeConfigPayload(payload);
+      setMarkdownBlockConfigPayload(payload);
     });
     return payload;
   };
+
+  const loadAdminHomeConfig = async () => {
+    const payload = await api.getAdminHomeConfig();
+    startTransition(() => {
+      setAdminHomePayload(payload);
+    });
+    return payload;
+  };
+
+  const loadThemeGroups = async () => {
+    const payload = await api.listThemeGroups();
+    startTransition(() => {
+      setThemeGroupsPayload(payload);
+    });
+    return payload;
+  };
+
+  const updateAdminHomeConfigValue = useCallback((nextValue: AdminHomeConfigPayload["value"]) => {
+    const normalizedValue = normalizeAdminHomeConfig(nextValue);
+    const raw = `${JSON.stringify(normalizedValue, null, 2)}\n`;
+
+    setAdminHomePayload({
+      raw,
+      value: normalizedValue
+    });
+
+    if (adminHomeSaveTimerRef.current !== null) {
+      window.clearTimeout(adminHomeSaveTimerRef.current);
+      adminHomeSaveTimerRef.current = null;
+    }
+
+    adminHomeSaveTimerRef.current = window.setTimeout(() => {
+      api.saveAdminHomeConfig(raw)
+        .then((savedPayload) => {
+          setAdminHomePayload(savedPayload);
+          setPageError(null);
+        })
+        .catch((error: Error) => {
+          setPageError(error.message);
+        })
+        .finally(() => {
+          adminHomeSaveTimerRef.current = null;
+        });
+    }, 220);
+  }, []);
 
   const loadMediaAssets = async () => {
     const payload = await api.listMediaAssets();
@@ -1264,6 +1499,36 @@ export function App() {
       setGitInitialized(statusPayload.initialized && historyPayload.initialized);
     });
   };
+
+  const refreshGitData = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (gitRefreshInFlightRef.current) {
+        return;
+      }
+
+      gitRefreshInFlightRef.current = true;
+      if (!options?.silent) {
+        setGitRefreshBusy(true);
+      }
+
+      try {
+        await loadGitData();
+        if (!options?.silent) {
+          setPageError(null);
+        }
+      } catch (error) {
+        if (!options?.silent) {
+          setPageError((error as Error).message);
+        }
+      } finally {
+        gitRefreshInFlightRef.current = false;
+        if (!options?.silent) {
+          setGitRefreshBusy(false);
+        }
+      }
+    },
+    []
+  );
 
   const uploadMediaFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) {
@@ -1316,86 +1581,343 @@ export function App() {
     setSelectedTreePath(articlePath);
   };
 
-  const applySavedRenderConfigPayload = (savedPayload: RenderConfigPayload) => {
-    setRenderConfigPayload(savedPayload);
-    setDocuments((current) =>
-      current.map((document) =>
-        document.kind === "config" && document.configKind === "renderConfig"
-          ? {
-              ...document,
-              value: savedPayload.raw,
-              savedValue: savedPayload.raw,
-              dirty: false
-            }
-          : document
-      )
-    );
-    draftValuesRef.current["config:renderConfig"] = savedPayload.raw;
-    if (activeDocument?.kind === "config" && activeDocument.configKind === "renderConfig") {
-      syncEditorValuePreservingView(savedPayload.raw);
-    }
+  const applySavedThemeGroupsPayload = (savedPayload: ThemeGroupsPayload) => {
+    setThemeGroupsPayload(savedPayload);
     setRenderStyleAssetVersion((current) => current + 1);
   };
 
-  const applySavedRenderStylePayload = (savedPayload: RenderStylePayload) => {
-    const savedDocument = buildRenderStyleDocument(savedPayload);
-    draftValuesRef.current[savedDocument.id] = savedDocument.value;
-    setDocuments((current) => upsertDocument(current, savedDocument));
-    setActiveDocumentId(savedDocument.id);
-    if (activeDocument?.kind === "renderStyle" && activeDocument.directory === savedPayload.directory) {
-      syncEditorValuePreservingView(savedPayload.raw);
-    }
-    setRenderStyleAssetVersion((current) => current + 1);
+  const refreshThemeGroupsPayload = async () => {
+    const payload = await api.listThemeGroups();
+    applySavedThemeGroupsPayload(payload);
+    return payload;
   };
 
-  const openRenderStyleDocument = async (directory: string) => {
-    const normalizedDirectory = normalizeRenderStyleDirectory(directory);
-
-    if (!normalizedDirectory) {
-      return;
-    }
-
+  const openThemeAssetDocument = async (groupId: string, fileName: string) => {
     try {
       const existingDocument = documents.find(
-        (document) => document.kind === "renderStyle" && document.directory === normalizedDirectory
+        (document) =>
+          document.kind === "themeAsset" &&
+          document.groupId === groupId &&
+          document.fileName === fileName
       );
       if (existingDocument) {
         setActiveDocumentId(existingDocument.id);
         return;
       }
 
-      const payload = await api.getRenderStyle(normalizedDirectory);
-      const renderStyleDocument = buildRenderStyleDocument(payload);
-      draftValuesRef.current[renderStyleDocument.id] = renderStyleDocument.value;
-      setDocuments((current) => upsertDocument(current, renderStyleDocument));
-      setActiveDocumentId(renderStyleDocument.id);
+      const payload = await api.getThemeAsset(groupId, fileName);
+      const nextDocument = buildThemeAssetDocument(payload);
+      draftValuesRef.current[nextDocument.id] = nextDocument.value;
+      setDocuments((current) => upsertDocument(current, nextDocument));
+      setActiveDocumentId(nextDocument.id);
       setPageError(null);
     } catch (error) {
       setPageError((error as Error).message);
     }
   };
 
-  const createRenderStyleDocument = async (fileName: string) => {
-    const normalizedDirectory = normalizeRenderStyleDirectory(fileName);
+  const openThemeGroupConfigDocument = async (groupId: string) => {
+    try {
+      const existingDocument = documents.find(
+        (document) =>
+          document.kind === "themeAsset" &&
+          document.groupId === groupId &&
+          document.fileName === "theme.json"
+      );
+      if (existingDocument) {
+        setActiveDocumentId(existingDocument.id);
+        return;
+      }
 
-    if (!normalizedDirectory) {
+      const payload = await api.getThemeGroup(groupId);
+      const nextDocument = buildThemeAssetDocument({
+        adminPreview: false,
+        assetPath: `${payload.groupId}/theme.json`,
+        fileName: "theme.json",
+        groupId: payload.groupId,
+        language: "json",
+        raw: payload.raw,
+        type: "js"
+      });
+      draftValuesRef.current[nextDocument.id] = nextDocument.value;
+      setDocuments((current) => upsertDocument(current, nextDocument));
+      setActiveDocumentId(nextDocument.id);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const saveThemeAssetDocument = async () => {
+    if (!isThemeAssetDocument(activeDocument)) {
       return;
     }
 
-    setBusyMessage(`Opening ${normalizedDirectory}...`);
+    const raw = editorRef.current?.getValue() ?? getDraftValue(activeDocument);
+    if (activeDocument.fileName === "theme.json") {
+      await api.saveThemeGroup(activeDocument.groupId, raw);
+      await refreshThemeGroupsPayload();
+      await openThemeGroupConfigDocument(activeDocument.groupId);
+      return;
+    }
+
+    const savedPayload = await api.saveThemeAsset(activeDocument.groupId, activeDocument.fileName, raw);
+    const savedDocument = buildThemeAssetDocument(savedPayload);
+    draftValuesRef.current[savedDocument.id] = savedDocument.value;
+    setDocuments((current) => upsertDocument(current, savedDocument));
+    setActiveDocumentId(savedDocument.id);
+    await refreshThemeGroupsPayload();
+  };
+
+  const createThemeGroupDocument = async (groupId: string) => {
+    const normalizedGroupId = normalizeThemeGroupId(groupId);
+    if (!normalizedGroupId) {
+      return;
+    }
+
+    setBusyMessage(`Creating ${normalizedGroupId}...`);
     try {
-      const payload = await api.createRenderStyle(normalizedDirectory);
-      applySavedRenderConfigPayload(payload.renderConfig);
-      applySavedRenderStylePayload({
-        directory: payload.directory,
-        raw: payload.raw
-      });
+      await api.createThemeGroup(normalizedGroupId);
+      await refreshThemeGroupsPayload();
+      await openThemeGroupConfigDocument(normalizedGroupId);
       setPageError(null);
     } catch (error) {
       setPageError((error as Error).message);
     } finally {
       setBusyMessage(null);
     }
+  };
+
+  const renameThemeGroupDocument = async (groupId: string, nextGroupId: string) => {
+    const normalizedNextGroupId = normalizeThemeGroupId(nextGroupId);
+    if (!normalizedNextGroupId) {
+      return;
+    }
+
+    setBusyMessage(`Renaming ${groupId}...`);
+    try {
+      const payload = await api.renameThemeGroup(groupId, normalizedNextGroupId);
+      await refreshThemeGroupsPayload();
+      setDocuments((current) =>
+        current.filter(
+          (document) =>
+            !(document.kind === "themeAsset" && document.groupId === groupId)
+        )
+      );
+      setThemeGroupDialog(null);
+      await openThemeGroupConfigDocument(payload.groupId);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
+  const deleteThemeGroupDocument = async (groupId: string) => {
+    setBusyMessage(`Deleting ${groupId}...`);
+    try {
+      await api.deleteThemeGroup(groupId);
+      await refreshThemeGroupsPayload();
+      setDocuments((current) =>
+        current.filter((document) => !(document.kind === "themeAsset" && document.groupId === groupId))
+      );
+      setActiveDocumentId((current) =>
+        current && documents.some((document) => document.kind === "themeAsset" && document.groupId === groupId && document.id === current)
+          ? HOME_DOCUMENT_ID
+          : current
+      );
+      setThemeGroupDialog(null);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
+  const createThemeAssetDocument = async (
+    groupId: string,
+    fileName: string,
+    type: "css" | "js",
+    adminPreview: boolean
+  ) => {
+    setBusyMessage(`Creating ${fileName}...`);
+    try {
+      const payload = await api.createThemeAsset(groupId, fileName, type, adminPreview);
+      await refreshThemeGroupsPayload();
+      await openThemeAssetDocument(payload.groupId, payload.fileName);
+      setThemeAssetDialog(null);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
+  const renameThemeAssetDocument = async (groupId: string, fileName: string, nextFileName: string) => {
+    setBusyMessage(`Renaming ${fileName}...`);
+    try {
+      const payload = await api.renameThemeAsset(groupId, fileName, nextFileName);
+      await refreshThemeGroupsPayload();
+      setDocuments((current) =>
+        current.filter(
+          (document) =>
+            !(document.kind === "themeAsset" && document.groupId === groupId && document.fileName === fileName)
+        )
+      );
+      setThemeAssetDialog(null);
+      await openThemeAssetDocument(payload.groupId, payload.fileName);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
+  const deleteThemeAssetDocument = async (groupId: string, fileName: string) => {
+    setBusyMessage(`Deleting ${fileName}...`);
+    try {
+      await api.deleteThemeAsset(groupId, fileName);
+      await refreshThemeGroupsPayload();
+      setDocuments((current) =>
+        current.filter(
+          (document) =>
+            !(document.kind === "themeAsset" && document.groupId === groupId && document.fileName === fileName)
+        )
+      );
+      setThemeAssetDialog(null);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setBusyMessage(null);
+    }
+  };
+
+  const updateThemeGroupEnable = async (groupId: string, enable: boolean) => {
+    try {
+      const group = await api.getThemeGroup(groupId);
+      await api.saveThemeGroup(
+        groupId,
+        JSON.stringify(
+          {
+            ...group.value,
+            enable
+          },
+          null,
+          2
+        )
+      );
+      await refreshThemeGroupsPayload();
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const updateThemeAssetAdminPreview = async (groupId: string, fileName: string, adminPreview: boolean) => {
+    try {
+      const group = await api.getThemeGroup(groupId);
+      await api.saveThemeGroup(
+        groupId,
+        JSON.stringify(
+          {
+            ...group.value,
+            files: group.value.files.map((file) =>
+              file.fileName === fileName
+                ? {
+                    ...file,
+                    adminPreview
+                  }
+                : file
+            )
+          },
+          null,
+          2
+        )
+      );
+      await refreshThemeGroupsPayload();
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const executeFileDialogOperation = async (
+    dialog: NonNullable<typeof fileDialog>,
+    options?: { allowDuplicateTitle?: boolean }
+  ) => {
+    if (dialog.mode === "create-file" || dialog.mode === "create-directory") {
+      const result = await api.createFileSystemEntry(
+        dialog.path,
+        dialog.mode === "create-file" ? "file" : "directory",
+        dialog.entryType === "file" && dialog.fileKind === "article"
+          ? deriveArticleFileName(dialog.value)
+          : dialog.value,
+        dialog.entryType === "file" && dialog.fileKind === "article"
+          ? {
+              ...dialog.metadata,
+              title: dialog.value
+            }
+          : dialog.metadata,
+        {
+          allowDuplicateTitle: options?.allowDuplicateTitle
+        }
+      );
+      await loadTree();
+      setSelectedTreePath(result.path);
+      if (result.path.toLowerCase().endsWith(".md")) {
+        await openArticleDocument(result.path);
+      }
+      return;
+    }
+
+    if (dialog.mode === "rename") {
+      const result = await api.renameFileSystemEntry(
+        dialog.path,
+        dialog.entryType === "file" && dialog.fileKind === "article"
+          ? deriveArticleFileName(dialog.value)
+          : dialog.value,
+        dialog.entryType === "file" && dialog.fileKind === "article"
+          ? {
+              allowDuplicateTitle: options?.allowDuplicateTitle,
+              title: dialog.value
+            }
+          : undefined
+      );
+      await api.saveFileSystemMetadata(result.path, {
+        ...dialog.metadata,
+        ...(dialog.entryType === "file" && dialog.fileKind === "article"
+          ? { title: dialog.value }
+          : {})
+      });
+      await loadTree();
+      setDocuments((current) => remapDocuments(current, dialog.path, result.path));
+      setSelectedTreePath(result.path);
+      if (dialog.entryType === "file" && dialog.fileKind === "article") {
+        const updatedArticle = await api.getArticle(result.path);
+        const updatedDocument = buildArticleDocument(updatedArticle);
+        draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
+        setDocuments((current) => upsertDocument(remapDocuments(current, dialog.path, result.path), updatedDocument));
+        setActiveDocumentId(updatedDocument.id);
+        syncEditorValuePreservingView(updatedDocument.value);
+        schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
+      }
+      return;
+    }
+
+    await api.deleteFileSystemEntry(dialog.path);
+    await loadTree();
+    setDocuments((current) => removeDocuments(current, dialog.path));
+    setActiveDocumentId((current) =>
+      current?.startsWith("article:") && matchesPathPrefix(current.slice("article:".length), dialog.path)
+        ? HOME_DOCUMENT_ID
+        : current
+    );
+    setSelectedTreePath(null);
   };
 
   const openConfigDocument = async (kind: ConfigDocumentKind) => {
@@ -1405,12 +1927,10 @@ export function App() {
       return;
     }
     const payload =
-      kind === "siteConfig"
+      kind === "markdownBlockConfig"
+        ? markdownBlockConfigPayload ?? (await loadMarkdownBlockConfig())
+        : kind === "siteConfig"
         ? siteConfigPayload ?? (await loadSiteConfig())
-        : kind === "renderConfig"
-          ? renderConfigPayload ?? (await loadRenderConfig())
-        : kind === "siteThemeAtlas"
-          ? siteThemeConfigPayload ?? (await loadSiteThemeConfig())
         : configPayload ?? (await loadConfig());
     const document = buildConfigDocument(kind, payload);
     draftValuesRef.current[document.id] = document.value;
@@ -1418,20 +1938,19 @@ export function App() {
     setActiveDocumentId(document.id);
   };
 
-  const saveRenderConfigRaw = async (raw: string) => {
-    const savedPayload = await api.saveRenderConfig(raw);
-    applySavedRenderConfigPayload(savedPayload);
-    return savedPayload;
-  };
-
   const refreshWorkspace = async () => {
-    const [tree] = await Promise.all([loadTree(), loadConfig(), loadRenderConfig(), loadSiteConfig(), loadSiteThemeConfig(), loadMediaAssets(), loadGitData()]);
-    if (!activeDocumentId) {
-      const firstArticlePath = flattenTreePaths(tree.tree)[0];
-      if (firstArticlePath) {
-        await openArticleDocument(firstArticlePath);
-      }
-    }
+    await Promise.all([
+      loadTree(),
+      loadConfig(),
+      loadMarkdownBlockConfig(),
+      loadAdminHomeConfig(),
+      loadThemeGroups(),
+      loadSiteConfig(),
+      loadMediaAssets(),
+      loadGitData()
+    ]);
+    setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
+    setActiveDocumentId((current) => current ?? HOME_DOCUMENT_ID);
   };
 
   const saveConfigDocuments = async () => {
@@ -1490,21 +2009,23 @@ export function App() {
     draftValuesRef.current["config:siteConfig"] = savedPayload.raw;
   };
 
-  const saveSiteThemeConfigDocument = async () => {
-    const siteThemeDocument = documents.find(
-      (document) => document.kind === "config" && document.configKind === "siteThemeAtlas"
+  const saveMarkdownBlockConfigDocument = async () => {
+    const markdownBlockDocument = documents.find(
+      (document) => document.kind === "config" && document.configKind === "markdownBlockConfig"
     );
-    const raw = (siteThemeDocument ? getDraftValue(siteThemeDocument) : undefined) ?? siteThemeConfigPayload?.raw;
+    const raw =
+      (markdownBlockDocument ? getDraftValue(markdownBlockDocument) : undefined) ??
+      markdownBlockConfigPayload?.raw;
 
     if (typeof raw !== "string") {
       return;
     }
 
-    const savedPayload = await api.saveSiteThemeConfig(SITE_THEME_DOCUMENT_META.themeId, raw);
-    setSiteThemeConfigPayload(savedPayload);
+    const savedPayload = await api.saveMarkdownBlockConfig(raw);
+    setMarkdownBlockConfigPayload(savedPayload);
     setDocuments((current) =>
       current.map((document) =>
-        document.kind === "config" && document.configKind === "siteThemeAtlas"
+        document.kind === "config" && document.configKind === "markdownBlockConfig"
           ? {
               ...document,
               value: savedPayload.raw,
@@ -1514,95 +2035,14 @@ export function App() {
           : document
       )
     );
-    draftValuesRef.current["config:siteThemeAtlas"] = savedPayload.raw;
-  };
-
-  const saveRenderConfigDocument = async () => {
-    const renderConfigDocument = documents.find(
-      (document) => document.kind === "config" && document.configKind === "renderConfig"
-    );
-    const raw = (renderConfigDocument ? getDraftValue(renderConfigDocument) : undefined) ?? renderConfigPayload?.raw;
-
-    if (typeof raw !== "string") {
-      return;
-    }
-
-    await saveRenderConfigRaw(raw);
-  };
-
-  const saveRenderStyleDocument = async () => {
-    if (!isRenderStyleDocument(activeDocument)) {
-      return;
-    }
-
-    const raw = editorRef.current?.getValue() ?? getDraftValue(activeDocument);
-    const savedPayload = await api.saveRenderStyle(activeDocument.directory, raw);
-    applySavedRenderStylePayload(savedPayload);
-  };
-
-  const toggleRenderStyleEnable = async (directory: string, enable: boolean) => {
-    const renderConfigDocument = documents.find(
-      (document) => document.kind === "config" && document.configKind === "renderConfig"
-    );
-    const raw = (renderConfigDocument ? getDraftValue(renderConfigDocument) : undefined) ?? renderConfigPayload?.raw;
-    const normalizedDirectory = normalizeRenderStyleDirectory(directory);
-
-    if (!normalizedDirectory || typeof raw !== "string") {
-      return;
-    }
-
-    setBusyMessage("Updating render CSS...");
-
-    try {
-      const parsed = JSON.parse(raw) as { styles?: Array<{ directory?: string; enable?: boolean }> };
-      const currentStyles = Array.isArray(parsed.styles) ? parsed.styles : [];
-      const nextStyles = currentStyles.some(
-        (style) =>
-          typeof style.directory === "string" &&
-          style.directory.trim().toLowerCase() === normalizedDirectory.toLowerCase()
-      )
-        ? currentStyles.map((style) =>
-            typeof style.directory === "string" &&
-            style.directory.trim().toLowerCase() === normalizedDirectory.toLowerCase()
-              ? {
-                  directory: style.directory.trim().replace(/\\/g, "/"),
-                  enable
-                }
-              : {
-                  directory: typeof style.directory === "string" ? style.directory.trim().replace(/\\/g, "/") : "",
-                  enable: style.enable === true
-                }
-          )
-        : [
-            ...currentStyles.map((style) => ({
-              directory: typeof style.directory === "string" ? style.directory.trim().replace(/\\/g, "/") : "",
-              enable: style.enable === true
-            })),
-            {
-              directory: normalizedDirectory,
-              enable
-            }
-          ];
-
-      await saveRenderConfigRaw(
-        JSON.stringify(
-          {
-            styles: nextStyles.filter((style) => style.directory.length > 0)
-          },
-          null,
-          2
-        )
-      );
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
+    draftValuesRef.current["config:markdownBlockConfig"] = savedPayload.raw;
   };
 
   const saveActiveDocument = async () => {
     if (!activeDocument) {
+      return;
+    }
+    if (activeDocument.kind === "home") {
       return;
     }
     setBusyMessage(`Saving ${activeDocument.title}...`);
@@ -1617,14 +2057,12 @@ export function App() {
         syncEditorValuePreservingView(savedDocument.value);
         schedulePreviewSourceUpdate(savedDocument.value, { immediate: true });
         await loadTree();
-      } else if (activeDocument.kind === "renderStyle") {
-        await saveRenderStyleDocument();
+      } else if (activeDocument.kind === "themeAsset") {
+        await saveThemeAssetDocument();
+      } else if (activeDocument.configKind === "markdownBlockConfig") {
+        await saveMarkdownBlockConfigDocument();
       } else if (activeDocument.configKind === "siteConfig") {
         await saveSiteConfigDocument();
-      } else if (activeDocument.configKind === "renderConfig") {
-        await saveRenderConfigDocument();
-      } else if (activeDocument.configKind === "siteThemeAtlas") {
-        await saveSiteThemeConfigDocument();
       } else {
         await saveConfigDocuments();
       }
@@ -1649,9 +2087,17 @@ export function App() {
   };
 
   workbenchApiRef.current = {
+    openHome: () => {
+      setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
+      setActiveDocumentId(HOME_DOCUMENT_ID);
+    },
     showCommandPalette: () => openPalette("commands"),
     hideCommandPalette: () => setCommandPaletteOpen(false),
     showThemePicker: () => openPalette("themes"),
+    startThemeGroupCreate: () => {
+      setCommandQuery("");
+      openPalette("themeGroupCreate");
+    },
     toggleSidebar: () => setSidebarVisible((current) => !current),
     togglePreview: () => setPreviewVisible((current) => !current),
     saveActiveDocument,
@@ -1680,31 +2126,30 @@ export function App() {
     }
 
     let cancelled = false;
-    const enabledStyles = previewRenderStyles.filter((style) => style.enable);
-    const nextLinks = enabledStyles.map((style) => {
+    const nextLinks = previewThemeCssAssets.map((asset) => {
       const link = document.createElement("link");
       link.rel = "stylesheet";
-      link.href = `/render-files/${style.directory
+      link.href = `/theme-files/${asset.assetPath
         .split("/")
         .filter(Boolean)
         .map((segment) => encodeURIComponent(segment))
         .join("/")}?v=${renderStyleAssetVersion}`;
-      link.dataset.renderStyleDirectory = style.directory;
+      link.dataset.renderStyleDirectory = asset.assetPath;
       return link;
     });
     previewShadowHead.replaceChildren(...nextLinks);
 
     void Promise.all(
-      enabledStyles.map(async (style) => {
-        const href = `/render-files/${style.directory
+      previewThemeCssAssets.map(async (asset) => {
+        const href = `/theme-files/${asset.assetPath
           .split("/")
           .filter(Boolean)
           .map((segment) => encodeURIComponent(segment))
           .join("/")}?v=${renderStyleAssetVersion}`;
         const response = await fetch(href, { credentials: "include" });
-        const cssText = await response.text();
+        const cssText = rewriteManagedMediaTextReferences(await response.text(), "/media");
         const styleElement = document.createElement("style");
-        styleElement.dataset.renderStyleRootCompat = style.directory;
+        styleElement.dataset.renderStyleRootCompat = asset.assetPath;
         styleElement.textContent = buildPreviewRootCompatCss(cssText);
         return styleElement;
       })
@@ -1713,8 +2158,32 @@ export function App() {
         if (cancelled || previewShadowHeadRef.current !== previewShadowHead) {
           return;
         }
+        const scriptElements = previewThemeScriptAssets.map((asset) => {
+          const script = document.createElement("script");
+          script.type = "module";
+          script.dataset.themePreviewScript = asset.assetPath;
+          return fetch(
+            `/theme-files/${asset.assetPath
+              .split("/")
+              .filter(Boolean)
+              .map((segment) => encodeURIComponent(segment))
+              .join("/")}?v=${renderStyleAssetVersion}`,
+            { credentials: "include" }
+          )
+            .then((response) => response.text())
+            .then((code) => {
+              script.textContent = `const previewHost = document.querySelector('.preview-shadow-host'); const previewRoot = previewHost?.shadowRoot ?? null; const previewProse = previewRoot?.querySelector('.preview-prose') ?? null; const previewApi = { previewHost, previewRoot, previewProse }; ${rewriteManagedMediaTextReferences(code, "/media")}`;
+              return script;
+            });
+        });
 
-        previewShadowHead.replaceChildren(...nextLinks, ...compatStyles);
+        return Promise.all(scriptElements).then((resolvedScripts) => {
+          if (cancelled || previewShadowHeadRef.current !== previewShadowHead) {
+            return;
+          }
+
+          previewShadowHead.replaceChildren(...nextLinks, ...compatStyles, ...resolvedScripts);
+        });
       })
       .catch(() => {
         if (!cancelled && previewShadowHeadRef.current === previewShadowHead) {
@@ -1725,7 +2194,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [previewReadyVersion, previewRenderStyles, renderStyleAssetVersion]);
+  }, [previewReadyVersion, previewThemeCssAssets, previewThemeScriptAssets, renderStyleAssetVersion]);
 
   useEffect(() => {
     if (!activeTheme) {
@@ -1749,6 +2218,43 @@ export function App() {
       refreshWorkspace().catch((error: Error) => setPageError(error.message));
     }
   }, [authenticated]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshGitData({ silent: true });
+    }, GIT_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [authenticated, refreshGitData]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    const keyboardApi = (navigator as Navigator & {
+      keyboard?: {
+        lock: (codes?: string[]) => Promise<void>;
+        unlock: () => void;
+      };
+    }).keyboard;
+
+    if (!keyboardApi?.lock || !keyboardApi.unlock) {
+      return;
+    }
+
+    requestWorkbenchKeyboardLock();
+
+    return () => {
+      keyboardApi.unlock();
+    };
+  }, [authenticated, requestWorkbenchKeyboardLock]);
 
   useEffect(() => {
     if (!commandPaletteOpen) {
@@ -1791,7 +2297,19 @@ export function App() {
 
     const parsedSource = parsePreviewSource(activeDocument.articlePath, previewSourceText);
     const bodyLineOffset = computeBodyLineOffset(previewSourceText);
-    const nextBlocks = parsePreviewBlocks(parsedSource.body).map((block) => ({
+    let previewRenderError = parsedSource.frontmatterError;
+    let renderBlockConfig = markdownBlockConfigPayload?.value ?? null;
+    let nextBlocks: ParsedPreviewBlock[];
+
+    try {
+      nextBlocks = parsePreviewBlocks(parsedSource.body, renderBlockConfig);
+    } catch (error) {
+      previewRenderError = error instanceof Error ? error.message : String(error);
+      renderBlockConfig = null;
+      nextBlocks = parsePreviewBlocks(parsedSource.body, null);
+    }
+
+    const nextPreviewBlocks = nextBlocks.map((block) => ({
       ...block,
       startLine: block.startLine + bodyLineOffset,
       endLine: block.endLine + bodyLineOffset
@@ -1801,28 +2319,28 @@ export function App() {
     let prefixLength = 0;
     while (
       prefixLength < currentBlocks.length &&
-      prefixLength < nextBlocks.length &&
-      currentBlocks[prefixLength].hash === nextBlocks[prefixLength].hash
+      prefixLength < nextPreviewBlocks.length &&
+      currentBlocks[prefixLength].hash === nextPreviewBlocks[prefixLength].hash
     ) {
       prefixLength += 1;
     }
 
     let currentTailIndex = currentBlocks.length - 1;
-    let nextTailIndex = nextBlocks.length - 1;
+    let nextTailIndex = nextPreviewBlocks.length - 1;
     while (
       currentTailIndex >= prefixLength &&
       nextTailIndex >= prefixLength &&
-      currentBlocks[currentTailIndex].hash === nextBlocks[nextTailIndex].hash
+      currentBlocks[currentTailIndex].hash === nextPreviewBlocks[nextTailIndex].hash
     ) {
       currentTailIndex -= 1;
       nextTailIndex -= 1;
     }
 
-    const changedBlocks = nextBlocks.slice(prefixLength, nextTailIndex + 1);
+    const changedBlocks = nextPreviewBlocks.slice(prefixLength, nextTailIndex + 1);
 
     Promise.all(
       changedBlocks.map(async (block) => {
-        const html = await renderMarkdownFragmentWithKatex(block.source);
+        const html = await renderMarkdownFragmentWithKatex(block.source, renderBlockConfig);
         return rewriteManagedMediaUrls(
           rewriteRelativeAssetUrls(html, parsedSource.directory, "/content-files"),
           "/media"
@@ -1838,7 +2356,7 @@ export function App() {
 
         for (let index = 0; index < prefixLength; index += 1) {
           const previousBlock = currentBlocks[index];
-          const nextBlock = nextBlocks[index];
+          const nextBlock = nextPreviewBlocks[index];
           nextRenderedBlocks.push({
             ...previousBlock,
             hash: nextBlock.hash,
@@ -1865,9 +2383,9 @@ export function App() {
 
         const nextSuffixStart = prefixLength + changedBlocks.length;
         const currentSuffixStart = currentTailIndex + 1;
-        for (let nextIndex = nextSuffixStart; nextIndex < nextBlocks.length; nextIndex += 1) {
+        for (let nextIndex = nextSuffixStart; nextIndex < nextPreviewBlocks.length; nextIndex += 1) {
           const previousBlock = currentBlocks[currentSuffixStart + (nextIndex - nextSuffixStart)];
-          const nextBlock = nextBlocks[nextIndex];
+          const nextBlock = nextPreviewBlocks[nextIndex];
 
           if (!previousBlock) {
             continue;
@@ -1890,7 +2408,7 @@ export function App() {
 
         previewProseRef.current.replaceChildren(fragment);
         previewBlocksRef.current = nextRenderedBlocks;
-        setPageError(parsedSource.frontmatterError);
+        setPageError(previewRenderError);
         schedulePreviewCursorSyncRef.current?.();
       })
       .catch((error: Error) => {
@@ -1898,7 +2416,7 @@ export function App() {
           setPageError(error.message);
         }
       });
-  }, [activeDocument?.id, previewReadyVersion, previewSourceText, previewVisible]);
+  }, [activeDocument?.id, markdownBlockConfigPayload?.raw, previewReadyVersion, previewSourceText, previewVisible]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -1922,19 +2440,26 @@ export function App() {
         return;
       }
 
-      const blockTop = block.element.offsetTop;
-      const blockHeight = Math.max(block.element.offsetHeight, 1);
-      const blockBottom = blockTop + blockHeight;
-      const viewportHeight = previewElement.clientHeight;
+      const lineRatio =
+        block.endLine <= block.startLine
+          ? 0
+          : (position.lineNumber - block.startLine) / (block.endLine - block.startLine);
+      const anchorElement = findPreviewAnchorElement(block.element, lineRatio, previewElement.clientHeight);
       const currentScrollTop = previewElement.scrollTop;
+      const previewBounds = previewElement.getBoundingClientRect();
+      const anchorBounds = anchorElement.getBoundingClientRect();
+      const anchorTop = anchorBounds.top - previewBounds.top + currentScrollTop;
+      const anchorHeight = Math.max(anchorBounds.height, 1);
+      const anchorBottom = anchorTop + anchorHeight;
+      const viewportHeight = previewElement.clientHeight;
       const focusBandTop = currentScrollTop + viewportHeight * 0.25;
       const focusBandBottom = currentScrollTop + viewportHeight * 0.75;
 
-      if (blockBottom >= focusBandTop && blockTop <= focusBandBottom) {
+      if (anchorBottom >= focusBandTop && anchorTop <= focusBandBottom) {
         return;
       }
 
-      const desiredTop = blockTop - viewportHeight * 0.5 + blockHeight * 0.5;
+      const desiredTop = anchorTop - viewportHeight * 0.18;
       const maxScrollTop = Math.max(previewElement.scrollHeight - viewportHeight, 0);
       previewElement.scrollTo({
         top: Math.min(maxScrollTop, Math.max(0, desiredTop)),
@@ -1977,6 +2502,11 @@ export function App() {
 
   useEffect(() => {
     return () => {
+      if (adminHomeSaveTimerRef.current !== null) {
+        window.clearTimeout(adminHomeSaveTimerRef.current);
+        adminHomeSaveTimerRef.current = null;
+      }
+
       if (previewUpdateTimerRef.current !== null) {
         window.clearTimeout(previewUpdateTimerRef.current);
         previewUpdateTimerRef.current = null;
@@ -1990,6 +2520,23 @@ export function App() {
       previewBlocksRef.current = [];
       schedulePreviewCursorSyncRef.current = null;
       previewProseRef.current?.replaceChildren();
+    };
+  }, []);
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (isWorkbenchTabShortcutEvent(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+      }
+    };
+
+    document.addEventListener("keydown", listener, true);
+    window.addEventListener("keydown", listener, true);
+    return () => {
+      document.removeEventListener("keydown", listener, true);
+      window.removeEventListener("keydown", listener, true);
     };
   }, []);
 
@@ -2078,6 +2625,61 @@ export function App() {
     window.addEventListener("keydown", listener, true);
     return () => window.removeEventListener("keydown", listener, true);
   }, [selectedTreeNode, sidebarView, treeClipboard]);
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (commandPaletteOpen) {
+        return;
+      }
+
+      if (!isWorkbenchTabShortcutEvent(event)) {
+        return;
+      }
+
+      const tabIndexMatch = /^Digit([1-9])$/.exec(event.code);
+      if (tabIndexMatch) {
+        const index = Number(tabIndexMatch[1]) - 1;
+        const targetDocument = documents[index];
+        if (targetDocument) {
+          setActiveDocumentId(targetDocument.id);
+        }
+        return;
+      }
+
+      if (event.key === "PageUp" || event.key === "PageDown") {
+        const activeIndex = documents.findIndex((document) => document.id === activeDocumentId);
+        if (activeIndex === -1 || documents.length === 0) {
+          return;
+        }
+
+        const delta = event.key === "PageUp" ? -1 : 1;
+        const nextIndex = (activeIndex + delta + documents.length) % documents.length;
+        setActiveDocumentId(documents[nextIndex]?.id ?? activeDocumentId);
+        return;
+      }
+
+      if (event.key.toLowerCase() === "w") {
+        if (activeDocumentId === HOME_DOCUMENT_ID) {
+          return;
+        }
+
+        const nextDocuments = closeDocument(documents, activeDocumentId ?? "");
+        setDocuments(nextDocuments);
+        if (activeDocumentId) {
+          const closedIndex = documents.findIndex((document) => document.id === activeDocumentId);
+          const fallbackIndex = Math.max(0, closedIndex - 1);
+          setActiveDocumentId(nextDocuments[fallbackIndex]?.id ?? HOME_DOCUMENT_ID);
+        }
+      }
+    };
+
+    document.addEventListener("keydown", listener, true);
+    window.addEventListener("keydown", listener, true);
+    return () => {
+      document.removeEventListener("keydown", listener, true);
+      window.removeEventListener("keydown", listener, true);
+    };
+  }, [activeDocumentId, commandPaletteOpen, documents]);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -2471,6 +3073,7 @@ export function App() {
           setLoginError(null);
           try {
             await api.login(username, password);
+            requestWorkbenchKeyboardLock();
             setAuthenticated(true);
           } catch (error) {
             setLoginError((error as Error).message);
@@ -2483,11 +3086,46 @@ export function App() {
   }
 
   return (
-    <div className="workbench-shell">
+    <div className="workbench-shell" onPointerDown={() => requestWorkbenchKeyboardLock()}>
       <CommandPalette
+        emptyMessage={
+          commandPaletteMode === "themeGroupCreate"
+            ? "Type a theme group id such as atlas-notes or sketch/blueprint."
+            : undefined
+        }
         open={commandPaletteOpen}
-        title={commandPaletteMode === "commands" ? "Command Palette" : "Choose Theme"}
-        placeholder={commandPaletteMode === "commands" ? "Type a command" : "Type a theme"}
+        onSubmitQuery={() => {
+          if (commandPaletteMode !== "themeGroupCreate") {
+            return;
+          }
+
+          const normalizedGroupId = normalizeThemeGroupId(commandQuery);
+          if (!normalizedGroupId) {
+            return;
+          }
+
+          setCommandPaletteOpen(false);
+          if ((themeGroupsPayload?.groups ?? []).some((group) => group.groupId === normalizedGroupId)) {
+            void openThemeGroupConfigDocument(normalizedGroupId);
+            return;
+          }
+
+          void createThemeGroupDocument(normalizedGroupId);
+        }}
+        title={
+          commandPaletteMode === "commands"
+            ? "Command Palette"
+            : commandPaletteMode === "themes"
+              ? "Choose Theme"
+              : "Create Theme Group"
+        }
+        placeholder={
+          commandPaletteMode === "commands"
+            ? "Type a command"
+            : commandPaletteMode === "themes"
+              ? "Type a theme"
+              : "Type a theme group id"
+        }
         query={commandQuery}
         selectedIndex={selectedPaletteIndex}
         items={paletteItems}
@@ -2500,9 +3138,19 @@ export function App() {
             setCommandPaletteOpen(false);
             return;
           }
-          if (id.startsWith("render-style:create:")) {
+          if (commandPaletteMode === "themeGroupCreate") {
             setCommandPaletteOpen(false);
-            void createRenderStyleDocument(id.slice("render-style:create:".length));
+            const normalizedGroupId = normalizeThemeGroupId(commandQuery);
+            if (!normalizedGroupId) {
+              return;
+            }
+
+            if ((themeGroupsPayload?.groups ?? []).some((group) => group.groupId === normalizedGroupId)) {
+              void openThemeGroupConfigDocument(normalizedGroupId);
+              return;
+            }
+
+            void createThemeGroupDocument(normalizedGroupId);
             return;
           }
           const command = pluginRuntime.getCommand(id);
@@ -2565,67 +3213,24 @@ export function App() {
               </button>
               <button
                 className={`action-button ${fileDialog.mode === "delete" ? "danger" : "primary"}`}
-                onClick={() => {
+                onClick={async () => {
                   setBusyMessage("Applying file system change...");
-                  const runner =
-                    fileDialog.mode === "create-file" || fileDialog.mode === "create-directory"
-                      ? api.createFileSystemEntry(
-                          fileDialog.path,
-                          fileDialog.mode === "create-file" ? "file" : "directory",
-                          fileDialog.entryType === "file" && fileDialog.fileKind === "article"
-                            ? deriveArticleFileName(fileDialog.value)
-                            : fileDialog.value,
-                          fileDialog.entryType === "file" && fileDialog.fileKind === "article"
-                            ? {
-                                ...fileDialog.metadata,
-                                title: fileDialog.value
-                              }
-                            : fileDialog.metadata
-                        ).then(async (result) => {
-                          await loadTree();
-                          setSelectedTreePath(result.path);
-                          if (result.path.toLowerCase().endsWith(".md")) {
-                            await openArticleDocument(result.path);
-                          }
-                        })
-                      : fileDialog.mode === "rename"
-                        ? api.renameFileSystemEntry(
-                            fileDialog.path,
-                            fileDialog.entryType === "file" && fileDialog.fileKind === "article"
-                              ? deriveArticleFileName(fileDialog.value)
-                              : fileDialog.value
-                          ).then(async (result) => {
-                            await api.saveFileSystemMetadata(result.path, {
-                              ...fileDialog.metadata,
-                              ...(fileDialog.entryType === "file" && fileDialog.fileKind === "article"
-                                ? { title: fileDialog.value }
-                                : {})
-                            });
-                            await loadTree();
-                            setDocuments((current) => remapDocuments(current, fileDialog.path, result.path));
-                            setSelectedTreePath(result.path);
-                            if (fileDialog.entryType === "file" && fileDialog.fileKind === "article") {
-                              const updatedArticle = await api.getArticle(result.path);
-                              const updatedDocument = buildArticleDocument(updatedArticle);
-                              draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
-                              setDocuments((current) => upsertDocument(remapDocuments(current, fileDialog.path, result.path), updatedDocument));
-                              setActiveDocumentId(updatedDocument.id);
-                              syncEditorValuePreservingView(updatedDocument.value);
-                              schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
-                            }
-                          })
-                        : api.deleteFileSystemEntry(fileDialog.path).then(async () => {
-                            await loadTree();
-                            setDocuments((current) => removeDocuments(current, fileDialog.path));
-                            setSelectedTreePath(null);
-                          });
-                  runner
-                    .then(() => {
-                      setPageError(null);
-                      setFileDialog(null);
-                    })
-                    .catch((error: Error) => setPageError(error.message))
-                    .finally(() => setBusyMessage(null));
+                  try {
+                    await executeFileDialogOperation(fileDialog);
+                    setPageError(null);
+                    setFileDialog(null);
+                  } catch (error) {
+                    if (error instanceof ApiRequestError && error.code === "duplicate_article_title") {
+                      setTitleConflictState({
+                        conflicts: error.conflicts ?? [],
+                        fileDialog
+                      });
+                    } else {
+                      setPageError((error as Error).message);
+                    }
+                  } finally {
+                    setBusyMessage(null);
+                  }
                 }}
                 type="button"
               >
@@ -2636,62 +3241,310 @@ export function App() {
         </div>
       ) : null}
 
+      {titleConflictState ? (
+        <div className="dialog-backdrop" onClick={() => setTitleConflictState(null)} role="presentation">
+          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
+            <p className="title-overline">Duplicate Title</p>
+            <h2>Article title already exists</h2>
+            <p className="body-muted">
+              "{titleConflictState.fileDialog.value}" already appears in these articles:
+            </p>
+            <div className="conflict-list">
+              {titleConflictState.conflicts.map((conflict) => (
+                <div className="search-result" key={conflict.path}>
+                  <strong>{conflict.title}</strong>
+                  <span>{conflict.path}</span>
+                </div>
+              ))}
+            </div>
+            <div className="dialog-actions">
+              <button className="action-button ghost" onClick={() => setTitleConflictState(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className="action-button primary"
+                onClick={async () => {
+                  setBusyMessage("Applying file system change...");
+                  try {
+                    await executeFileDialogOperation(titleConflictState.fileDialog, {
+                      allowDuplicateTitle: true
+                    });
+                    setPageError(null);
+                    setTitleConflictState(null);
+                    setFileDialog(null);
+                  } catch (error) {
+                    setPageError((error as Error).message);
+                  } finally {
+                    setBusyMessage(null);
+                  }
+                }}
+                type="button"
+              >
+                Continue Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {themeGroupDialog ? (
+        <div className="dialog-backdrop" onClick={() => setThemeGroupDialog(null)} role="presentation">
+          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
+            <p className="title-overline">Theme Group</p>
+            <h2>{themeGroupDialog.mode === "rename" ? "Rename Theme Group" : "Delete Theme Group"}</h2>
+            {themeGroupDialog.mode === "rename" ? (
+              <label>
+                <span>Group Id</span>
+                <input
+                  value={themeGroupDialog.value}
+                  onChange={(event) =>
+                    setThemeGroupDialog({
+                      ...themeGroupDialog,
+                      value: event.target.value
+                    })
+                  }
+                />
+              </label>
+            ) : (
+              <p className="body-muted">Delete theme group "{themeGroupDialog.groupId}" and all files under `config/theme/{themeGroupDialog.groupId}`?</p>
+            )}
+            <div className="dialog-actions">
+              <button className="action-button ghost" onClick={() => setThemeGroupDialog(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className={`action-button ${themeGroupDialog.mode === "delete" ? "danger" : "primary"}`}
+                onClick={() => {
+                  if (themeGroupDialog.mode === "rename") {
+                    void renameThemeGroupDocument(themeGroupDialog.groupId, themeGroupDialog.value);
+                  } else {
+                    void deleteThemeGroupDocument(themeGroupDialog.groupId);
+                  }
+                }}
+                type="button"
+              >
+                {themeGroupDialog.mode === "rename" ? "Rename" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {themeAssetDialog ? (
+        <div className="dialog-backdrop" onClick={() => setThemeAssetDialog(null)} role="presentation">
+          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
+            <p className="title-overline">Theme Asset</p>
+            <h2>
+              {themeAssetDialog.mode === "create"
+                ? `Create ${themeAssetDialog.type.toUpperCase()} File`
+                : themeAssetDialog.mode === "rename"
+                  ? "Rename Theme File"
+                  : "Delete Theme File"}
+            </h2>
+            {themeAssetDialog.mode === "delete" ? (
+              <p className="body-muted">Delete "{themeAssetDialog.fileName}" from "{themeAssetDialog.groupId}"?</p>
+            ) : (
+              <label>
+                <span>File Name</span>
+                <input
+                  value={themeAssetDialog.fileName}
+                  onChange={(event) =>
+                    setThemeAssetDialog({
+                      ...themeAssetDialog,
+                      currentFileName: themeAssetDialog.currentFileName,
+                      fileName: event.target.value
+                    })
+                  }
+                />
+              </label>
+            )}
+            <div className="dialog-actions">
+              <button className="action-button ghost" onClick={() => setThemeAssetDialog(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className={`action-button ${themeAssetDialog.mode === "delete" ? "danger" : "primary"}`}
+                onClick={() => {
+                  if (themeAssetDialog.mode === "create") {
+                    void createThemeAssetDocument(
+                      themeAssetDialog.groupId,
+                      themeAssetDialog.fileName,
+                      themeAssetDialog.type,
+                      themeAssetDialog.adminPreview
+                    );
+                  } else if (themeAssetDialog.mode === "rename") {
+                    void renameThemeAssetDocument(
+                      themeAssetDialog.groupId,
+                      themeAssetDialog.currentFileName ?? themeAssetDialog.fileName,
+                      themeAssetDialog.fileName
+                    );
+                  } else {
+                    void deleteThemeAssetDocument(themeAssetDialog.groupId, themeAssetDialog.fileName);
+                  }
+                }}
+                type="button"
+              >
+                {themeAssetDialog.mode === "create" ? "Create" : themeAssetDialog.mode === "rename" ? "Rename" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {previewRenderDialogOpen ? (
         <div className="dialog-backdrop" onClick={() => setPreviewRenderDialogOpen(false)} role="presentation">
           <div className="dialog-card preview-render-dialog" onClick={(event) => event.stopPropagation()}>
             <div>
-              <p className="title-overline">Preview Render</p>
-              <h2>Render CSS</h2>
+              <p className="title-overline">Preview Theme</p>
+              <h2>Theme Preview Assets</h2>
               <p className="body-muted">
-                Toggle the saved `enable` values from `render.json`, or open a stylesheet under `config/render`.
+                Enabled theme groups contribute CSS and JS. Files marked for admin preview are injected into the preview surface.
               </p>
             </div>
             <div className="preview-render-style-list">
-              {previewRenderStyles.length === 0 ? (
-                <p className="body-muted">No render CSS entries are configured in `render.json` yet.</p>
+              {enabledThemeGroups.length === 0 ? (
+                <p className="body-muted">No enabled theme groups yet.</p>
               ) : (
-                previewRenderStyles.map((style) => (
-                  <div className="preview-render-style-item" key={style.directory}>
-                    <input
-                      checked={style.enable}
-                      onChange={(event) => {
-                        void toggleRenderStyleEnable(style.directory, event.target.checked);
-                      }}
-                      type="checkbox"
-                    />
+                enabledThemeGroups.map((group) => (
+                  <div className="preview-render-style-item" key={group.groupId}>
                     <div>
-                      <strong>{getRenderStyleTitle(style.directory)}</strong>
-                      <span>{getRenderStyleDocumentPath(style.directory)}</span>
+                      <strong>{group.label}</strong>
+                      <span>{group.groupId}</span>
                     </div>
-                    <button
-                      className="action-button ghost"
-                      onClick={() => {
-                        setPreviewRenderDialogOpen(false);
-                        void openRenderStyleDocument(style.directory);
-                      }}
-                      type="button"
-                    >
-                      Open
-                    </button>
+                    <div className="search-result">
+                      {group.files.map((file) => (
+                        <span key={`${group.groupId}:${file.fileName}`}>
+                          {file.fileName}{file.adminPreview ? " | preview" : ""}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 ))
               )}
             </div>
             <div className="dialog-actions">
-              <button
-                className="action-button ghost"
-                onClick={() => {
-                  setPreviewRenderDialogOpen(false);
-                  void openConfigDocument("renderConfig");
-                }}
-                type="button"
-              >
-                Open render.json
-              </button>
               <button className="action-button primary" onClick={() => setPreviewRenderDialogOpen(false)} type="button">
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {themeContextMenuState ? (
+        <div className="context-menu-backdrop" onClick={() => setThemeContextMenuState(null)} role="presentation">
+          <div className="context-menu" style={{ left: themeContextMenuState.x, top: themeContextMenuState.y }} onClick={(event) => event.stopPropagation()}>
+            {(themeContextMenuState.kind === "root"
+              ? [
+                  ["new-group", "New Theme Group"]
+                ]
+              : themeContextMenuState.kind === "group"
+                ? [
+                    ["new-css", "New CSS File"],
+                    ["new-js", "New JS File"],
+                    ["rename-group", "Rename Group"],
+                    ["delete-group", "Delete Group"]
+                  ]
+                : [
+                    ["rename-asset", "Rename File"],
+                    ["delete-asset", "Delete File"]
+                  ]
+            ).map(([action, label]) => (
+              <button
+                className={`context-menu-item ${action.startsWith("delete") ? "danger" : ""}`}
+                key={action}
+                onClick={() => {
+                  const state = themeContextMenuState;
+                  setThemeContextMenuState(null);
+
+                  if (action === "new-group") {
+                    openPalette("themeGroupCreate");
+                    return;
+                  }
+
+                  if (!state.groupId) {
+                    return;
+                  }
+
+                  if (action === "new-css") {
+                    setThemeAssetDialog({
+                      adminPreview: false,
+                      fileName: "new-style.css",
+                      groupId: state.groupId,
+                      mode: "create",
+                      type: "css"
+                    });
+                    return;
+                  }
+
+                  if (action === "new-js") {
+                    setThemeAssetDialog({
+                      adminPreview: false,
+                      fileName: "new-script.js",
+                      groupId: state.groupId,
+                      mode: "create",
+                      type: "js"
+                    });
+                    return;
+                  }
+
+                  if (action === "rename-group") {
+                    setThemeGroupDialog({
+                      groupId: state.groupId,
+                      mode: "rename",
+                      value: state.groupId
+                    });
+                    return;
+                  }
+
+                  if (action === "delete-group") {
+                    setThemeGroupDialog({
+                      groupId: state.groupId,
+                      mode: "delete",
+                      value: state.groupId
+                    });
+                    return;
+                  }
+
+                  if (!state.fileName) {
+                    return;
+                  }
+
+                  const matchingGroup = themeGroupsPayload?.groups.find((group) => group.groupId === state.groupId);
+                  const matchingFile = matchingGroup?.files.find((file) => file.fileName === state.fileName);
+
+                  if (!matchingFile) {
+                    return;
+                  }
+
+                  if (action === "rename-asset") {
+                    setThemeAssetDialog({
+                      adminPreview: matchingFile.adminPreview,
+                      currentFileName: matchingFile.fileName,
+                      fileName: matchingFile.fileName,
+                      groupId: state.groupId,
+                      mode: "rename",
+                      type: matchingFile.type
+                    });
+                    return;
+                  }
+
+                  if (action === "delete-asset") {
+                    setThemeAssetDialog({
+                      adminPreview: matchingFile.adminPreview,
+                      currentFileName: matchingFile.fileName,
+                      fileName: matchingFile.fileName,
+                      groupId: state.groupId,
+                      mode: "delete",
+                      type: matchingFile.type
+                    });
+                  }
+                }}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
       ) : null}
@@ -2909,7 +3762,7 @@ export function App() {
                         {activeDocument.record.status === "draft" ? "Publish Article" : "Move To Draft"}
                       </button>
                     ) : null}
-                    <button className="action-button primary" disabled={!activeDocument} onClick={() => void saveActiveDocument()} type="button">
+                    <button className="action-button primary" disabled={!activeDocument || isHomeDocument(activeDocument)} onClick={() => void saveActiveDocument()} type="button">
                       Save
                     </button>
                   </div>
@@ -2919,42 +3772,47 @@ export function App() {
                 </div>
                 <div className="sidebar-section">
                   <div className="sidebar-section-header">
-                    <strong>Render CSS</strong>
-                    <button
-                      className="action-button ghost"
-                      onClick={() => {
-                        setSidebarVisible(true);
-                        openPalette("commands");
-                      }}
-                      type="button"
-                    >
-                      Create Render CSS
-                    </button>
+                    <strong>Theme Groups</strong>
                   </div>
-                  <p className="body-muted">Open the command palette, type a CSS file name, and create `config/render/*.css` directly.</p>
                 </div>
-                <div className="sidebar-section search-results">
-                  {previewRenderStyles.length === 0 ? (
-                    <div className="empty-state">No render CSS entries.</div>
+                <div className="sidebar-section search-results" onContextMenu={(event) => { event.preventDefault(); setThemeContextMenuState({ kind: "root", x: event.clientX, y: event.clientY }); }}>
+                  {!themeGroupsPayload ? (
+                    <div className="empty-state">Loading theme groups...</div>
+                  ) : themeGroupsPayload.groups.length === 0 ? (
+                    <div className="empty-state">No groups yet.</div>
                   ) : (
-                    previewRenderStyles.map((style) => (
-                      <div className="render-style-row" key={style.directory}>
-                        <label className="render-style-toggle">
-                          <input
-                            checked={style.enable}
-                            onChange={(event) => {
-                              void toggleRenderStyleEnable(style.directory, event.target.checked);
-                            }}
-                            type="checkbox"
-                          />
+                    themeGroupsPayload.groups.map((group) => (
+                      <div className="theme-group-card" key={group.groupId} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setThemeContextMenuState({ groupId: group.groupId, kind: "group", x: event.clientX, y: event.clientY }); }}>
+                        <div className="theme-group-card__header">
                           <div className="search-result">
-                            <strong>{getRenderStyleTitle(style.directory)}</strong>
-                            <span>{getRenderStyleDocumentPath(style.directory)}</span>
+                            <strong>{group.label}</strong>
+                            <span>{group.groupId} | {group.enable ? "enabled" : "disabled"} | {group.files.length} files</span>
                           </div>
-                        </label>
-                        <button className="action-button ghost" onClick={() => void openRenderStyleDocument(style.directory)} type="button">
-                          Open
-                        </button>
+                          <div className="render-style-actions">
+                            <button className="action-button ghost" onClick={() => void openThemeGroupConfigDocument(group.groupId)} type="button">
+                              Open theme.json
+                            </button>
+                          </div>
+                        </div>
+                        <div className="theme-group-card__files">
+                          {group.files.length === 0 ? (
+                            <div className="empty-state">No files.</div>
+                          ) : (
+                            group.files.map((file) => (
+                              <div className="render-style-row" key={`${group.groupId}:${file.fileName}`} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setThemeContextMenuState({ fileName: file.fileName, groupId: group.groupId, kind: "asset", x: event.clientX, y: event.clientY }); }}>
+                                <div className="search-result">
+                                  <strong>{file.fileName}</strong>
+                                  <span>{file.type.toUpperCase()} | {file.adminPreview ? "admin preview" : "site only"}</span>
+                                </div>
+                                <div className="render-style-actions">
+                                  <button className="action-button ghost" onClick={() => void openThemeAssetDocument(group.groupId, file.fileName)} type="button">
+                                    Open
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
                       </div>
                     ))
                   )}
@@ -3001,6 +3859,16 @@ export function App() {
                     <span>Commit Message</span>
                     <input value={gitCommitMessage} onChange={(event) => setGitCommitMessage(event.target.value)} />
                   </label>
+                  <button
+                    className="action-button ghost"
+                    disabled={gitRefreshBusy}
+                    onClick={() => {
+                      void refreshGitData();
+                    }}
+                    type="button"
+                  >
+                    {gitRefreshBusy ? "Refreshing..." : "Refresh Git Changes"}
+                  </button>
                   {!gitInitialized ? (
                     <button
                       className="action-button ghost"
@@ -3117,14 +3985,26 @@ export function App() {
                 <button className={`tab-button ${document.id === activeDocumentId ? "is-active" : ""}`} key={document.id} onClick={() => setActiveDocumentId(document.id)} type="button">
                   <span>{document.title}</span>
                   {document.dirty ? <span className="dirty-dot">*</span> : null}
-                  <span className="tab-close" onClick={(event) => { event.stopPropagation(); const nextDocuments = closeDocument(documents, document.id); setDocuments(nextDocuments); if (activeDocumentId === document.id) { setActiveDocumentId(nextDocuments[nextDocuments.length - 1]?.id ?? null); } }} role="presentation">
-                    x
-                  </span>
+                  {document.kind !== "home" ? (
+                    <span className="tab-close" onClick={(event) => { event.stopPropagation(); const nextDocuments = closeDocument(documents, document.id); setDocuments(nextDocuments); if (activeDocumentId === document.id) { const closedIndex = documents.findIndex((candidate) => candidate.id === document.id); setActiveDocumentId(nextDocuments[Math.max(0, closedIndex - 1)]?.id ?? HOME_DOCUMENT_ID); } }} role="presentation">
+                      x
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>
             <div className="editor-surface">
-              {activeDocument ? (
+              {isHomeDocument(activeDocument) ? (
+                adminHomePayload ? (
+                <HomeDashboard
+                  onChange={updateAdminHomeConfigValue}
+                  value={adminHomePayload.value}
+                  widgets={homeWidgetContributions}
+                />
+                ) : (
+                  <div className="empty-editor">Loading admin home...</div>
+                )
+              ) : activeDocument ? (
                 <Editor
                   key={activeDocument.id}
                   beforeMount={(monaco) => {
@@ -3141,7 +4021,7 @@ export function App() {
                   path={
                     activeDocument.kind === "article"
                       ? activeDocument.articlePath
-                      : activeDocument.kind === "renderStyle"
+                      : activeDocument.kind === "themeAsset"
                         ? activeDocument.editorPath
                         : getConfigDocumentPath(activeDocument.configKind)
                   }
@@ -3186,7 +4066,7 @@ export function App() {
             />
             <aside className="preview-group">
               <button className="action-button ghost preview-float-button" onClick={() => setPreviewRenderDialogOpen(true)} type="button">
-                Render CSS
+                Theme Preview
               </button>
               <div className="preview-scroll" ref={attachPreviewRef}>
                 <div className="preview-shadow-host" ref={attachPreviewSurfaceRef} />

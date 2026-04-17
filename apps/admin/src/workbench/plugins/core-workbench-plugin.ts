@@ -22,6 +22,14 @@ export const coreWorkbenchPlugin: PluginDefinition = {
       }
     });
     context.registerCommand({
+      id: "workbench.openHome",
+      title: "View: Open Admin Home",
+      keywords: ["home", "dashboard", "start"],
+      handler(api) {
+        api.openHome();
+      }
+    });
+    context.registerCommand({
       id: "workbench.saveActiveDocument",
       title: "File: Save Active Document",
       keywords: ["save", "document", "file"],
