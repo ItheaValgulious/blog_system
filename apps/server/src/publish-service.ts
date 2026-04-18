@@ -1,38 +1,29 @@
-import { spawn } from "node:child_process";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { ServerSettings } from "./config.js";
 
-function runCommand(
-  command: string,
-  args: string[],
-  cwd: string
-): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      shell: process.platform === "win32",
-      env: process.env
-    });
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(stderr || stdout || `Command exited with code ${code}`));
-      }
-    });
-  });
-}
-
 export async function publishSite(settings: ServerSettings) {
-  return runCommand(settings.npmCommand, ["run", "publish-site"], settings.projectRoot);
+  const publisherEntry = path.join(settings.projectRoot, "apps", "site", "runtime-dist", "publisher.js");
+  const publisherModule = (await import(pathToFileURL(publisherEntry).href)) as {
+    publishSite(customSettings?: {
+      assetsRoot?: string;
+      configRoot?: string;
+      contentRoot?: string;
+      projectRoot?: string;
+      workspaceRoot?: string;
+    }): Promise<string>;
+  };
+  const stdout = await publisherModule.publishSite({
+    assetsRoot: settings.assetsRoot,
+    configRoot: settings.configRoot,
+    contentRoot: settings.contentRoot,
+    projectRoot: settings.projectRoot,
+    workspaceRoot: settings.workspaceRoot
+  });
+
+  return {
+    stderr: "",
+    stdout
+  };
 }

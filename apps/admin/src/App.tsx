@@ -2528,7 +2528,6 @@ export function App() {
       if (isWorkbenchTabShortcutEvent(event)) {
         event.preventDefault();
         event.stopPropagation();
-        event.stopImmediatePropagation?.();
       }
     };
 
@@ -2646,13 +2645,16 @@ export function App() {
         return;
       }
 
-      if (event.key === "PageUp" || event.key === "PageDown") {
+      const isPageUp = event.code === "PageUp" || event.key === "PageUp";
+      const isPageDown = event.code === "PageDown" || event.key === "PageDown";
+
+      if (isPageUp || isPageDown) {
         const activeIndex = documents.findIndex((document) => document.id === activeDocumentId);
         if (activeIndex === -1 || documents.length === 0) {
           return;
         }
 
-        const delta = event.key === "PageUp" ? -1 : 1;
+        const delta = isPageUp ? -1 : 1;
         const nextIndex = (activeIndex + delta + documents.length) % documents.length;
         setActiveDocumentId(documents[nextIndex]?.id ?? activeDocumentId);
         return;

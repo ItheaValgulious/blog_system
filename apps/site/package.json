@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/dev-server.ts",
     "build": "tsx src/cli-build.ts",
+    "build-runtime": "tsup --config tsup.runtime.config.ts",
     "build-site": "tsx src/cli-build.ts",
     "publish-site": "tsx src/publish.ts"
   },

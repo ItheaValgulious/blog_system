@@ -11,9 +11,12 @@
     "dev:server": "npm --prefix apps/server run dev",
     "dev:admin": "npm --prefix apps/admin run dev",
     "dev:site": "npm --prefix apps/site run dev",
+    "dev:electron": "node scripts/dev-electron.mjs",
     "dev": "node scripts/dev.mjs",
     "import-content": "tsx scripts/import-content.ts",
-    "build": "npm run build -w packages/content-core && npm run build -w apps/server && npm run build -w apps/admin && npm run build -w apps/site",
+    "build": "npm run build -w packages/content-core && npm run build -w apps/server && npm run build -w apps/admin && npm run build-runtime -w apps/site && npm run build -w apps/site && npm run build -w apps/desktop",
+    "package:electron:win": "npm run build && node scripts/package-electron.mjs",
+    "start:electron": "npm run start -w apps/desktop",
     "test": "npm run test -w packages/content-core && npm run test -w apps/server && npm run test -w apps/admin",
     "build-site": "npm run build-site -w apps/site",
     "publish-site": "npm run publish-site -w apps/site"

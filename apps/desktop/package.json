@@ -1,0 +1,15 @@
+{
+  "name": "@blog-system/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsup src/main.ts src/preload.ts --format cjs --target node22 --out-dir dist --splitting false --clean --external electron",
+    "package:win": "node ../../scripts/package-electron.mjs",
+    "start": "node ../../scripts/run-electron.mjs apps/desktop"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6"
+  }
+}

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsup src/index.ts --format esm --target node22 --out-dir dist",
+    "build": "tsup --config tsup.config.ts",
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
