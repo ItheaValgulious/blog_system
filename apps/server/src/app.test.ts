@@ -308,6 +308,26 @@ test("config endpoints expose markdown block rules and admin home defaults", asy
   assert.deepEqual(adminHome.body.value.widgets, {});
 });
 
+test("site config rejects legacy about payloads", async () => {
+  const { agent } = await setupTempApp();
+
+  const response = await agent
+    .put("/api/site-config")
+    .send({
+      raw: `{
+  "siteTitle": "Knowledge Base",
+  "enabledPlugins": ["home"],
+  "about": {
+    "title": "About",
+    "body": "Legacy field"
+  }
+}`
+    })
+    .expect(500);
+
+  assert.match(response.body.error, /siteConfig must NOT have additional properties/);
+});
+
 test("theme group endpoints seed atlas and allow group asset creation", async () => {
   const { agent, tempRoot } = await setupTempApp();
 

@@ -383,6 +383,11 @@ export const api = {
       body: JSON.stringify({ message })
     });
   },
+  pushGitChanges() {
+    return request<{ message: string }>("/api/git/push", {
+      method: "POST"
+    });
+  },
   publishSite() {
     return request<{ stdout: string; stderr: string }>("/api/publish", {
       method: "POST"

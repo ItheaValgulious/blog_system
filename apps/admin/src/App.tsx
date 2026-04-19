@@ -997,6 +997,8 @@ export function App() {
   const [gitCommitMessage, setGitCommitMessage] = useState("Update content and assets");
   const [gitRefreshBusy, setGitRefreshBusy] = useState(false);
   const [gitInitialized, setGitInitialized] = useState(true);
+  const [gitActionBusy, setGitActionBusy] = useState<null | "commit" | "init" | "push">(null);
+  const [publishBusy, setPublishBusy] = useState(false);
   const [tagFilter, setTagFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
   const [previewRenderDialogOpen, setPreviewRenderDialogOpen] = useState(false);
@@ -2075,16 +2077,57 @@ export function App() {
   };
 
   const publishStaticSite = async () => {
-    setBusyMessage("Publishing static site...");
+    setPublishBusy(true);
+    setBusyMessage("Publishing static site. This can take a while...");
     try {
       const result = await api.publishSite();
       setPageError(result.stderr || null);
     } catch (error) {
       setPageError((error as Error).message);
     } finally {
+      setPublishBusy(false);
       setBusyMessage(null);
     }
   };
+
+  const commitGitChanges = async () => {
+    setGitActionBusy("commit");
+    setBusyMessage("Creating commit...");
+    try {
+      await api.createGitCommit(gitCommitMessage);
+      await loadGitData();
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setGitActionBusy(null);
+      setBusyMessage(null);
+    }
+  };
+
+  const pushGitChanges = async () => {
+    setGitActionBusy("push");
+    setBusyMessage("Pushing git commits to remote...");
+    try {
+      await api.pushGitChanges();
+      await loadGitData();
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    } finally {
+      setGitActionBusy(null);
+      setBusyMessage(null);
+    }
+  };
+
+  const gitHasPendingChanges = gitChangedFiles.length > 0;
+  const gitPrimaryAction = gitHasPendingChanges ? "commit" : "push";
+  const renderSidebarStatusPills = () => (
+    <>
+      {busyMessage ? <span className="status-pill info">{busyMessage}</span> : null}
+      {pageError ? <span className="status-pill error">{pageError}</span> : null}
+    </>
+  );
 
   workbenchApiRef.current = {
     openHome: () => {
@@ -3732,8 +3775,8 @@ export function App() {
                 <div className="sidebar-section">
                   <strong>Edit Actions</strong>
                   <div className="edit-actions">
-                    <button className="action-button accent" onClick={() => void publishStaticSite()} type="button">
-                      Publish Static Site
+                    <button className="action-button accent" disabled={publishBusy} onClick={() => void publishStaticSite()} type="button">
+                      {publishBusy ? "Publishing..." : "Publish Static Site"}
                     </button>
                     {isArticleDocument(activeDocument) ? (
                       <button
@@ -3768,8 +3811,7 @@ export function App() {
                       Save
                     </button>
                   </div>
-                  {busyMessage ? <span className="status-pill info">{busyMessage}</span> : null}
-                  {pageError ? <span className="status-pill error">{pageError}</span> : null}
+                  {renderSidebarStatusPills()}
                   {configPayload?.warnings.length ? <span className="status-pill warning">{configPayload.warnings.length} config warning{configPayload.warnings.length > 1 ? "s" : ""}</span> : null}
                 </div>
                 <div className="sidebar-section">
@@ -3858,12 +3900,17 @@ export function App() {
               <div className="sidebar-scroll">
                 <div className="sidebar-section">
                   <label>
-                    <span>Commit Message</span>
-                    <input value={gitCommitMessage} onChange={(event) => setGitCommitMessage(event.target.value)} />
+                    <span>{gitHasPendingChanges ? "Commit Message" : "Commit Message (unused for push)"}</span>
+                    <input
+                      disabled={!gitHasPendingChanges || gitActionBusy !== null}
+                      value={gitCommitMessage}
+                      onChange={(event) => setGitCommitMessage(event.target.value)}
+                    />
                   </label>
+                  {renderSidebarStatusPills()}
                   <button
                     className="action-button ghost"
-                    disabled={gitRefreshBusy}
+                    disabled={gitRefreshBusy || gitActionBusy !== null}
                     onClick={() => {
                       void refreshGitData();
                     }}
@@ -3874,7 +3921,9 @@ export function App() {
                   {!gitInitialized ? (
                     <button
                       className="action-button ghost"
+                      disabled={gitActionBusy !== null}
                       onClick={async () => {
+                        setGitActionBusy("init");
                         setBusyMessage("Initializing git repository...");
                         try {
                           await api.initGitRepository();
@@ -3883,6 +3932,7 @@ export function App() {
                         } catch (error) {
                           setPageError((error as Error).message);
                         } finally {
+                          setGitActionBusy(null);
                           setBusyMessage(null);
                         }
                       }}
@@ -3893,22 +3943,24 @@ export function App() {
                   ) : null}
                   <button
                     className="action-button primary"
-                    disabled={!gitInitialized}
+                    disabled={!gitInitialized || gitActionBusy !== null}
                     onClick={async () => {
-                      setBusyMessage("Creating commit...");
-                      try {
-                        await api.createGitCommit(gitCommitMessage);
-                        await loadGitData();
-                        setPageError(null);
-                      } catch (error) {
-                        setPageError((error as Error).message);
-                      } finally {
-                        setBusyMessage(null);
+                      if (gitPrimaryAction === "push") {
+                        await pushGitChanges();
+                        return;
                       }
+
+                      await commitGitChanges();
                     }}
                     type="button"
                   >
-                    Commit
+                    {gitActionBusy === "commit"
+                      ? "Committing..."
+                      : gitActionBusy === "push"
+                        ? "Pushing..."
+                        : gitPrimaryAction === "push"
+                          ? "Push"
+                          : "Commit"}
                   </button>
                 </div>
                 <div className="sidebar-section search-results">

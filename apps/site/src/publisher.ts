@@ -16,11 +16,6 @@ export interface PublishConfig {
   userName?: string;
 }
 
-function inferBasePathFromRepo(repoUrl: string) {
-  const match = repoUrl.match(/[:/]([^/:]+)\.git$/);
-  return match?.[1] ? `/${match[1]}` : "";
-}
-
 function normalizeGithubRepoPath(repoUrl: string) {
   if (repoUrl.startsWith("https://github.com/")) {
     return repoUrl.slice("https://github.com/".length);
@@ -191,7 +186,7 @@ export async function publishSite(customSettings?: Partial<SiteBuildSettings>) {
   const remoteUrl = publishConfig.authToken
     ? toAuthenticatedHttpsRepoUrl(publishConfig.deployRepo, publishConfig.authToken)
     : httpsRepo;
-  const publishBasePath = publishConfig.siteBasePath ?? inferBasePathFromRepo(httpsRepo);
+  const publishBasePath = publishConfig.siteBasePath ?? "";
   const publishDistDir = await fs.mkdtemp(path.join(os.tmpdir(), "blog-system-publish-dist-"));
   const distDir = await buildSite({
     ...settings,

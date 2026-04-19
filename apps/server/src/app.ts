@@ -30,7 +30,14 @@ import {
   saveEditorConfig,
   validateEditorConfigPayload
 } from "./editor-config-service.js";
-import { createGitCommit, ensureGitRepository, getGitHistory, getGitOverview, getGitStatus } from "./git-service.js";
+import {
+  createGitCommit,
+  ensureGitRepository,
+  getGitHistory,
+  getGitOverview,
+  getGitStatus,
+  pushGitChanges
+} from "./git-service.js";
 import { publishSite } from "./publish-service.js";
 import { loadMarkdownBlockConfig, saveMarkdownBlockConfig } from "./markdown-block-config-service.js";
 import { loadSiteConfig, saveSiteConfig } from "./site-config-service.js";
@@ -731,6 +738,14 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       }
 
       res.json(await createGitCommit(settings.workspaceRoot, message.trim()));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/git/push", async (_req, res, next) => {
+    try {
+      res.json(await pushGitChanges(settings.workspaceRoot));
     } catch (error) {
       next(error);
     }

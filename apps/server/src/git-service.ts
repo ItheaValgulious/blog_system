@@ -11,6 +11,14 @@ export interface GitCommitSummary {
   timestamp: string;
 }
 
+function hasNoCommitsMessage(message: string) {
+  return /does not have any commits yet|your current branch .* does not have any commits yet/i.test(message);
+}
+
+function hasNoUpstreamMessage(message: string) {
+  return /no upstream branch|has no upstream branch|set upstream/i.test(message);
+}
+
 function runGit(args: string[], cwd: string) {
   return new Promise<string>((resolve, reject) => {
     const child = spawn("git", args, {
@@ -72,7 +80,7 @@ export async function getGitHistory(repositoryRoot: string): Promise<GitCommitSu
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
-    if (/does not have any commits yet|your current branch .* does not have any commits yet/i.test(message)) {
+    if (hasNoCommitsMessage(message)) {
       return [];
     }
 
@@ -104,6 +112,49 @@ export async function createGitCommit(repositoryRoot: string, message: string) {
   await runGit(["config", "user.email", "blog-system@example.com"], repositoryRoot);
   await runGit(["commit", "-m", message], repositoryRoot);
   return { message: "Committed changes successfully." };
+}
+
+async function getCurrentBranchName(repositoryRoot: string) {
+  return (await runGit(["branch", "--show-current"], repositoryRoot)).trim();
+}
+
+async function getRemoteNames(repositoryRoot: string) {
+  return (await runGit(["remote"], repositoryRoot))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export async function pushGitChanges(repositoryRoot: string) {
+  const commits = await getGitHistory(repositoryRoot);
+
+  if (commits.length === 0) {
+    return { message: "No commits to push." };
+  }
+
+  try {
+    await runGit(["push"], repositoryRoot);
+    return { message: "Pushed changes successfully." };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (!hasNoUpstreamMessage(message)) {
+      throw error;
+    }
+  }
+
+  const branchName = await getCurrentBranchName(repositoryRoot);
+  if (!branchName) {
+    throw new Error("Unable to determine the current branch for push.");
+  }
+
+  const remoteNames = await getRemoteNames(repositoryRoot);
+  if (!remoteNames.includes("origin")) {
+    throw new Error("No upstream is configured and no origin remote was found.");
+  }
+
+  await runGit(["push", "-u", "origin", branchName], repositoryRoot);
+  return { message: "Pushed changes successfully." };
 }
 
 export async function ensureGitRepository(repositoryRoot: string) {

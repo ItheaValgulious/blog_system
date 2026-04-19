@@ -19,23 +19,8 @@ export const siteConfigSchema = {
   }
 } as const;
 
-const siteConfigCompatSchema = {
-  ...siteConfigSchema,
-  properties: {
-    ...siteConfigSchema.properties,
-    about: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        title: { type: "string" },
-        body: { type: "string" }
-      }
-    }
-  }
-} as const;
-
 const ajv = new Ajv({ allErrors: true });
-const validateSiteConfig = ajv.compile(siteConfigCompatSchema);
+const validateSiteConfig = ajv.compile(siteConfigSchema);
 
 function normalizeSiteConfigValue(value: Record<string, unknown>) {
   return {
