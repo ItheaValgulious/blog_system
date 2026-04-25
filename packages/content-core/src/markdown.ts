@@ -172,7 +172,8 @@ export function extractHeadings(markdown: string): HeadingItem[] {
     headings.push({
       depth: node.depth,
       text,
-      id: slugger.slug(text)
+      id: slugger.slug(text),
+      lineNumber: Number(node.position?.start?.line ?? 1)
     });
   });
 

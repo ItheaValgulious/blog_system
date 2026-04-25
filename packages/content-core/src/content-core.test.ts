@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applyMarkdownBlockRules,
   createDefaultSlug,
+  extractHeadings,
   extractMarkdownBlocks,
   normalizeArticleForSave,
   normalizeAdminHomeConfig,
@@ -150,6 +151,24 @@ test("extractMarkdownBlocks returns top-level markdown ranges", () => {
   assert.equal(blocks[1].endLine, 3);
   assert.equal(blocks[2].startLine, 5);
   assert.match(blocks[2].source, /\$\$/);
+});
+
+test("extractHeadings includes source line numbers and ignores code fences", () => {
+  const markdown = ["# Intro", "", "```md", "# Ignored", "```", "", "Section", "---", "", "## Deep"].join("\n");
+  const headings = extractHeadings(markdown);
+
+  assert.deepEqual(
+    headings.map((heading) => ({
+      depth: heading.depth,
+      text: heading.text,
+      lineNumber: heading.lineNumber
+    })),
+    [
+      { depth: 1, text: "Intro", lineNumber: 1 },
+      { depth: 2, text: "Section", lineNumber: 7 },
+      { depth: 2, text: "Deep", lineNumber: 10 }
+    ]
+  );
 });
 
 test("extractMarkdownBlocks keeps paired html containers together", async () => {

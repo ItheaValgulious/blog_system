@@ -282,6 +282,53 @@ a {
   white-space: nowrap;
 }
 
+.outline-tree,
+.outline-children {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.outline-children {
+  margin-left: 12px;
+  padding-left: 10px;
+  border-left: 1px dashed color-mix(in srgb, var(--wb-border) 72%, transparent);
+}
+
+.outline-item {
+  width: 100%;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 8px;
+}
+
+.outline-item:hover {
+  background: var(--wb-bg-hover);
+}
+
+.outline-item.is-active {
+  background: var(--wb-bg-active);
+}
+
+.outline-item__label {
+  min-width: 0;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.outline-item__line {
+  color: var(--wb-foreground-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
 .status-badge,
 .status-pill,
 .tag-chip,

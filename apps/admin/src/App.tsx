@@ -38,6 +38,11 @@ import {
 import { jsonSchemas } from "./editor-config-schema";
 import { HomeDashboard } from "./home-dashboard";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
+import {
+  extractMarkdownOutline,
+  findActiveMarkdownOutlineItemId,
+  type MarkdownOutlineItem
+} from "./markdown-outline";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
@@ -65,6 +70,7 @@ const PREVIEW_UPDATE_DEBOUNCE_MS = 180;
 const GIT_REFRESH_INTERVAL_MS = 15000;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";
 const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
+const ARTICLE_CURSOR_STATE_STORAGE_KEY = "admin-article-cursor-state";
 const HOME_DOCUMENT_ID = "home:dashboard";
 
 interface PreviewSourceParseResult {
@@ -86,6 +92,48 @@ interface RenderedPreviewBlock {
   startLine: number;
   endLine: number;
   element: HTMLElement;
+}
+
+interface StoredArticleCursorState {
+  lineNumber: number;
+  column: number;
+  scrollLeft: number;
+  scrollTop: number;
+}
+
+function loadStoredArticleCursorStates() {
+  try {
+    const rawValue = window.localStorage.getItem(ARTICLE_CURSOR_STATE_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+
+    const parsed = JSON.parse(rawValue) as Record<string, Partial<StoredArticleCursorState>>;
+    return Object.fromEntries(
+      Object.entries(parsed).flatMap(([articlePath, value]) =>
+        typeof articlePath === "string" &&
+        value &&
+        Number.isFinite(value.lineNumber) &&
+        Number.isFinite(value.column) &&
+        Number.isFinite(value.scrollTop) &&
+        Number.isFinite(value.scrollLeft)
+          ? [
+              [
+                articlePath,
+                {
+                  lineNumber: Number(value.lineNumber),
+                  column: Number(value.column),
+                  scrollTop: Number(value.scrollTop),
+                  scrollLeft: Number(value.scrollLeft)
+                } satisfies StoredArticleCursorState
+              ]
+            ]
+          : []
+      )
+    ) as Record<string, StoredArticleCursorState>;
+  } catch {
+    return {};
+  }
 }
 
 const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "markdownBlockConfig" | "siteConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
@@ -164,7 +212,7 @@ function getDocumentPath(document: WorkbenchDocument | null, fallbackPath: strin
   return getConfigDocumentPath(document.configKind);
 }
 
-function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "media" | "git" | "command" }) {
+function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "outline" | "media" | "git" | "command" }) {
   const commonProps = {
     "aria-hidden": true,
     className: "activity-icon",
@@ -196,6 +244,16 @@ function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "media
       return (
         <svg {...commonProps}>
           <path d="M10 4.5h4v5h5v5h-5v5h-4v-5H5v-5h5z" />
+        </svg>
+      );
+    case "outline":
+      return (
+        <svg {...commonProps}>
+          <path d="M6 6.5h12" />
+          <path d="M6 11.5h8" />
+          <path d="M6 16.5h10" />
+          <circle cx="18" cy="11.5" r="1.5" />
+          <circle cx="18" cy="16.5" r="1.5" />
         </svg>
       );
     case "media":
@@ -236,6 +294,8 @@ function getSidebarViewIcon(viewId: SidebarViewId) {
       return "edit";
     case "plugins":
       return "plugins";
+    case "outline":
+      return "outline";
     case "media":
       return "media";
     case "git":
@@ -674,6 +734,45 @@ function replacePathPrefix(path: string, fromPrefix: string, toPrefix: string) {
   return path;
 }
 
+function remapArticleCursorStates(
+  states: Record<string, StoredArticleCursorState>,
+  fromPath: string,
+  toPath: string
+) {
+  return Object.fromEntries(
+    Object.entries(states).map(([articlePath, value]) => [replacePathPrefix(articlePath, fromPath, toPath), value])
+  );
+}
+
+function removeArticleCursorStates(states: Record<string, StoredArticleCursorState>, targetPath: string) {
+  return Object.fromEntries(
+    Object.entries(states).filter(([articlePath]) => !matchesPathPrefix(articlePath, targetPath))
+  );
+}
+
+function remapArticleDraftValues(
+  draftValues: Record<string, string>,
+  fromPath: string,
+  toPath: string
+) {
+  return Object.fromEntries(
+    Object.entries(draftValues).map(([key, value]) =>
+      key.startsWith("article:")
+        ? [`article:${replacePathPrefix(key.slice("article:".length), fromPath, toPath)}`, value]
+        : [key, value]
+    )
+  );
+}
+
+function removeArticleDraftValues(draftValues: Record<string, string>, targetPath: string) {
+  return Object.fromEntries(
+    Object.entries(draftValues).filter(
+      ([key]) =>
+        !key.startsWith("article:") || !matchesPathPrefix(key.slice("article:".length), targetPath)
+    )
+  );
+}
+
 function flattenTreePaths(nodes: TreePayload["tree"]): string[] {
   return nodes.flatMap((node) => (node.type === "directory" ? flattenTreePaths(node.children ?? []) : [node.path]));
 }
@@ -968,6 +1067,7 @@ function CommandPalette({
 }
 
 export function App() {
+  const [initialArticleCursorStates] = useState(loadStoredArticleCursorStates);
   const [authenticated, setAuthenticated] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -1003,6 +1103,7 @@ export function App() {
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
   const [previewRenderDialogOpen, setPreviewRenderDialogOpen] = useState(false);
   const [renderStyleAssetVersion, setRenderStyleAssetVersion] = useState(0);
+  const [activeArticleLineNumber, setActiveArticleLineNumber] = useState<number | null>(null);
   const [themeId, setThemeId] = useState(() => window.localStorage.getItem("admin-theme") ?? "eva-dark");
   const [disabledPluginIds, setDisabledPluginIds] = useState<string[]>(() => {
     try {
@@ -1074,6 +1175,8 @@ export function App() {
   const previewUpdateTimerRef = useRef<number | null>(null);
   const previewRenderRequestRef = useRef(0);
   const adminHomeSaveTimerRef = useRef<number | null>(null);
+  const articleCursorPersistTimerRef = useRef<number | null>(null);
+  const articleCursorStatesRef = useRef<Record<string, StoredArticleCursorState>>(initialArticleCursorStates);
   const gitRefreshInFlightRef = useRef(false);
   const draftValuesRef = useRef<Record<string, string>>({});
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
@@ -1086,6 +1189,7 @@ export function App() {
     return runtime;
   }, [enabledPlugins]);
   const activeDocument = useMemo(() => documents.find((document) => document.id === activeDocumentId) ?? null, [documents, activeDocumentId]);
+  const deferredOutlineSource = useDeferredValue(isArticleDocument(activeDocument) ? activeDocument.value : "");
   const normalizedConfig = useMemo(() => buildNormalizedEditorConfig(configPayload), [configPayload]);
   const fileTreeMap = useMemo(() => buildFileTreeMap(treePayload?.fileTree ?? []), [treePayload?.fileTree]);
   const selectedTreeNode = selectedTreePath ? fileTreeMap.get(selectedTreePath) ?? null : null;
@@ -1114,6 +1218,17 @@ export function App() {
     [pluginRuntime]
   );
   const activeTheme = pluginRuntime.getTheme(themeId) ?? availableThemes[0] ?? null;
+  const activeArticleOutline = useMemo(() => {
+    if (!isArticleDocument(activeDocument)) {
+      return [] as MarkdownOutlineItem[];
+    }
+
+    return extractMarkdownOutline(activeDocument.articlePath, deferredOutlineSource);
+  }, [activeDocument?.id, deferredOutlineSource]);
+  const activeOutlineItemId = useMemo(
+    () => findActiveMarkdownOutlineItemId(activeArticleOutline, activeArticleLineNumber),
+    [activeArticleLineNumber, activeArticleOutline]
+  );
   const enabledThemeGroups = useMemo(
     () => (themeGroupsPayload?.groups ?? []).filter((group) => group.enable),
     [themeGroupsPayload]
@@ -1325,6 +1440,116 @@ export function App() {
   const getDraftValue = useCallback(
     (document: WorkbenchDocument) => draftValuesRef.current[document.id] ?? document.savedValue,
     []
+  );
+
+  const flushArticleCursorStates = useCallback(() => {
+    try {
+      window.localStorage.setItem(
+        ARTICLE_CURSOR_STATE_STORAGE_KEY,
+        JSON.stringify(articleCursorStatesRef.current)
+      );
+    } catch {
+      // Ignore storage failures and keep the in-memory cursor state.
+    }
+  }, []);
+
+  const scheduleArticleCursorStatePersist = useCallback(() => {
+    if (articleCursorPersistTimerRef.current !== null) {
+      window.clearTimeout(articleCursorPersistTimerRef.current);
+    }
+
+    articleCursorPersistTimerRef.current = window.setTimeout(() => {
+      articleCursorPersistTimerRef.current = null;
+      flushArticleCursorStates();
+    }, 120);
+  }, [flushArticleCursorStates]);
+
+  const storeArticleCursorState = useCallback(
+    (articlePath: string) => {
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      const position = editor?.getPosition();
+
+      if (!editor || !model || !position) {
+        return;
+      }
+
+      const lineNumber = Math.max(1, Math.min(position.lineNumber, model.getLineCount()));
+      const maxColumn = model.getLineMaxColumn(lineNumber);
+      const column = Math.max(1, Math.min(position.column, maxColumn));
+
+      articleCursorStatesRef.current[articlePath] = {
+        lineNumber,
+        column,
+        scrollTop: editor.getScrollTop(),
+        scrollLeft: editor.getScrollLeft()
+      };
+      setActiveArticleLineNumber(lineNumber);
+      scheduleArticleCursorStatePersist();
+    },
+    [scheduleArticleCursorStatePersist]
+  );
+
+  const remapStoredArticleCursorStates = useCallback(
+    (fromPath: string, toPath: string) => {
+      articleCursorStatesRef.current = remapArticleCursorStates(
+        articleCursorStatesRef.current,
+        fromPath,
+        toPath
+      );
+      scheduleArticleCursorStatePersist();
+    },
+    [scheduleArticleCursorStatePersist]
+  );
+
+  const discardStoredArticleCursorStates = useCallback(
+    (targetPath: string) => {
+      articleCursorStatesRef.current = removeArticleCursorStates(
+        articleCursorStatesRef.current,
+        targetPath
+      );
+      scheduleArticleCursorStatePersist();
+    },
+    [scheduleArticleCursorStatePersist]
+  );
+
+  const jumpToActiveArticleLine = useCallback(
+    (lineNumber: number) => {
+      if (!isArticleDocument(activeDocument)) {
+        return;
+      }
+
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      if (!editor || !model) {
+        return;
+      }
+
+      const nextLineNumber = Math.max(1, Math.min(lineNumber, model.getLineCount()));
+      const firstContentColumn = model.getLineFirstNonWhitespaceColumn(nextLineNumber);
+      const nextColumn = Math.min(
+        Math.max(1, firstContentColumn > 0 ? firstContentColumn : 1),
+        model.getLineMaxColumn(nextLineNumber)
+      );
+      const selection = new monacoEditor.Selection(
+        nextLineNumber,
+        nextColumn,
+        nextLineNumber,
+        nextColumn
+      );
+
+      editor.setSelection(selection);
+      editor.setPosition({ lineNumber: nextLineNumber, column: nextColumn });
+      editor.revealLineInCenter(nextLineNumber);
+      editor.focus();
+      setActiveArticleLineNumber(nextLineNumber);
+
+      window.requestAnimationFrame(() => {
+        storeArticleCursorState(activeDocument.articlePath);
+        schedulePreviewCursorSyncRef.current?.();
+      });
+    },
+    [activeDocument, storeArticleCursorState]
   );
 
   const attachPreviewRef = useCallback((node: HTMLDivElement | null) => {
@@ -1898,6 +2123,7 @@ export function App() {
       });
       await loadTree();
       setDocuments((current) => remapDocuments(current, dialog.path, result.path));
+      remapStoredArticleCursorStates(dialog.path, result.path);
       setSelectedTreePath(result.path);
       if (dialog.entryType === "file" && dialog.fileKind === "article") {
         const updatedArticle = await api.getArticle(result.path);
@@ -1914,6 +2140,8 @@ export function App() {
     await api.deleteFileSystemEntry(dialog.path);
     await loadTree();
     setDocuments((current) => removeDocuments(current, dialog.path));
+    draftValuesRef.current = removeArticleDraftValues(draftValuesRef.current, dialog.path);
+    discardStoredArticleCursorStates(dialog.path);
     setActiveDocumentId((current) =>
       current?.startsWith("article:") && matchesPathPrefix(current.slice("article:".length), dialog.path)
         ? HOME_DOCUMENT_ID
@@ -2550,6 +2778,12 @@ export function App() {
         adminHomeSaveTimerRef.current = null;
       }
 
+      if (articleCursorPersistTimerRef.current !== null) {
+        window.clearTimeout(articleCursorPersistTimerRef.current);
+        articleCursorPersistTimerRef.current = null;
+      }
+      flushArticleCursorStates();
+
       if (previewUpdateTimerRef.current !== null) {
         window.clearTimeout(previewUpdateTimerRef.current);
         previewUpdateTimerRef.current = null;
@@ -2564,7 +2798,7 @@ export function App() {
       schedulePreviewCursorSyncRef.current = null;
       previewProseRef.current?.replaceChildren();
     };
-  }, []);
+  }, [flushArticleCursorStates]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -2644,7 +2878,12 @@ export function App() {
             await loadTree();
             if (treeClipboard.mode === "move") {
               setDocuments((current) => remapDocuments(current, treeClipboard.path, result.path));
-              draftValuesRef.current = Object.fromEntries(Object.entries(draftValuesRef.current).map(([key, value]) => key.startsWith("article:") ? [`article:${replacePathPrefix(key.slice("article:".length), treeClipboard.path, result.path)}`, value] : [key, value]));
+              draftValuesRef.current = remapArticleDraftValues(
+                draftValuesRef.current,
+                treeClipboard.path,
+                result.path
+              );
+              remapStoredArticleCursorStates(treeClipboard.path, result.path);
               setTreeClipboard(null);
             }
             setSelectedTreePath(result.path);
@@ -2666,7 +2905,7 @@ export function App() {
     };
     window.addEventListener("keydown", listener, true);
     return () => window.removeEventListener("keydown", listener, true);
-  }, [selectedTreeNode, sidebarView, treeClipboard]);
+  }, [remapStoredArticleCursorStates, selectedTreeNode, sidebarView, treeClipboard]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -2738,6 +2977,65 @@ export function App() {
       monaco.editor.setTheme(activeTheme.id);
     }
   };
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+
+    if (!editor || !model || !isArticleDocument(activeDocument)) {
+      setActiveArticleLineNumber(null);
+      return;
+    }
+
+    const storedState = articleCursorStatesRef.current[activeDocument.articlePath];
+    const lineNumber = Math.max(1, Math.min(storedState?.lineNumber ?? 1, model.getLineCount()));
+    const column = Math.max(1, Math.min(storedState?.column ?? 1, model.getLineMaxColumn(lineNumber)));
+    const frame = window.requestAnimationFrame(() => {
+      const selection = new monacoEditor.Selection(lineNumber, column, lineNumber, column);
+
+      editor.setSelection(selection);
+      editor.setPosition({ lineNumber, column });
+      if (storedState) {
+        editor.setScrollTop(storedState.scrollTop);
+        editor.setScrollLeft(storedState.scrollLeft);
+      } else {
+        editor.setScrollTop(0);
+        editor.setScrollLeft(0);
+      }
+      editor.focus();
+      setActiveArticleLineNumber(lineNumber);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activeDocument?.id, editorReadyVersion]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+
+    if (!editor || !isArticleDocument(activeDocument)) {
+      return;
+    }
+
+    const updateCursorState = () => {
+      storeArticleCursorState(activeDocument.articlePath);
+    };
+
+    const cursorDisposable = editor.onDidChangeCursorPosition(() => {
+      updateCursorState();
+    });
+    const scrollDisposable = editor.onDidScrollChange((event) => {
+      if (event.scrollTopChanged || event.scrollLeftChanged) {
+        updateCursorState();
+      }
+    });
+
+    return () => {
+      cursorDisposable.dispose();
+      scrollDisposable.dispose();
+    };
+  }, [activeDocument?.id, editorReadyVersion, storeArticleCursorState]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -3064,6 +3362,12 @@ export function App() {
                   .then(async (result) => {
                     await loadTree();
                     setDocuments((current) => remapDocuments(current, sourcePath, result.path));
+                    draftValuesRef.current = remapArticleDraftValues(
+                      draftValuesRef.current,
+                      sourcePath,
+                      result.path
+                    );
+                    remapStoredArticleCursorStates(sourcePath, result.path);
                     setSelectedTreePath(result.path);
                   })
                   .catch((error: Error) => setPageError(error.message))
@@ -3107,6 +3411,25 @@ export function App() {
       </button>
     );
   };
+
+  const renderOutlineNode = (item: MarkdownOutlineItem): JSX.Element => (
+    <div className="outline-node" key={item.id}>
+      <button
+        className={`outline-item ${item.id === activeOutlineItemId ? "is-active" : ""}`}
+        onClick={() => jumpToActiveArticleLine(item.lineNumber)}
+        title={`${item.text} (Line ${item.lineNumber})`}
+        type="button"
+      >
+        <span className="outline-item__label">{item.text}</span>
+        <span className="outline-item__line">L{item.lineNumber}</span>
+      </button>
+      {item.children.length > 0 ? (
+        <div className="outline-children">
+          {item.children.map((child) => renderOutlineNode(child))}
+        </div>
+      ) : null}
+    </div>
+  );
 
   if (!authenticated) {
     return (
@@ -3634,6 +3957,12 @@ export function App() {
                         await loadTree();
                         if (treeClipboard.mode === "move") {
                           setDocuments((current) => remapDocuments(current, treeClipboard.path, result.path));
+                          draftValuesRef.current = remapArticleDraftValues(
+                            draftValuesRef.current,
+                            treeClipboard.path,
+                            result.path
+                          );
+                          remapStoredArticleCursorStates(treeClipboard.path, result.path);
                           setTreeClipboard(null);
                         }
                         setSelectedTreePath(result.path);
@@ -3859,6 +4188,28 @@ export function App() {
                         </div>
                       </div>
                     ))
+                  )}
+                </div>
+              </div>
+            ) : sidebarView === "outline" ? (
+              <div className="sidebar-scroll">
+                <div className="sidebar-section">
+                  <strong>Markdown Outline</strong>
+                  {isArticleDocument(activeDocument) ? (
+                    <span className="body-muted">{activeDocument.articlePath}</span>
+                  ) : (
+                    <div className="empty-state">Open a markdown article to inspect its headings.</div>
+                  )}
+                </div>
+                <div className="sidebar-section tree-section">
+                  {!isArticleDocument(activeDocument) ? (
+                    <div className="empty-state">Outline is available for article tabs only.</div>
+                  ) : activeArticleOutline.length === 0 ? (
+                    <div className="empty-state">No headings found in this article.</div>
+                  ) : (
+                    <div className="outline-tree">
+                      {activeArticleOutline.map((item) => renderOutlineNode(item))}
+                    </div>
                   )}
                 </div>
               </div>

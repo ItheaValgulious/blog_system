@@ -15,6 +15,7 @@ export interface HeadingItem {
   depth: number;
   text: string;
   id: string;
+  lineNumber?: number;
 }
 
 export interface ArticleRecord {

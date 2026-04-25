@@ -5,6 +5,7 @@ import { createMetadataPlugin } from "./plugins/create-metadata-plugin";
 import { gitPlugin } from "./plugins/git-plugin";
 import { coreWorkbenchPlugin } from "./plugins/core-workbench-plugin";
 import { mediaLibraryPlugin } from "./plugins/media-library-plugin";
+import { markdownOutlinePlugin } from "./plugins/markdown-outline-plugin";
 import { snippetActionsPlugin } from "./plugins/snippet-actions-plugin";
 import { themePlugin } from "./plugins/theme-plugin";
 import { todoHomePlugin } from "./plugins/todo-home-plugin";
@@ -17,6 +18,7 @@ export const builtInPlugins: PluginDefinition[] = [
   themePlugin,
   clipboardImagePlugin,
   createMetadataPlugin,
+  markdownOutlinePlugin,
   topFrontmatterPlugin,
   todoHomePlugin,
   mediaLibraryPlugin,

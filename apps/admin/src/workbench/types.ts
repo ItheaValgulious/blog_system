@@ -3,7 +3,7 @@ import type * as monacoEditor from "monaco-editor";
 
 import type { ArticleRecord, EditorKeybinding, EditorSnippet } from "@blog-system/content-core";
 
-export type SidebarViewId = "explorer" | "edit" | "plugins" | "media" | "git";
+export type SidebarViewId = "explorer" | "edit" | "plugins" | "outline" | "media" | "git";
 export type ConfigDocumentKind =
   | "markdownBlockConfig"
   | "markdownSnippets"
