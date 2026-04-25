@@ -76,6 +76,15 @@ export const keybindingSchema = {
   }
 } as const;
 
+export const editorAssociationsSchema = {
+  type: "object",
+  propertyNames: { minLength: 1 },
+  additionalProperties: {
+    type: "string",
+    minLength: 1
+  }
+} as const;
+
 export type SnippetConfigFormat = "array" | "object";
 
 function normalizeOptionalString(value: unknown) {
@@ -210,6 +219,31 @@ export function serializeKeybindingConfig(keybindings: EditorKeybinding[]) {
   }).keybindings;
 
   return `${JSON.stringify(normalizedKeybindings, null, 2)}\n`;
+}
+
+export function normalizeEditorAssociations(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Editor associations config must be an object.");
+  }
+
+  const normalizedEntries = Object.entries(value as Record<string, unknown>)
+    .flatMap(([pattern, editorId]) => {
+      const normalizedPattern = pattern.trim();
+      const normalizedEditorId = typeof editorId === "string" ? editorId.trim() : "";
+
+      if (!normalizedPattern || !normalizedEditorId) {
+        return [];
+      }
+
+      return [[normalizedPattern, normalizedEditorId] as const];
+    })
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  return Object.fromEntries(normalizedEntries);
+}
+
+export function serializeEditorAssociationsConfig(associations: Record<string, string>) {
+  return `${JSON.stringify(normalizeEditorAssociations(associations), null, 2)}\n`;
 }
 
 export function normalizeSnippetPrefixes(snippet: EditorSnippet): string[] {

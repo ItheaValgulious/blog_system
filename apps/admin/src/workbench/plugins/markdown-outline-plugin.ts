@@ -1,4 +1,5 @@
 import type { PluginDefinition } from "../types";
+import { OutlinePane } from "../panes/outline-pane";
 
 export const markdownOutlinePlugin: PluginDefinition = {
   id: "markdown-outline",
@@ -6,11 +7,13 @@ export const markdownOutlinePlugin: PluginDefinition = {
   description: "Adds a sidebar outline tree for markdown headings with click-to-jump navigation.",
   activate(context) {
     context.registerWorkbenchContribution({
-      id: "markdown-outline-sidebar-view",
-      kind: "sidebar-view",
-      label: "OL",
-      title: "Outline",
-      viewId: "outline"
+      component: OutlinePane,
+      defaultGroupId: "outline",
+      id: "markdown-outline-pane",
+      kind: "pane",
+      paneId: "outline",
+      tabLabel: "Outline",
+      title: "Outline"
     });
   }
 };

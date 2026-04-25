@@ -3,10 +3,13 @@ import path from "node:path";
 
 import Ajv from "ajv";
 import {
+  editorAssociationsSchema,
   keybindingSchema,
+  normalizeEditorAssociations,
   normalizeEditorConfig,
   parseJsoncConfig,
   parseSnippetConfigValue,
+  serializeEditorAssociationsConfig,
   serializeKeybindingConfig,
   serializeSnippetConfig,
   snippetSchema,
@@ -17,8 +20,11 @@ import {
 const ajv = new Ajv({ allErrors: true });
 const validateSnippets = ajv.compile(snippetSchema);
 const validateKeybindings = ajv.compile<EditorKeybinding[]>(keybindingSchema);
+const validateEditorAssociations = ajv.compile<Record<string, string>>(editorAssociationsSchema);
 
 export interface LoadedEditorConfig {
+  editorAssociations: Record<string, string>;
+  editorAssociationsRaw: string;
   markdownSnippets: EditorSnippet[];
   latexSnippets: EditorSnippet[];
   keybindings: EditorKeybinding[];
@@ -32,7 +38,8 @@ function getConfigPaths(editorConfigDir: string) {
     markdownSnippets: path.join(editorConfigDir, "markdown.snippets.json"),
     latexSnippets: path.join(editorConfigDir, "latex.snippets.json"),
     legacySnippets: path.join(editorConfigDir, "snippets.json"),
-    keybindings: path.join(editorConfigDir, "keybindings.json")
+    keybindings: path.join(editorConfigDir, "keybindings.json"),
+    editorAssociations: path.join(editorConfigDir, "editor.associations.json")
   };
 }
 
@@ -107,30 +114,50 @@ function validateKeybindingArray(keybindings: unknown) {
   throw new Error(message);
 }
 
+function validateEditorAssociationsValue(value: unknown) {
+  if (validateEditorAssociations(value)) {
+    return;
+  }
+
+  const message = (validateEditorAssociations.errors ?? [])
+    .map((error) => `editorAssociations${error.instancePath} ${error.message}`)
+    .join("; ");
+  throw new Error(message);
+}
+
 export async function loadEditorConfig(editorConfigDir: string): Promise<LoadedEditorConfig> {
   const configPaths = getConfigPaths(editorConfigDir);
-  const [markdownSnippetsRaw, legacySnippetsRaw, latexSnippetsRaw, keybindingsRaw] = await Promise.all([
+  const [markdownSnippetsRaw, legacySnippetsRaw, latexSnippetsRaw, keybindingsRaw, editorAssociationsRaw] = await Promise.all([
     readOptionalFile(configPaths.markdownSnippets),
     readOptionalFile(configPaths.legacySnippets),
     readOptionalFile(configPaths.latexSnippets),
-    readOptionalFile(configPaths.keybindings)
+    readOptionalFile(configPaths.keybindings),
+    readOptionalFile(configPaths.editorAssociations)
   ]);
 
   const resolvedMarkdownSnippetsRaw = markdownSnippetsRaw ?? legacySnippetsRaw ?? "[]\n";
   const resolvedLatexSnippetsRaw = latexSnippetsRaw ?? "[]\n";
   const resolvedKeybindingsRaw = keybindingsRaw ?? "[]\n";
+  const resolvedEditorAssociationsRaw = editorAssociationsRaw ?? "{}\n";
   const parsedMarkdownSnippets = parseJsoncConfig(resolvedMarkdownSnippetsRaw, "markdownSnippets");
   const parsedLatexSnippets = parseJsoncConfig(resolvedLatexSnippetsRaw, "latexSnippets");
   const parsedKeybindings = parseJsoncConfig(resolvedKeybindingsRaw, "keybindings");
+  const parsedEditorAssociations = parseJsoncConfig(
+    resolvedEditorAssociationsRaw,
+    "editorAssociations"
+  );
 
   validateSnippetConfig("markdownSnippets", parsedMarkdownSnippets);
   validateSnippetConfig("latexSnippets", parsedLatexSnippets);
   validateKeybindingArray(parsedKeybindings);
+  validateEditorAssociationsValue(parsedEditorAssociations);
 
   const markdownSnippetConfig = parseSnippetConfigValue(parsedMarkdownSnippets);
   const latexSnippetConfig = parseSnippetConfigValue(parsedLatexSnippets);
 
   return {
+    editorAssociations: normalizeEditorAssociations(parsedEditorAssociations),
+    editorAssociationsRaw: resolvedEditorAssociationsRaw,
     markdownSnippetsRaw: resolvedMarkdownSnippetsRaw,
     latexSnippetsRaw: resolvedLatexSnippetsRaw,
     keybindingsRaw: resolvedKeybindingsRaw,
@@ -143,11 +170,13 @@ export async function loadEditorConfig(editorConfigDir: string): Promise<LoadedE
 export function validateEditorConfigPayload(
   markdownSnippets: unknown,
   latexSnippets: unknown,
-  keybindings: unknown
+  keybindings: unknown,
+  editorAssociations: unknown
 ) {
   validateSnippetConfig("markdownSnippets", markdownSnippets);
   validateSnippetConfig("latexSnippets", latexSnippets);
   validateKeybindingArray(keybindings);
+  validateEditorAssociationsValue(editorAssociations);
 
   const markdownSnippetConfig = parseSnippetConfigValue(markdownSnippets);
   const latexSnippetConfig = parseSnippetConfigValue(latexSnippets);
@@ -166,6 +195,7 @@ export function validateEditorConfigPayload(
 
   return {
     config: {
+      editorAssociations: normalizeEditorAssociations(editorAssociations),
       markdownSnippets: normalizedMarkdownSnippets,
       latexSnippets: normalizedLatexSnippets,
       keybindings: normalizedKeybindings
@@ -185,15 +215,18 @@ export async function saveEditorConfig(
   editorConfigDir: string,
   markdownSnippetsRaw: string,
   latexSnippetsRaw: string,
-  keybindingsRaw: string
+  keybindingsRaw: string,
+  editorAssociationsRaw: string
 ): Promise<LoadedEditorConfig & { warnings: string[] }> {
   const parsedMarkdownSnippets = parseJsoncConfig(markdownSnippetsRaw, "markdownSnippets");
   const parsedLatexSnippets = parseJsoncConfig(latexSnippetsRaw, "latexSnippets");
   const parsedKeybindings = parseJsoncConfig(keybindingsRaw, "keybindings");
+  const parsedEditorAssociations = parseJsoncConfig(editorAssociationsRaw, "editorAssociations");
   const validation = validateEditorConfigPayload(
     parsedMarkdownSnippets,
     parsedLatexSnippets,
-    parsedKeybindings
+    parsedKeybindings,
+    parsedEditorAssociations
   );
   const configPaths = getConfigPaths(editorConfigDir);
 
@@ -206,15 +239,21 @@ export async function saveEditorConfig(
     validation.formats.latexSnippets
   );
   const normalizedKeybindingsRaw = serializeKeybindingConfig(validation.config.keybindings);
+  const normalizedEditorAssociationsRaw = serializeEditorAssociationsConfig(
+    validation.config.editorAssociations
+  );
 
   await fs.mkdir(editorConfigDir, { recursive: true });
   await Promise.all([
     fs.writeFile(configPaths.markdownSnippets, normalizedMarkdownSnippetsRaw, "utf8"),
     fs.writeFile(configPaths.latexSnippets, normalizedLatexSnippetsRaw, "utf8"),
-    fs.writeFile(configPaths.keybindings, normalizedKeybindingsRaw, "utf8")
+    fs.writeFile(configPaths.keybindings, normalizedKeybindingsRaw, "utf8"),
+    fs.writeFile(configPaths.editorAssociations, normalizedEditorAssociationsRaw, "utf8")
   ]);
 
   return {
+    editorAssociationsRaw: normalizedEditorAssociationsRaw,
+    editorAssociations: validation.config.editorAssociations,
     markdownSnippetsRaw: normalizedMarkdownSnippetsRaw,
     latexSnippetsRaw: normalizedLatexSnippetsRaw,
     keybindingsRaw: normalizedKeybindingsRaw,

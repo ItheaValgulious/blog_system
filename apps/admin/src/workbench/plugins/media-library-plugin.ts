@@ -1,4 +1,5 @@
 import type { PluginDefinition } from "../types";
+import { MediaPane } from "../panes/media-pane";
 
 export const mediaLibraryPlugin: PluginDefinition = {
   id: "media-library",
@@ -6,11 +7,13 @@ export const mediaLibraryPlugin: PluginDefinition = {
   description: "Adds a media tab for uploading and browsing centralized images.",
   activate(context) {
     context.registerWorkbenchContribution({
-      id: "media-sidebar-view",
-      kind: "sidebar-view",
-      label: "MD",
-      title: "Media",
-      viewId: "media"
+      component: MediaPane,
+      defaultGroupId: "explorer",
+      id: "media-pane",
+      kind: "pane",
+      paneId: "media",
+      tabLabel: "Media",
+      title: "Media"
     });
   }
 };

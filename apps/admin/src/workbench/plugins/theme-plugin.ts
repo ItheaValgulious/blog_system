@@ -1,4 +1,5 @@
 import type { PluginDefinition } from "../types";
+import { ThemePane } from "../panes/theme-pane";
 import { atelierLightTheme } from "../theme/atelier-light";
 import { evaDarkTheme } from "../theme/eva-dark";
 import { harborNightTheme } from "../theme/harbor-night";
@@ -26,6 +27,15 @@ export const themePlugin: PluginDefinition = {
       handler(api) {
         api.startThemeGroupCreate();
       }
+    });
+    context.registerWorkbenchContribution({
+      component: ThemePane,
+      defaultGroupId: "edit",
+      id: "theme-pane",
+      kind: "pane",
+      paneId: "theme",
+      tabLabel: "Theme",
+      title: "Theme"
     });
   }
 };

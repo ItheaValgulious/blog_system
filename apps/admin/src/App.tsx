@@ -1,5 +1,5 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import Editor, { loader, type OnMount } from "@monaco-editor/react";
+import { loader, type OnMount } from "@monaco-editor/react";
 import * as monacoEditor from "monaco-editor";
 import "monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2.js";
 import "katex/dist/katex.min.css";
@@ -26,26 +26,18 @@ import {
   ApiRequestError,
   type AdminHomeConfigPayload,
   type EditorConfigPayload,
-  type GitChangedFilePayload,
-  type GitCommitPayload,
   type MarkdownBlockConfigPayload,
-  type MediaAssetPayload,
   type SiteConfigPayload,
   type ThemeAssetPayload,
   type ThemeGroupsPayload,
   type TreePayload
 } from "./api";
 import { jsonSchemas } from "./editor-config-schema";
-import { HomeDashboard } from "./home-dashboard";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
-import {
-  extractMarkdownOutline,
-  findActiveMarkdownOutlineItemId,
-  type MarkdownOutlineItem
-} from "./markdown-outline";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
+import { resolvePreferredEditorId } from "./workbench/editor-associations";
 import { PluginRuntime } from "./workbench/plugin-runtime";
 import type {
   ArticleWorkbenchDocument,
@@ -53,21 +45,23 @@ import type {
   CreateDialogContributionDefinition,
   ConfigDocumentKind,
   ConfigWorkbenchDocument,
+  EditorContributionDefinition,
   HomeWidgetContributionDefinition,
   HomeWorkbenchDocument,
   NormalizedEditorConfig,
   NormalizedSnippet,
-  SidebarViewContributionDefinition,
-  SidebarViewId,
+  PaneContributionDefinition,
+  PaneGroupId,
   ThemeAssetWorkbenchDocument,
   WorkbenchApi,
-  WorkbenchDocument
+  WorkbenchDocument,
+  WorkbenchEditorId,
+  WorkbenchResourceTarget
 } from "./workbench/types";
 
 loader.config({ monaco: monacoEditor });
 
 const PREVIEW_UPDATE_DEBOUNCE_MS = 180;
-const GIT_REFRESH_INTERVAL_MS = 15000;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";
 const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
 const ARTICLE_CURSOR_STATE_STORAGE_KEY = "admin-article-cursor-state";
@@ -99,6 +93,14 @@ interface StoredArticleCursorState {
   column: number;
   scrollLeft: number;
   scrollTop: number;
+}
+
+interface SidebarPaneItem {
+  kind: "core" | "plugin";
+  paneId: string;
+  tabLabel: string;
+  title: string;
+  component?: PaneContributionDefinition["component"];
 }
 
 function loadStoredArticleCursorStates() {
@@ -137,6 +139,11 @@ function loadStoredArticleCursorStates() {
 }
 
 const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "markdownBlockConfig" | "siteConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
+  editorAssociations: {
+    title: "editor.associations.json",
+    path: "config/editor.associations.json",
+    read: (payload) => payload.editorAssociationsRaw
+  },
   markdownSnippets: {
     title: "markdown.snippets.json",
     path: "config/markdown.snippets.json",
@@ -286,22 +293,32 @@ function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "outli
   }
 }
 
-function getSidebarViewIcon(viewId: SidebarViewId) {
-  switch (viewId) {
-    case "explorer":
-      return "explorer";
-    case "edit":
-      return "edit";
-    case "plugins":
-      return "plugins";
-    case "outline":
-      return "outline";
-    case "media":
-      return "media";
-    case "git":
-      return "git";
+const SIDEBAR_GROUPS = [
+  {
+    id: "explorer",
+    icon: "explorer",
+    title: "Explorer"
+  },
+  {
+    id: "outline",
+    icon: "outline",
+    title: "Outline"
+  },
+  {
+    id: "edit",
+    icon: "edit",
+    title: "Edit"
+  },
+  {
+    id: "plugins",
+    icon: "plugins",
+    title: "Plugins"
   }
-}
+] as const satisfies Array<{
+  icon: "explorer" | "outline" | "edit" | "plugins";
+  id: PaneGroupId;
+  title: string;
+}>;
 
 const PREVIEW_SHADOW_BASE_CSS = `
 html,
@@ -392,6 +409,8 @@ ${katexCssRaw}
 `;
 
 const emptyConfigPayload: EditorConfigPayload = {
+  editorAssociations: {},
+  editorAssociationsRaw: "{}\n",
   markdownSnippets: [],
   latexSnippets: [],
   keybindings: [],
@@ -458,6 +477,7 @@ function getJsonSchemaDefinitions() {
   return [
     { uri: "inmemory://schemas/snippets.json", fileMatch: [CONFIG_DOCUMENT_META.markdownSnippets.path, CONFIG_DOCUMENT_META.latexSnippets.path], schema: jsonSchemas.snippetSchema as object },
     { uri: "inmemory://schemas/keybindings.json", fileMatch: [CONFIG_DOCUMENT_META.keybindings.path], schema: jsonSchemas.keybindingSchema as object },
+    { uri: "inmemory://schemas/editor-associations.json", fileMatch: [CONFIG_DOCUMENT_META.editorAssociations.path], schema: jsonSchemas.editorAssociationsSchema as object },
     { uri: "inmemory://schemas/markdown-blocks.json", fileMatch: [MARKDOWN_BLOCK_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.markdownBlockConfigSchema as object },
     { uri: "inmemory://schemas/theme-group.json", fileMatch: ["config/theme/*/theme.json"], schema: jsonSchemas.themeGroupConfigSchema as object },
     { uri: "inmemory://schemas/site.json", fileMatch: [SITE_CONFIG_DOCUMENT_META.path], schema: jsonSchemas.siteConfigSchema as object },
@@ -639,6 +659,7 @@ function buildConfigDocument(
   return {
     id: `config:${kind}`,
     kind: "config",
+    editorId: "workbench.code-text",
     configKind: kind,
     title: getConfigDocumentTitle(kind),
     language: "json",
@@ -653,6 +674,7 @@ function buildHomeDocument(): HomeWorkbenchDocument {
   return {
     id: HOME_DOCUMENT_ID,
     kind: "home",
+    editorId: "workbench.home-dashboard",
     title: "Admin Home",
     language: "json",
     value: "",
@@ -666,6 +688,7 @@ function buildArticleDocument(record: ArticleRecord): ArticleWorkbenchDocument {
   return {
     id: `article:${record.path}`,
     kind: "article",
+    editorId: "workbench.article-markdown",
     articlePath: record.path,
     record,
     title: record.title,
@@ -681,6 +704,7 @@ function buildThemeAssetDocument(payload: ThemeAssetPayload): ThemeAssetWorkbenc
   return {
     id: `theme-asset:${payload.assetPath}`,
     kind: "themeAsset",
+    editorId: "workbench.code-text",
     assetPath: payload.assetPath,
     fileName: payload.fileName,
     groupId: payload.groupId,
@@ -1071,13 +1095,18 @@ export function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [sidebarView, setSidebarView] = useState<SidebarViewId>("explorer");
+  const [sidebarGroupId, setSidebarGroupId] = useState<PaneGroupId>("explorer");
+  const [activePaneByGroup, setActivePaneByGroup] = useState<Record<string, string>>({
+    edit: "edit-actions",
+    explorer: "files",
+    plugins: "plugin-manager"
+  });
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [previewVisible, setPreviewVisible] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(() => Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) ?? 280));
   const [previewWidth, setPreviewWidth] = useState(() => Number(window.localStorage.getItem(PREVIEW_WIDTH_STORAGE_KEY) ?? 420));
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [commandPaletteMode, setCommandPaletteMode] = useState<"commands" | "themeGroupCreate" | "themes">("commands");
+  const [commandPaletteMode, setCommandPaletteMode] = useState<"commands" | "editors" | "themeGroupCreate" | "themes">("commands");
   const [commandQuery, setCommandQuery] = useState("");
   const [selectedPaletteIndex, setSelectedPaletteIndex] = useState(0);
   const [treePayload, setTreePayload] = useState<TreePayload | null>(null);
@@ -1091,13 +1120,6 @@ export function App() {
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [mediaAssets, setMediaAssets] = useState<MediaAssetPayload[]>([]);
-  const [gitChangedFiles, setGitChangedFiles] = useState<GitChangedFilePayload[]>([]);
-  const [gitCommits, setGitCommits] = useState<GitCommitPayload[]>([]);
-  const [gitCommitMessage, setGitCommitMessage] = useState("Update content and assets");
-  const [gitRefreshBusy, setGitRefreshBusy] = useState(false);
-  const [gitInitialized, setGitInitialized] = useState(true);
-  const [gitActionBusy, setGitActionBusy] = useState<null | "commit" | "init" | "push">(null);
   const [publishBusy, setPublishBusy] = useState(false);
   const [tagFilter, setTagFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
@@ -1115,16 +1137,6 @@ export function App() {
   });
   const [selectedTreePath, setSelectedTreePath] = useState<string | null>(null);
   const [contextMenuState, setContextMenuState] = useState<{ path: string; x: number; y: number } | null>(null);
-  const [themeContextMenuState, setThemeContextMenuState] = useState<
-    | {
-        groupId?: string;
-        fileName?: string;
-        kind: "asset" | "group" | "root";
-        x: number;
-        y: number;
-      }
-    | null
-  >(null);
   const [treeClipboard, setTreeClipboard] = useState<{ path: string; mode: "copy" | "move" } | null>(null);
   const [fileDialog, setFileDialog] = useState<{
     entryType: "file" | "directory";
@@ -1133,19 +1145,6 @@ export function App() {
     path: string;
     value: string;
     metadata: Record<string, string>;
-  } | null>(null);
-  const [themeGroupDialog, setThemeGroupDialog] = useState<{
-    groupId: string;
-    mode: "delete" | "rename";
-    value: string;
-  } | null>(null);
-  const [themeAssetDialog, setThemeAssetDialog] = useState<{
-    adminPreview: boolean;
-    currentFileName?: string;
-    fileName: string;
-    groupId: string;
-    mode: "create" | "delete" | "rename";
-    type: "css" | "js";
   } | null>(null);
   const [titleConflictState, setTitleConflictState] = useState<{
     conflicts: Array<{ path: string; title: string }>;
@@ -1177,7 +1176,6 @@ export function App() {
   const adminHomeSaveTimerRef = useRef<number | null>(null);
   const articleCursorPersistTimerRef = useRef<number | null>(null);
   const articleCursorStatesRef = useRef<Record<string, StoredArticleCursorState>>(initialArticleCursorStates);
-  const gitRefreshInFlightRef = useRef(false);
   const draftValuesRef = useRef<Record<string, string>>({});
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
   const treeRootRef = useRef<HTMLDivElement | null>(null);
@@ -1189,20 +1187,92 @@ export function App() {
     return runtime;
   }, [enabledPlugins]);
   const activeDocument = useMemo(() => documents.find((document) => document.id === activeDocumentId) ?? null, [documents, activeDocumentId]);
-  const deferredOutlineSource = useDeferredValue(isArticleDocument(activeDocument) ? activeDocument.value : "");
   const normalizedConfig = useMemo(() => buildNormalizedEditorConfig(configPayload), [configPayload]);
   const fileTreeMap = useMemo(() => buildFileTreeMap(treePayload?.fileTree ?? []), [treePayload?.fileTree]);
   const selectedTreeNode = selectedTreePath ? fileTreeMap.get(selectedTreePath) ?? null : null;
   const contextTargetNode = contextMenuState?.path ? fileTreeMap.get(contextMenuState.path) ?? null : null;
   const availableCommands = useMemo(() => pluginRuntime.getCommands(), [pluginRuntime]);
+  const availableEditors = useMemo(() => pluginRuntime.getEditorContributions(), [pluginRuntime]);
   const availableThemes = useMemo(() => pluginRuntime.getThemes(), [pluginRuntime]);
-  const sidebarViewContributions = useMemo(
+  const paneContributions = useMemo(
     () =>
       pluginRuntime
         .getWorkbenchContributions()
-        .filter((contribution): contribution is SidebarViewContributionDefinition => contribution.kind === "sidebar-view"),
+        .filter((contribution): contribution is PaneContributionDefinition => contribution.kind === "pane"),
     [pluginRuntime]
   );
+  const groupedPanes = useMemo<Record<string, SidebarPaneItem[]>>(
+    () => ({
+      explorer: [
+        {
+          kind: "core",
+          paneId: "files",
+          tabLabel: "Files",
+          title: "Files"
+        },
+        ...paneContributions
+          .filter((pane) => pane.defaultGroupId === "explorer")
+          .map((pane) => ({
+            component: pane.component,
+            kind: "plugin" as const,
+            paneId: pane.paneId,
+            tabLabel: pane.tabLabel,
+            title: pane.title
+          }))
+      ],
+      outline: paneContributions
+        .filter((pane) => pane.defaultGroupId === "outline")
+        .map((pane) => ({
+          component: pane.component,
+          kind: "plugin" as const,
+          paneId: pane.paneId,
+          tabLabel: pane.tabLabel,
+          title: pane.title
+        })),
+      edit: [
+        {
+          kind: "core",
+          paneId: "edit-actions",
+          tabLabel: "Actions",
+          title: "Edit Actions"
+        },
+        ...paneContributions
+          .filter((pane) => pane.defaultGroupId === "edit")
+          .map((pane) => ({
+            component: pane.component,
+            kind: "plugin" as const,
+            paneId: pane.paneId,
+            tabLabel: pane.tabLabel,
+            title: pane.title
+          }))
+      ],
+      plugins: [
+        {
+          kind: "core",
+          paneId: "plugin-manager",
+          tabLabel: "Plugins",
+          title: "Plugins"
+        },
+        ...paneContributions
+          .filter((pane) => pane.defaultGroupId === "plugins")
+          .map((pane) => ({
+            component: pane.component,
+            kind: "plugin" as const,
+            paneId: pane.paneId,
+            tabLabel: pane.tabLabel,
+            title: pane.title
+          }))
+      ]
+    }),
+    [paneContributions]
+  );
+  const activeGroupPanes = groupedPanes[sidebarGroupId] ?? groupedPanes.explorer ?? [];
+  const activePaneId =
+    activePaneByGroup[sidebarGroupId] && activeGroupPanes.some((pane) => pane.paneId === activePaneByGroup[sidebarGroupId])
+      ? activePaneByGroup[sidebarGroupId]
+      : activeGroupPanes[0]?.paneId ?? null;
+  const activeSidebarPane =
+    activePaneId ? activeGroupPanes.find((pane) => pane.paneId === activePaneId) ?? null : null;
   const createDialogContributions = useMemo(
     () =>
       pluginRuntime
@@ -1217,34 +1287,91 @@ export function App() {
         .filter((contribution): contribution is HomeWidgetContributionDefinition => contribution.kind === "home-widget"),
     [pluginRuntime]
   );
-  const activeTheme = pluginRuntime.getTheme(themeId) ?? availableThemes[0] ?? null;
-  const activeArticleOutline = useMemo(() => {
-    if (!isArticleDocument(activeDocument)) {
-      return [] as MarkdownOutlineItem[];
+  const activeEditorContribution = useMemo(() => {
+    if (!activeDocument) {
+      return null;
     }
 
-    return extractMarkdownOutline(activeDocument.articlePath, deferredOutlineSource);
-  }, [activeDocument?.id, deferredOutlineSource]);
-  const activeOutlineItemId = useMemo(
-    () => findActiveMarkdownOutlineItemId(activeArticleOutline, activeArticleLineNumber),
-    [activeArticleLineNumber, activeArticleOutline]
+    return (
+      pluginRuntime.getEditorContribution(activeDocument.editorId) ??
+      availableEditors.find((editor) => editor.canHandle(activeDocument)) ??
+      null
+    );
+  }, [activeDocument, availableEditors, pluginRuntime]);
+  const activeDocumentSupportsPreview = Boolean(
+    activeDocument && isArticleDocument(activeDocument) && activeEditorContribution?.supportsPreview
   );
+  const activeTheme = pluginRuntime.getTheme(themeId) ?? availableThemes[0] ?? null;
   const enabledThemeGroups = useMemo(
     () => (themeGroupsPayload?.groups ?? []).filter((group) => group.enable),
     [themeGroupsPayload]
   );
+  const resolveDocumentEditorId = useCallback(
+    (document: WorkbenchDocument, preferredEditorId?: WorkbenchEditorId) => {
+      if (preferredEditorId) {
+        const preferredEditor = availableEditors.find(
+          (editor) => editor.editorId === preferredEditorId && editor.canHandle(document)
+        );
+
+        if (preferredEditor) {
+          return preferredEditor.editorId;
+        }
+      }
+
+      return (
+        resolvePreferredEditorId(
+          document,
+          availableEditors,
+          configPayload?.editorAssociations ?? emptyConfigPayload.editorAssociations
+        ) ?? document.editorId
+      );
+    },
+    [availableEditors, configPayload?.editorAssociations]
+  );
+  const withResolvedEditor = useCallback(
+    <T extends WorkbenchDocument>(document: T, preferredEditorId?: WorkbenchEditorId) =>
+      ({
+        ...document,
+        editorId: resolveDocumentEditorId(document, preferredEditorId)
+      }) as T,
+    [resolveDocumentEditorId]
+  );
+  useEffect(() => {
+    setActivePaneByGroup((current) => {
+      let changed = false;
+      const nextValue = { ...current };
+
+      for (const [groupId, panes] of Object.entries(groupedPanes)) {
+        const activeGroupPaneId = nextValue[groupId];
+        if (activeGroupPaneId && panes.some((pane) => pane.paneId === activeGroupPaneId)) {
+          continue;
+        }
+
+        nextValue[groupId] = panes[0]?.paneId ?? "";
+        changed = true;
+      }
+
+      return changed ? nextValue : current;
+    });
+  }, [groupedPanes]);
   const previewThemeCssAssets = useMemo(
     () =>
       enabledThemeGroups.flatMap((group) =>
         group.files
-          .filter((file) => file.type === "css" && file.adminPreview)
+          .filter(
+            (file) =>
+              file.type === "css" &&
+              file.adminPreview &&
+              file.colorMode === (activeTheme?.appearance ?? "dark")
+          )
           .map((file) => ({
             assetPath: `${group.groupId}/${file.fileName}`,
+            colorMode: file.colorMode,
             fileName: file.fileName,
             groupId: group.groupId
           }))
       ),
-    [enabledThemeGroups]
+    [activeTheme?.appearance, enabledThemeGroups]
   );
   const previewThemeScriptAssets = useMemo(
     () =>
@@ -1279,6 +1406,23 @@ export function App() {
     }));
     return query ? base.filter((theme) => theme.haystack.includes(query)) : base;
   }, [availableThemes, deferredCommandQuery]);
+  const editorItems = useMemo(() => {
+    if (!activeDocument) {
+      return [];
+    }
+
+    const query = deferredCommandQuery.trim().toLowerCase();
+    const base = availableEditors
+      .filter((editor) => editor.canHandle(activeDocument))
+      .map((editor) => ({
+        id: editor.editorId,
+        title: editor.label,
+        description: editor.editorId === activeDocument.editorId ? "Current editor" : editor.editorId,
+        haystack: `${editor.label} ${editor.editorId}`.toLowerCase()
+      }));
+
+    return query ? base.filter((item) => item.haystack.includes(query)) : base;
+  }, [activeDocument, availableEditors, deferredCommandQuery]);
   const themeGroupCreateItems = useMemo(() => {
     if (commandPaletteMode !== "themeGroupCreate") {
       return [];
@@ -1306,6 +1450,8 @@ export function App() {
       ? commandItems
       : commandPaletteMode === "themes"
         ? themeItems
+        : commandPaletteMode === "editors"
+          ? editorItems
         : themeGroupCreateItems;
   const activeMetadataDialogFields = useMemo(() => {
     if (!fileDialog || fileDialog.mode === "delete") {
@@ -1602,7 +1748,7 @@ export function App() {
     }, PREVIEW_UPDATE_DEBOUNCE_MS);
   }, []);
 
-  const openPalette = (mode: "commands" | "themeGroupCreate" | "themes") => {
+  const openPalette = (mode: "commands" | "editors" | "themeGroupCreate" | "themes") => {
     setCommandPaletteMode(mode);
     setCommandQuery("");
     setSelectedPaletteIndex(0);
@@ -1710,98 +1856,27 @@ export function App() {
     }, 220);
   }, []);
 
-  const loadMediaAssets = async () => {
-    const payload = await api.listMediaAssets();
-    startTransition(() => {
-      setMediaAssets(payload.assets);
-    });
-    return payload.assets;
-  };
-
-  const loadGitData = async () => {
-    const [statusPayload, historyPayload] = await Promise.all([api.getGitStatus(), api.getGitHistory()]);
-    startTransition(() => {
-      setGitChangedFiles(statusPayload.files);
-      setGitCommits(historyPayload.commits);
-      setGitInitialized(statusPayload.initialized && historyPayload.initialized);
-    });
-  };
-
-  const refreshGitData = useCallback(
-    async (options?: { silent?: boolean }) => {
-      if (gitRefreshInFlightRef.current) {
-        return;
-      }
-
-      gitRefreshInFlightRef.current = true;
-      if (!options?.silent) {
-        setGitRefreshBusy(true);
-      }
-
-      try {
-        await loadGitData();
-        if (!options?.silent) {
-          setPageError(null);
-        }
-      } catch (error) {
-        if (!options?.silent) {
-          setPageError((error as Error).message);
-        }
-      } finally {
-        gitRefreshInFlightRef.current = false;
-        if (!options?.silent) {
-          setGitRefreshBusy(false);
-        }
-      }
-    },
-    []
-  );
-
-  const uploadMediaFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) {
-      return;
-    }
-
-    setBusyMessage("Uploading media...");
-    try {
-      const images = await Promise.all(
-        Array.from(files).map(
-          (file) =>
-            new Promise<{ mimeType: string; base64Data: string; fileName: string }>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = typeof reader.result === "string" ? reader.result : "";
-                resolve({
-                  mimeType: file.type,
-                  base64Data: result.split(",")[1] ?? "",
-                  fileName: file.name
-                });
-              };
-              reader.onerror = () => reject(reader.error ?? new Error("Failed to read media file."));
-              reader.readAsDataURL(file);
-            })
-        )
-      );
-
-      await api.uploadMediaAssets(images);
-      await Promise.all([loadMediaAssets(), loadGitData()]);
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
-  };
-
-  const openArticleDocument = async (articlePath: string) => {
+  const openArticleDocument = async (articlePath: string, preferredEditorId?: WorkbenchEditorId) => {
     const existingDocument = documents.find((document) => document.kind === "article" && document.articlePath === articlePath);
     if (existingDocument) {
+      if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+        setDocuments((current) =>
+          current.map((document) =>
+            document.id === existingDocument.id
+              ? {
+                  ...document,
+                  editorId: resolveDocumentEditorId(document, preferredEditorId)
+                }
+              : document
+          )
+        );
+      }
       setActiveDocumentId(existingDocument.id);
       setSelectedTreePath(articlePath);
       return;
     }
     const article = await api.getArticle(articlePath);
-    const articleDocument = buildArticleDocument(article);
+    const articleDocument = withResolvedEditor(buildArticleDocument(article), preferredEditorId);
     draftValuesRef.current[articleDocument.id] = articleDocument.value;
     setDocuments((current) => upsertDocument(current, articleDocument));
     setActiveDocumentId(articleDocument.id);
@@ -1819,7 +1894,11 @@ export function App() {
     return payload;
   };
 
-  const openThemeAssetDocument = async (groupId: string, fileName: string) => {
+  const openThemeAssetDocument = async (
+    groupId: string,
+    fileName: string,
+    preferredEditorId?: WorkbenchEditorId
+  ) => {
     try {
       const existingDocument = documents.find(
         (document) =>
@@ -1828,12 +1907,24 @@ export function App() {
           document.fileName === fileName
       );
       if (existingDocument) {
+        if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+          setDocuments((current) =>
+            current.map((document) =>
+              document.id === existingDocument.id
+                ? {
+                    ...document,
+                    editorId: resolveDocumentEditorId(document, preferredEditorId)
+                  }
+                : document
+            )
+          );
+        }
         setActiveDocumentId(existingDocument.id);
         return;
       }
 
       const payload = await api.getThemeAsset(groupId, fileName);
-      const nextDocument = buildThemeAssetDocument(payload);
+      const nextDocument = withResolvedEditor(buildThemeAssetDocument(payload), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
       setActiveDocumentId(nextDocument.id);
@@ -1843,7 +1934,10 @@ export function App() {
     }
   };
 
-  const openThemeGroupConfigDocument = async (groupId: string) => {
+  const openThemeGroupConfigDocument = async (
+    groupId: string,
+    preferredEditorId?: WorkbenchEditorId
+  ) => {
     try {
       const existingDocument = documents.find(
         (document) =>
@@ -1852,12 +1946,24 @@ export function App() {
           document.fileName === "theme.json"
       );
       if (existingDocument) {
+        if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+          setDocuments((current) =>
+            current.map((document) =>
+              document.id === existingDocument.id
+                ? {
+                    ...document,
+                    editorId: resolveDocumentEditorId(document, preferredEditorId)
+                  }
+                : document
+            )
+          );
+        }
         setActiveDocumentId(existingDocument.id);
         return;
       }
 
       const payload = await api.getThemeGroup(groupId);
-      const nextDocument = buildThemeAssetDocument({
+      const nextDocument = withResolvedEditor(buildThemeAssetDocument({
         adminPreview: false,
         assetPath: `${payload.groupId}/theme.json`,
         fileName: "theme.json",
@@ -1865,7 +1971,7 @@ export function App() {
         language: "json",
         raw: payload.raw,
         type: "js"
-      });
+      }), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
       setActiveDocumentId(nextDocument.id);
@@ -1889,7 +1995,10 @@ export function App() {
     }
 
     const savedPayload = await api.saveThemeAsset(activeDocument.groupId, activeDocument.fileName, raw);
-    const savedDocument = buildThemeAssetDocument(savedPayload);
+    const savedDocument = withResolvedEditor(
+      buildThemeAssetDocument(savedPayload),
+      activeDocument.editorId
+    );
     draftValuesRef.current[savedDocument.id] = savedDocument.value;
     setDocuments((current) => upsertDocument(current, savedDocument));
     setActiveDocumentId(savedDocument.id);
@@ -1912,164 +2021,6 @@ export function App() {
       setPageError((error as Error).message);
     } finally {
       setBusyMessage(null);
-    }
-  };
-
-  const renameThemeGroupDocument = async (groupId: string, nextGroupId: string) => {
-    const normalizedNextGroupId = normalizeThemeGroupId(nextGroupId);
-    if (!normalizedNextGroupId) {
-      return;
-    }
-
-    setBusyMessage(`Renaming ${groupId}...`);
-    try {
-      const payload = await api.renameThemeGroup(groupId, normalizedNextGroupId);
-      await refreshThemeGroupsPayload();
-      setDocuments((current) =>
-        current.filter(
-          (document) =>
-            !(document.kind === "themeAsset" && document.groupId === groupId)
-        )
-      );
-      setThemeGroupDialog(null);
-      await openThemeGroupConfigDocument(payload.groupId);
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
-  };
-
-  const deleteThemeGroupDocument = async (groupId: string) => {
-    setBusyMessage(`Deleting ${groupId}...`);
-    try {
-      await api.deleteThemeGroup(groupId);
-      await refreshThemeGroupsPayload();
-      setDocuments((current) =>
-        current.filter((document) => !(document.kind === "themeAsset" && document.groupId === groupId))
-      );
-      setActiveDocumentId((current) =>
-        current && documents.some((document) => document.kind === "themeAsset" && document.groupId === groupId && document.id === current)
-          ? HOME_DOCUMENT_ID
-          : current
-      );
-      setThemeGroupDialog(null);
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
-  };
-
-  const createThemeAssetDocument = async (
-    groupId: string,
-    fileName: string,
-    type: "css" | "js",
-    adminPreview: boolean
-  ) => {
-    setBusyMessage(`Creating ${fileName}...`);
-    try {
-      const payload = await api.createThemeAsset(groupId, fileName, type, adminPreview);
-      await refreshThemeGroupsPayload();
-      await openThemeAssetDocument(payload.groupId, payload.fileName);
-      setThemeAssetDialog(null);
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
-  };
-
-  const renameThemeAssetDocument = async (groupId: string, fileName: string, nextFileName: string) => {
-    setBusyMessage(`Renaming ${fileName}...`);
-    try {
-      const payload = await api.renameThemeAsset(groupId, fileName, nextFileName);
-      await refreshThemeGroupsPayload();
-      setDocuments((current) =>
-        current.filter(
-          (document) =>
-            !(document.kind === "themeAsset" && document.groupId === groupId && document.fileName === fileName)
-        )
-      );
-      setThemeAssetDialog(null);
-      await openThemeAssetDocument(payload.groupId, payload.fileName);
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
-  };
-
-  const deleteThemeAssetDocument = async (groupId: string, fileName: string) => {
-    setBusyMessage(`Deleting ${fileName}...`);
-    try {
-      await api.deleteThemeAsset(groupId, fileName);
-      await refreshThemeGroupsPayload();
-      setDocuments((current) =>
-        current.filter(
-          (document) =>
-            !(document.kind === "themeAsset" && document.groupId === groupId && document.fileName === fileName)
-        )
-      );
-      setThemeAssetDialog(null);
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setBusyMessage(null);
-    }
-  };
-
-  const updateThemeGroupEnable = async (groupId: string, enable: boolean) => {
-    try {
-      const group = await api.getThemeGroup(groupId);
-      await api.saveThemeGroup(
-        groupId,
-        JSON.stringify(
-          {
-            ...group.value,
-            enable
-          },
-          null,
-          2
-        )
-      );
-      await refreshThemeGroupsPayload();
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    }
-  };
-
-  const updateThemeAssetAdminPreview = async (groupId: string, fileName: string, adminPreview: boolean) => {
-    try {
-      const group = await api.getThemeGroup(groupId);
-      await api.saveThemeGroup(
-        groupId,
-        JSON.stringify(
-          {
-            ...group.value,
-            files: group.value.files.map((file) =>
-              file.fileName === fileName
-                ? {
-                    ...file,
-                    adminPreview
-                  }
-                : file
-            )
-          },
-          null,
-          2
-        )
-      );
-      await refreshThemeGroupsPayload();
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
     }
   };
 
@@ -2150,9 +2101,21 @@ export function App() {
     setSelectedTreePath(null);
   };
 
-  const openConfigDocument = async (kind: ConfigDocumentKind) => {
+  const openConfigDocument = async (kind: ConfigDocumentKind, preferredEditorId?: WorkbenchEditorId) => {
     const existingDocument = documents.find((document) => document.kind === "config" && document.configKind === kind);
     if (existingDocument) {
+      if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+        setDocuments((current) =>
+          current.map((document) =>
+            document.id === existingDocument.id
+              ? {
+                  ...document,
+                  editorId: resolveDocumentEditorId(document, preferredEditorId)
+                }
+              : document
+          )
+        );
+      }
       setActiveDocumentId(existingDocument.id);
       return;
     }
@@ -2162,7 +2125,7 @@ export function App() {
         : kind === "siteConfig"
         ? siteConfigPayload ?? (await loadSiteConfig())
         : configPayload ?? (await loadConfig());
-    const document = buildConfigDocument(kind, payload);
+    const document = withResolvedEditor(buildConfigDocument(kind, payload), preferredEditorId);
     draftValuesRef.current[document.id] = document.value;
     setDocuments((current) => upsertDocument(current, document));
     setActiveDocumentId(document.id);
@@ -2175,22 +2138,24 @@ export function App() {
       loadMarkdownBlockConfig(),
       loadAdminHomeConfig(),
       loadThemeGroups(),
-      loadSiteConfig(),
-      loadMediaAssets(),
-      loadGitData()
+      loadSiteConfig()
     ]);
     setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
     setActiveDocumentId((current) => current ?? HOME_DOCUMENT_ID);
   };
 
   const saveConfigDocuments = async () => {
+    const editorAssociationsDocument = documents.find(
+      (document) => document.kind === "config" && document.configKind === "editorAssociations"
+    );
     const markdownSnippetsDocument = documents.find((document) => document.kind === "config" && document.configKind === "markdownSnippets");
     const latexSnippetsDocument = documents.find((document) => document.kind === "config" && document.configKind === "latexSnippets");
     const keybindingsDocument = documents.find((document) => document.kind === "config" && document.configKind === "keybindings");
     const savedPayload = await api.saveEditorConfig(
       (markdownSnippetsDocument ? getDraftValue(markdownSnippetsDocument) : undefined) ?? configPayload?.markdownSnippetsRaw ?? emptyConfigPayload.markdownSnippetsRaw,
       (latexSnippetsDocument ? getDraftValue(latexSnippetsDocument) : undefined) ?? configPayload?.latexSnippetsRaw ?? emptyConfigPayload.latexSnippetsRaw,
-      (keybindingsDocument ? getDraftValue(keybindingsDocument) : undefined) ?? configPayload?.keybindingsRaw ?? emptyConfigPayload.keybindingsRaw
+      (keybindingsDocument ? getDraftValue(keybindingsDocument) : undefined) ?? configPayload?.keybindingsRaw ?? emptyConfigPayload.keybindingsRaw,
+      (editorAssociationsDocument ? getDraftValue(editorAssociationsDocument) : undefined) ?? configPayload?.editorAssociationsRaw ?? emptyConfigPayload.editorAssociationsRaw
     );
     setConfigPayload(savedPayload);
     setDocuments((current) =>
@@ -2198,6 +2163,7 @@ export function App() {
         if (
           document.kind !== "config" ||
           (document.configKind !== "markdownSnippets" &&
+            document.configKind !== "editorAssociations" &&
             document.configKind !== "latexSnippets" &&
             document.configKind !== "keybindings")
         ) {
@@ -2207,6 +2173,7 @@ export function App() {
         return { ...document, value: nextValue, savedValue: nextValue, dirty: false };
       })
     );
+    draftValuesRef.current["config:editorAssociations"] = savedPayload.editorAssociationsRaw;
     draftValuesRef.current["config:markdownSnippets"] = savedPayload.markdownSnippetsRaw;
     draftValuesRef.current["config:latexSnippets"] = savedPayload.latexSnippetsRaw;
     draftValuesRef.current["config:keybindings"] = savedPayload.keybindingsRaw;
@@ -2280,7 +2247,10 @@ export function App() {
       if (activeDocument.kind === "article") {
         const currentValue = editorRef.current?.getValue() ?? getDraftValue(activeDocument);
         const savedArticle = await api.saveArticle(activeDocument.articlePath, currentValue);
-        const savedDocument = buildArticleDocument(savedArticle);
+        const savedDocument = withResolvedEditor(
+          buildArticleDocument(savedArticle),
+          activeDocument.editorId
+        );
         draftValuesRef.current[savedDocument.id] = savedDocument.value;
         setDocuments((current) => upsertDocument(current, savedDocument));
         setActiveDocumentId(savedDocument.id);
@@ -2318,38 +2288,82 @@ export function App() {
     }
   };
 
-  const commitGitChanges = async () => {
-    setGitActionBusy("commit");
-    setBusyMessage("Creating commit...");
-    try {
-      await api.createGitCommit(gitCommitMessage);
-      await loadGitData();
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setGitActionBusy(null);
-      setBusyMessage(null);
+  const refreshWorkspaceData = useCallback(
+    async (target: "adminHome" | "config" | "markdownBlockConfig" | "siteConfig" | "themeGroups" | "tree" | Array<"adminHome" | "config" | "markdownBlockConfig" | "siteConfig" | "themeGroups" | "tree">) => {
+      const targets = Array.isArray(target) ? target : [target];
+      await Promise.all(
+        targets.map((entry) => {
+          switch (entry) {
+            case "tree":
+              return loadTree();
+            case "config":
+              return loadConfig();
+            case "markdownBlockConfig":
+              return loadMarkdownBlockConfig();
+            case "adminHome":
+              return loadAdminHomeConfig();
+            case "themeGroups":
+              return loadThemeGroups();
+            case "siteConfig":
+              return loadSiteConfig();
+          }
+        })
+      );
+    },
+    []
+  );
+  const revealLine = useCallback((lineNumber: number) => {
+    const editor = editorRef.current;
+    if (!editor) {
+      return;
     }
-  };
 
-  const pushGitChanges = async () => {
-    setGitActionBusy("push");
-    setBusyMessage("Pushing git commits to remote...");
-    try {
-      await api.pushGitChanges();
-      await loadGitData();
-      setPageError(null);
-    } catch (error) {
-      setPageError((error as Error).message);
-    } finally {
-      setGitActionBusy(null);
-      setBusyMessage(null);
+    editor.revealLineInCenter(lineNumber);
+    editor.setPosition({
+      lineNumber,
+      column: 1
+    });
+    editor.focus();
+  }, []);
+  const reopenActiveDocumentWithEditor = useCallback((editorId: WorkbenchEditorId) => {
+    if (!activeDocument) {
+      return;
     }
-  };
 
-  const gitHasPendingChanges = gitChangedFiles.length > 0;
-  const gitPrimaryAction = gitHasPendingChanges ? "commit" : "push";
+    setDocuments((current) =>
+      current.map((document) =>
+        document.id === activeDocument.id
+          ? {
+              ...document,
+              editorId: resolveDocumentEditorId(document, editorId)
+            }
+          : document
+      )
+    );
+  }, [activeDocument, resolveDocumentEditorId]);
+  const openResource = useCallback(
+    async (target: WorkbenchResourceTarget) => {
+      switch (target.kind) {
+        case "home":
+          setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
+          setActiveDocumentId(HOME_DOCUMENT_ID);
+          return;
+        case "article":
+          await openArticleDocument(target.articlePath, target.preferredEditorId);
+          return;
+        case "config":
+          await openConfigDocument(target.configKind, target.preferredEditorId);
+          return;
+        case "themeAsset":
+          await openThemeAssetDocument(target.groupId, target.fileName, target.preferredEditorId);
+          return;
+        case "themeGroupConfig":
+          await openThemeGroupConfigDocument(target.groupId, target.preferredEditorId);
+          return;
+      }
+    },
+    [openArticleDocument, openConfigDocument, openThemeAssetDocument, openThemeGroupConfigDocument]
+  );
   const renderSidebarStatusPills = () => (
     <>
       {busyMessage ? <span className="status-pill info">{busyMessage}</span> : null}
@@ -2357,13 +2371,15 @@ export function App() {
     </>
   );
 
-  workbenchApiRef.current = {
+  const workbenchApi: WorkbenchApi = {
     openHome: () => {
       setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
       setActiveDocumentId(HOME_DOCUMENT_ID);
     },
+    openResource,
     showCommandPalette: () => openPalette("commands"),
     hideCommandPalette: () => setCommandPaletteOpen(false),
+    showReopenWithEditor: () => openPalette("editors"),
     showThemePicker: () => openPalette("themes"),
     startThemeGroupCreate: () => {
       setCommandQuery("");
@@ -2371,11 +2387,17 @@ export function App() {
     },
     toggleSidebar: () => setSidebarVisible((current) => !current),
     togglePreview: () => setPreviewVisible((current) => !current),
+    setBusy: setBusyMessage,
+    showError: setPageError,
+    refreshWorkspaceData,
+    revealLine,
+    reopenActiveDocumentWithEditor,
     saveActiveDocument,
     openConfigDocument,
     publishStaticSite,
     setTheme: setThemeId
   };
+  workbenchApiRef.current = workbenchApi;
 
   useEffect(() => {
     window.localStorage.setItem("admin-disabled-plugins", JSON.stringify(disabledPluginIds));
@@ -2495,20 +2517,6 @@ export function App() {
       return;
     }
 
-    const intervalId = window.setInterval(() => {
-      void refreshGitData({ silent: true });
-    }, GIT_REFRESH_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [authenticated, refreshGitData]);
-
-  useEffect(() => {
-    if (!authenticated) {
-      return;
-    }
-
     const keyboardApi = (navigator as Navigator & {
       keyboard?: {
         lock: (codes?: string[]) => Promise<void>;
@@ -2536,10 +2544,10 @@ export function App() {
   }, [commandPaletteOpen]);
 
   useEffect(() => {
-    if (!previewVisible || !isArticleDocument(activeDocument)) {
+    if (!activeDocumentSupportsPreview) {
       setPreviewRenderDialogOpen(false);
     }
-  }, [activeDocument, previewVisible]);
+  }, [activeDocumentSupportsPreview]);
 
   useEffect(() => {
     if (!activeDocument || activeDocument.kind !== "article") {
@@ -2547,19 +2555,19 @@ export function App() {
       return;
     }
 
-    if (!previewVisible) {
+    if (!activeDocumentSupportsPreview) {
       return;
     }
 
     schedulePreviewSourceUpdate(getDraftValue(activeDocument), { immediate: true });
-  }, [activeDocument?.id, activeDocument?.savedValue, getDraftValue, previewVisible]);
+  }, [activeDocument?.id, activeDocument?.savedValue, activeDocumentSupportsPreview, getDraftValue]);
 
   useEffect(() => {
     const previewRoot = previewProseRef.current;
     const requestId = previewRenderRequestRef.current + 1;
     previewRenderRequestRef.current = requestId;
 
-    if (!previewRoot || !activeDocument || activeDocument.kind !== "article" || !previewVisible) {
+    if (!previewRoot || !activeDocument || activeDocument.kind !== "article" || !activeDocumentSupportsPreview) {
       previewRoot?.replaceChildren();
       previewBlocksRef.current = [];
       setPageError((current) => (current && current.includes("end of the stream") ? null : current));
@@ -2687,13 +2695,13 @@ export function App() {
           setPageError(error.message);
         }
       });
-  }, [activeDocument?.id, markdownBlockConfigPayload?.raw, previewReadyVersion, previewSourceText, previewVisible]);
+  }, [activeDocument?.id, activeDocumentSupportsPreview, markdownBlockConfigPayload?.raw, previewReadyVersion, previewSourceText]);
 
   useEffect(() => {
     const editor = editorRef.current;
     const previewElement = previewRef.current;
 
-    if (!editor || !previewElement || !previewVisible || !isArticleDocument(activeDocument)) {
+    if (!editor || !previewElement || !activeDocumentSupportsPreview || !isArticleDocument(activeDocument)) {
       schedulePreviewCursorSyncRef.current = null;
       return;
     }
@@ -2769,7 +2777,7 @@ export function App() {
         previewCursorSyncRafRef.current = null;
       }
     };
-  }, [activeDocument?.id, editorReadyVersion, previewReadyVersion, previewVisible]);
+  }, [activeDocument?.id, activeDocumentSupportsPreview, editorReadyVersion, previewReadyVersion]);
 
   useEffect(() => {
     return () => {
@@ -2855,7 +2863,7 @@ export function App() {
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (sidebarView !== "explorer") {
+      if (sidebarGroupId !== "explorer" || activePaneId !== "files") {
         return;
       }
       const activeElement = document.activeElement;
@@ -2905,7 +2913,7 @@ export function App() {
     };
     window.addEventListener("keydown", listener, true);
     return () => window.removeEventListener("keydown", listener, true);
-  }, [remapStoredArticleCursorStates, selectedTreeNode, sidebarView, treeClipboard]);
+  }, [activePaneId, remapStoredArticleCursorStates, selectedTreeNode, sidebarGroupId, treeClipboard]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -2977,6 +2985,13 @@ export function App() {
       monaco.editor.setTheme(activeTheme.id);
     }
   };
+
+  useEffect(() => {
+    if (!activeDocument || activeDocument.kind === "home") {
+      editorRef.current = null;
+      monacoRef.current = null;
+    }
+  }, [activeDocument?.id, activeDocument?.kind, activeEditorContribution?.editorId]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -3412,24 +3427,219 @@ export function App() {
     );
   };
 
-  const renderOutlineNode = (item: MarkdownOutlineItem): JSX.Element => (
-    <div className="outline-node" key={item.id}>
-      <button
-        className={`outline-item ${item.id === activeOutlineItemId ? "is-active" : ""}`}
-        onClick={() => jumpToActiveArticleLine(item.lineNumber)}
-        title={`${item.text} (Line ${item.lineNumber})`}
-        type="button"
-      >
-        <span className="outline-item__label">{item.text}</span>
-        <span className="outline-item__line">L{item.lineNumber}</span>
-      </button>
-      {item.children.length > 0 ? (
-        <div className="outline-children">
-          {item.children.map((child) => renderOutlineNode(child))}
-        </div>
-      ) : null}
-    </div>
+  const handleDocumentValueChange = useCallback(
+    (nextValue: string) => {
+      if (!activeDocument) {
+        return;
+      }
+
+      draftValuesRef.current[activeDocument.id] = nextValue;
+      setDocuments((current) => {
+        let changed = false;
+        const nextDocuments = current.map((document) => {
+          if (document.id !== activeDocument.id) {
+            return document;
+          }
+
+          const shouldBeDirty =
+            activeEditorContribution?.isDirty?.(document, nextValue) ?? nextValue !== document.savedValue;
+          if (document.dirty !== shouldBeDirty || document.value !== nextValue) {
+            changed = true;
+            return { ...document, dirty: shouldBeDirty, value: nextValue };
+          }
+
+          return document;
+        });
+
+        return changed ? nextDocuments : current;
+      });
+
+      if (isArticleDocument(activeDocument) && activeDocumentSupportsPreview) {
+        schedulePreviewSourceUpdate(nextValue);
+      }
+    },
+    [activeDocument, activeDocumentSupportsPreview, activeEditorContribution, schedulePreviewSourceUpdate]
   );
+
+  const renderSidebarPaneContent = () => {
+    if (!activeSidebarPane) {
+      return (
+        <div className="sidebar-scroll">
+          <div className="empty-state">No pane available.</div>
+        </div>
+      );
+    }
+
+    if (activeSidebarPane.kind === "plugin" && activeSidebarPane.component) {
+      const PaneComponent = activeSidebarPane.component;
+      return (
+        <PaneComponent
+          activeArticleLineNumber={activeArticleLineNumber ?? 1}
+          activeDocument={activeDocument}
+          api={workbenchApi}
+        />
+      );
+    }
+
+    if (activeSidebarPane.paneId === "files") {
+      return (
+        <div className="sidebar-scroll" ref={treeRootRef}>
+          {treeClipboard ? (
+            <div className="sidebar-section">
+              <span className="status-pill info">
+                {treeClipboard.mode === "copy" ? "Copy" : "Cut"}: {getBaseName(treeClipboard.path)}
+              </span>
+            </div>
+          ) : null}
+          <div className="sidebar-section filters-section">
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter files"
+            />
+            <div className="filter-inline-row">
+              <label className="filter-inline">
+                <span>Tag</span>
+                <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
+                  <option value="all">All</option>
+                  {selectedTags.map((tag) => (
+                    <option key={tag.tag} value={tag.tag}>
+                      {tag.tag} ({tag.count})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="filter-inline">
+                <span>Status</span>
+                <select
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value as "all" | "draft" | "published")}
+                >
+                  <option value="all">All</option>
+                  <option value="draft">Draft</option>
+                  <option value="published">Published</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div
+            className="sidebar-section tree-section"
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setContextMenuState({ path: "", x: event.clientX, y: event.clientY });
+            }}
+          >
+            {(treePayload?.fileTree ?? []).map((node) => renderFileNode(node))}
+          </div>
+        </div>
+      );
+    }
+
+    if (activeSidebarPane.paneId === "edit-actions") {
+      return (
+        <div className="sidebar-scroll">
+          <div className="sidebar-section">
+            <strong>Edit Actions</strong>
+            <div className="edit-actions">
+              <button
+                className="action-button accent"
+                disabled={publishBusy}
+                onClick={() => void publishStaticSite()}
+                type="button"
+              >
+                {publishBusy ? "Publishing..." : "Publish Static Site"}
+              </button>
+              {isArticleDocument(activeDocument) ? (
+                <button
+                  className="action-button ghost"
+                  onClick={async () => {
+                    setBusyMessage("Updating status...");
+                    try {
+                      const updated = await api.updateStatus(
+                        activeDocument.articlePath,
+                        activeDocument.record.status === "draft" ? "published" : "draft"
+                      );
+                      const updatedDocument = withResolvedEditor(
+                        buildArticleDocument(updated),
+                        activeDocument.editorId
+                      );
+                      setDocuments((current) => upsertDocument(current, updatedDocument));
+                      setActiveDocumentId(updatedDocument.id);
+                      draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
+                      syncEditorValuePreservingView(updatedDocument.value);
+                      schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
+                      await loadTree();
+                      setPageError(null);
+                    } catch (error) {
+                      setPageError((error as Error).message);
+                    } finally {
+                      setBusyMessage(null);
+                    }
+                  }}
+                  type="button"
+                >
+                  {activeDocument.record.status === "draft" ? "Publish Article" : "Move To Draft"}
+                </button>
+              ) : null}
+              <button
+                className="action-button primary"
+                disabled={!activeDocument || isHomeDocument(activeDocument)}
+                onClick={() => void saveActiveDocument()}
+                type="button"
+              >
+                Save
+              </button>
+            </div>
+            {renderSidebarStatusPills()}
+            {configPayload?.warnings.length ? (
+              <span className="status-pill warning">
+                {configPayload.warnings.length} config warning{configPayload.warnings.length > 1 ? "s" : ""}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="sidebar-scroll">
+        <div className="sidebar-section plugin-list">
+          {builtInPlugins.map((plugin) => {
+            const enabled = !disabledPluginIds.includes(plugin.id);
+            return (
+              <div className="plugin-card" key={plugin.id}>
+                <div className="plugin-card-header">
+                  <div>
+                    <strong>{plugin.label}</strong>
+                    <p>{plugin.description}</p>
+                  </div>
+                  <button
+                    className={`action-button ${enabled ? "ghost" : "primary"}`}
+                    onClick={() =>
+                      setDisabledPluginIds((current) =>
+                        enabled ? [...current, plugin.id] : current.filter((id) => id !== plugin.id)
+                      )
+                    }
+                    type="button"
+                  >
+                    {enabled ? "Disable" : "Enable"}
+                  </button>
+                </div>
+                <div className="plugin-card-meta">
+                  <span className={`status-pill ${enabled ? "info" : "warning"}`}>
+                    {enabled ? "Enabled" : "Disabled"}
+                  </span>
+                  <span className="body-muted">{plugin.id}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const ActiveEditorComponent = activeEditorContribution?.component ?? null;
 
   if (!authenticated) {
     return (
@@ -3485,14 +3695,18 @@ export function App() {
             ? "Command Palette"
             : commandPaletteMode === "themes"
               ? "Choose Theme"
-              : "Create Theme Group"
+              : commandPaletteMode === "editors"
+                ? "Reopen With Editor"
+                : "Create Theme Group"
         }
         placeholder={
           commandPaletteMode === "commands"
             ? "Type a command"
             : commandPaletteMode === "themes"
               ? "Type a theme"
-              : "Type a theme group id"
+              : commandPaletteMode === "editors"
+                ? "Type an editor"
+                : "Type a theme group id"
         }
         query={commandQuery}
         selectedIndex={selectedPaletteIndex}
@@ -3519,6 +3733,11 @@ export function App() {
             }
 
             void createThemeGroupDocument(normalizedGroupId);
+            return;
+          }
+          if (commandPaletteMode === "editors") {
+            setCommandPaletteOpen(false);
+            workbenchApiRef.current?.reopenActiveDocumentWithEditor(id);
             return;
           }
           const command = pluginRuntime.getCommand(id);
@@ -3655,110 +3874,6 @@ export function App() {
         </div>
       ) : null}
 
-      {themeGroupDialog ? (
-        <div className="dialog-backdrop" onClick={() => setThemeGroupDialog(null)} role="presentation">
-          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
-            <p className="title-overline">Theme Group</p>
-            <h2>{themeGroupDialog.mode === "rename" ? "Rename Theme Group" : "Delete Theme Group"}</h2>
-            {themeGroupDialog.mode === "rename" ? (
-              <label>
-                <span>Group Id</span>
-                <input
-                  value={themeGroupDialog.value}
-                  onChange={(event) =>
-                    setThemeGroupDialog({
-                      ...themeGroupDialog,
-                      value: event.target.value
-                    })
-                  }
-                />
-              </label>
-            ) : (
-              <p className="body-muted">Delete theme group "{themeGroupDialog.groupId}" and all files under `config/theme/{themeGroupDialog.groupId}`?</p>
-            )}
-            <div className="dialog-actions">
-              <button className="action-button ghost" onClick={() => setThemeGroupDialog(null)} type="button">
-                Cancel
-              </button>
-              <button
-                className={`action-button ${themeGroupDialog.mode === "delete" ? "danger" : "primary"}`}
-                onClick={() => {
-                  if (themeGroupDialog.mode === "rename") {
-                    void renameThemeGroupDocument(themeGroupDialog.groupId, themeGroupDialog.value);
-                  } else {
-                    void deleteThemeGroupDocument(themeGroupDialog.groupId);
-                  }
-                }}
-                type="button"
-              >
-                {themeGroupDialog.mode === "rename" ? "Rename" : "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {themeAssetDialog ? (
-        <div className="dialog-backdrop" onClick={() => setThemeAssetDialog(null)} role="presentation">
-          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
-            <p className="title-overline">Theme Asset</p>
-            <h2>
-              {themeAssetDialog.mode === "create"
-                ? `Create ${themeAssetDialog.type.toUpperCase()} File`
-                : themeAssetDialog.mode === "rename"
-                  ? "Rename Theme File"
-                  : "Delete Theme File"}
-            </h2>
-            {themeAssetDialog.mode === "delete" ? (
-              <p className="body-muted">Delete "{themeAssetDialog.fileName}" from "{themeAssetDialog.groupId}"?</p>
-            ) : (
-              <label>
-                <span>File Name</span>
-                <input
-                  value={themeAssetDialog.fileName}
-                  onChange={(event) =>
-                    setThemeAssetDialog({
-                      ...themeAssetDialog,
-                      currentFileName: themeAssetDialog.currentFileName,
-                      fileName: event.target.value
-                    })
-                  }
-                />
-              </label>
-            )}
-            <div className="dialog-actions">
-              <button className="action-button ghost" onClick={() => setThemeAssetDialog(null)} type="button">
-                Cancel
-              </button>
-              <button
-                className={`action-button ${themeAssetDialog.mode === "delete" ? "danger" : "primary"}`}
-                onClick={() => {
-                  if (themeAssetDialog.mode === "create") {
-                    void createThemeAssetDocument(
-                      themeAssetDialog.groupId,
-                      themeAssetDialog.fileName,
-                      themeAssetDialog.type,
-                      themeAssetDialog.adminPreview
-                    );
-                  } else if (themeAssetDialog.mode === "rename") {
-                    void renameThemeAssetDocument(
-                      themeAssetDialog.groupId,
-                      themeAssetDialog.currentFileName ?? themeAssetDialog.fileName,
-                      themeAssetDialog.fileName
-                    );
-                  } else {
-                    void deleteThemeAssetDocument(themeAssetDialog.groupId, themeAssetDialog.fileName);
-                  }
-                }}
-                type="button"
-              >
-                {themeAssetDialog.mode === "create" ? "Create" : themeAssetDialog.mode === "rename" ? "Rename" : "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {previewRenderDialogOpen ? (
         <div className="dialog-backdrop" onClick={() => setPreviewRenderDialogOpen(false)} role="presentation">
           <div className="dialog-card preview-render-dialog" onClick={(event) => event.stopPropagation()}>
@@ -3766,7 +3881,7 @@ export function App() {
               <p className="title-overline">Preview Theme</p>
               <h2>Theme Preview Assets</h2>
               <p className="body-muted">
-                Enabled theme groups contribute CSS and JS. Files marked for admin preview are injected into the preview surface.
+                Enabled theme groups contribute CSS and JS. Preview CSS follows the current workbench light or dark theme automatically.
               </p>
             </div>
             <div className="preview-render-style-list">
@@ -3777,12 +3892,14 @@ export function App() {
                   <div className="preview-render-style-item" key={group.groupId}>
                     <div>
                       <strong>{group.label}</strong>
-                      <span>{group.groupId}</span>
+                      <span>{group.groupId} | site mode {group.mode}</span>
                     </div>
                     <div className="search-result">
                       {group.files.map((file) => (
                         <span key={`${group.groupId}:${file.fileName}`}>
-                          {file.fileName}{file.adminPreview ? " | preview" : ""}
+                          {file.fileName}
+                          {file.type === "css" ? ` | ${file.colorMode}` : ""}
+                          {file.adminPreview ? " | preview" : ""}
                         </span>
                       ))}
                     </div>
@@ -3795,124 +3912,6 @@ export function App() {
                 Close
               </button>
             </div>
-          </div>
-        </div>
-      ) : null}
-
-      {themeContextMenuState ? (
-        <div className="context-menu-backdrop" onClick={() => setThemeContextMenuState(null)} role="presentation">
-          <div className="context-menu" style={{ left: themeContextMenuState.x, top: themeContextMenuState.y }} onClick={(event) => event.stopPropagation()}>
-            {(themeContextMenuState.kind === "root"
-              ? [
-                  ["new-group", "New Theme Group"]
-                ]
-              : themeContextMenuState.kind === "group"
-                ? [
-                    ["new-css", "New CSS File"],
-                    ["new-js", "New JS File"],
-                    ["rename-group", "Rename Group"],
-                    ["delete-group", "Delete Group"]
-                  ]
-                : [
-                    ["rename-asset", "Rename File"],
-                    ["delete-asset", "Delete File"]
-                  ]
-            ).map(([action, label]) => (
-              <button
-                className={`context-menu-item ${action.startsWith("delete") ? "danger" : ""}`}
-                key={action}
-                onClick={() => {
-                  const state = themeContextMenuState;
-                  setThemeContextMenuState(null);
-
-                  if (action === "new-group") {
-                    openPalette("themeGroupCreate");
-                    return;
-                  }
-
-                  if (!state.groupId) {
-                    return;
-                  }
-
-                  if (action === "new-css") {
-                    setThemeAssetDialog({
-                      adminPreview: false,
-                      fileName: "new-style.css",
-                      groupId: state.groupId,
-                      mode: "create",
-                      type: "css"
-                    });
-                    return;
-                  }
-
-                  if (action === "new-js") {
-                    setThemeAssetDialog({
-                      adminPreview: false,
-                      fileName: "new-script.js",
-                      groupId: state.groupId,
-                      mode: "create",
-                      type: "js"
-                    });
-                    return;
-                  }
-
-                  if (action === "rename-group") {
-                    setThemeGroupDialog({
-                      groupId: state.groupId,
-                      mode: "rename",
-                      value: state.groupId
-                    });
-                    return;
-                  }
-
-                  if (action === "delete-group") {
-                    setThemeGroupDialog({
-                      groupId: state.groupId,
-                      mode: "delete",
-                      value: state.groupId
-                    });
-                    return;
-                  }
-
-                  if (!state.fileName) {
-                    return;
-                  }
-
-                  const matchingGroup = themeGroupsPayload?.groups.find((group) => group.groupId === state.groupId);
-                  const matchingFile = matchingGroup?.files.find((file) => file.fileName === state.fileName);
-
-                  if (!matchingFile) {
-                    return;
-                  }
-
-                  if (action === "rename-asset") {
-                    setThemeAssetDialog({
-                      adminPreview: matchingFile.adminPreview,
-                      currentFileName: matchingFile.fileName,
-                      fileName: matchingFile.fileName,
-                      groupId: state.groupId,
-                      mode: "rename",
-                      type: matchingFile.type
-                    });
-                    return;
-                  }
-
-                  if (action === "delete-asset") {
-                    setThemeAssetDialog({
-                      adminPreview: matchingFile.adminPreview,
-                      currentFileName: matchingFile.fileName,
-                      fileName: matchingFile.fileName,
-                      groupId: state.groupId,
-                      mode: "delete",
-                      type: matchingFile.type
-                    });
-                  }
-                }}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
           </div>
         </div>
       ) : null}
@@ -4004,58 +4003,36 @@ export function App() {
 
       <div className="activity-bar">
         <div className="activity-brand">KB</div>
-        <button
-          aria-label="Explorer"
-          className={`activity-button ${sidebarVisible && sidebarView === "explorer" ? "is-active" : ""}`}
-          onClick={() => {
-            setSidebarView("explorer");
-            setSidebarVisible((current) => sidebarView === "explorer" ? !current : true);
-          }}
-          title="Explorer"
-          type="button"
-        >
-          <ActivityIcon icon="explorer" />
-        </button>
-        <button
-          aria-label="Edit"
-          className={`activity-button ${sidebarVisible && sidebarView === "edit" ? "is-active" : ""}`}
-          onClick={() => {
-            setSidebarView("edit");
-            setSidebarVisible((current) => sidebarView === "edit" ? !current : true);
-          }}
-          title="Edit"
-          type="button"
-        >
-          <ActivityIcon icon="edit" />
-        </button>
-        <button
-          aria-label="Plugins"
-          className={`activity-button ${sidebarVisible && sidebarView === "plugins" ? "is-active" : ""}`}
-          onClick={() => {
-            setSidebarView("plugins");
-            setSidebarVisible((current) => sidebarView === "plugins" ? !current : true);
-          }}
-          title="Plugins"
-          type="button"
-        >
-          <ActivityIcon icon="plugins" />
-        </button>
-        {sidebarViewContributions.map((view) => (
+        {SIDEBAR_GROUPS.map((group) => (
           <button
-            aria-label={view.title}
-            className={`activity-button ${sidebarVisible && sidebarView === view.viewId ? "is-active" : ""}`}
-            key={view.id}
+            aria-label={group.title}
+            className={`activity-button ${sidebarVisible && sidebarGroupId === group.id ? "is-active" : ""}`}
+            key={group.id}
             onClick={() => {
-              setSidebarView(view.viewId);
-              setSidebarVisible((current) => (sidebarView === view.viewId ? !current : true));
+              setSidebarGroupId(group.id);
+              setActivePaneByGroup((current) =>
+                current[group.id]
+                  ? current
+                  : {
+                      ...current,
+                      [group.id]: groupedPanes[group.id]?.[0]?.paneId ?? ""
+                    }
+              );
+              setSidebarVisible((current) => (sidebarGroupId === group.id ? !current : true));
             }}
-            title={view.title}
+            title={group.title}
             type="button"
           >
-            <ActivityIcon icon={getSidebarViewIcon(view.viewId)} />
+            <ActivityIcon icon={group.icon} />
           </button>
         ))}
-        <button aria-label="Command Palette" className="activity-button bottom" onClick={() => openPalette("commands")} title="Command Palette" type="button">
+        <button
+          aria-label="Command Palette"
+          className="activity-button bottom"
+          onClick={() => openPalette("commands")}
+          title="Command Palette"
+          type="button"
+        >
           <ActivityIcon icon="command" />
         </button>
       </div>
@@ -4066,307 +4043,32 @@ export function App() {
           gridTemplateColumns: sidebarVisible ? `${sidebarWidth}px 8px 1fr` : "0 0 1fr"
         }}
       >
-        <aside className={`sidebar-panel ${sidebarVisible ? "" : "is-collapsed"}`} style={sidebarVisible ? { width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` } : undefined}>
+        <aside
+          className={`sidebar-panel ${sidebarVisible ? "" : "is-collapsed"}`}
+          style={sidebarVisible ? { minWidth: `${sidebarWidth}px`, width: `${sidebarWidth}px` } : undefined}
+        >
           {sidebarVisible ? (
-            sidebarView === "explorer" ? (
-              <div className="sidebar-scroll" ref={treeRootRef}>
-                {treeClipboard ? (
-                  <div className="sidebar-section">
-                    <span className="status-pill info">{treeClipboard.mode === "copy" ? "Copy" : "Cut"}: {getBaseName(treeClipboard.path)}</span>
-                  </div>
-                ) : null}
-                <div className="sidebar-section filters-section">
-                  <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Filter files" />
-                  <div className="filter-inline-row">
-                    <label className="filter-inline">
-                      <span>Tag</span>
-                      <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
-                        <option value="all">All</option>
-                        {selectedTags.map((tag) => <option key={tag.tag} value={tag.tag}>{tag.tag} ({tag.count})</option>)}
-                      </select>
-                    </label>
-                    <label className="filter-inline">
-                      <span>Status</span>
-                      <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | "draft" | "published")}>
-                        <option value="all">All</option>
-                        <option value="draft">Draft</option>
-                        <option value="published">Published</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
-                <div className="sidebar-section tree-section" onContextMenu={(event) => { event.preventDefault(); setContextMenuState({ path: "", x: event.clientX, y: event.clientY }); }}>
-                  {(treePayload?.fileTree ?? []).map((node) => renderFileNode(node))}
-                </div>
-              </div>
-            ) : sidebarView === "edit" ? (
-              <div className="sidebar-scroll">
-                <div className="sidebar-section">
-                  <strong>Edit Actions</strong>
-                  <div className="edit-actions">
-                    <button className="action-button accent" disabled={publishBusy} onClick={() => void publishStaticSite()} type="button">
-                      {publishBusy ? "Publishing..." : "Publish Static Site"}
-                    </button>
-                    {isArticleDocument(activeDocument) ? (
-                      <button
-                        className="action-button ghost"
-                        onClick={async () => {
-                          setBusyMessage("Updating status...");
-                          try {
-                            const updated = await api.updateStatus(
-                              activeDocument.articlePath,
-                              activeDocument.record.status === "draft" ? "published" : "draft"
-                            );
-                            const updatedDocument = buildArticleDocument(updated);
-                            setDocuments((current) => upsertDocument(current, updatedDocument));
-                            setActiveDocumentId(updatedDocument.id);
-                            draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
-                            syncEditorValuePreservingView(updatedDocument.value);
-                            schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
-                            await loadTree();
-                            setPageError(null);
-                          } catch (error) {
-                            setPageError((error as Error).message);
-                          } finally {
-                            setBusyMessage(null);
-                          }
-                        }}
-                        type="button"
-                      >
-                        {activeDocument.record.status === "draft" ? "Publish Article" : "Move To Draft"}
-                      </button>
-                    ) : null}
-                    <button className="action-button primary" disabled={!activeDocument || isHomeDocument(activeDocument)} onClick={() => void saveActiveDocument()} type="button">
-                      Save
-                    </button>
-                  </div>
-                  {renderSidebarStatusPills()}
-                  {configPayload?.warnings.length ? <span className="status-pill warning">{configPayload.warnings.length} config warning{configPayload.warnings.length > 1 ? "s" : ""}</span> : null}
-                </div>
-                <div className="sidebar-section">
-                  <div className="sidebar-section-header">
-                    <strong>Theme Groups</strong>
-                  </div>
-                </div>
-                <div className="sidebar-section search-results" onContextMenu={(event) => { event.preventDefault(); setThemeContextMenuState({ kind: "root", x: event.clientX, y: event.clientY }); }}>
-                  {!themeGroupsPayload ? (
-                    <div className="empty-state">Loading theme groups...</div>
-                  ) : themeGroupsPayload.groups.length === 0 ? (
-                    <div className="empty-state">No groups yet.</div>
-                  ) : (
-                    themeGroupsPayload.groups.map((group) => (
-                      <div className="theme-group-card" key={group.groupId} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setThemeContextMenuState({ groupId: group.groupId, kind: "group", x: event.clientX, y: event.clientY }); }}>
-                        <div className="theme-group-card__header">
-                          <div className="search-result">
-                            <strong>{group.label}</strong>
-                            <span>{group.groupId} | {group.enable ? "enabled" : "disabled"} | {group.files.length} files</span>
-                          </div>
-                          <div className="render-style-actions">
-                            <button className="action-button ghost" onClick={() => void openThemeGroupConfigDocument(group.groupId)} type="button">
-                              Open theme.json
-                            </button>
-                          </div>
-                        </div>
-                        <div className="theme-group-card__files">
-                          {group.files.length === 0 ? (
-                            <div className="empty-state">No files.</div>
-                          ) : (
-                            group.files.map((file) => (
-                              <div className="render-style-row" key={`${group.groupId}:${file.fileName}`} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setThemeContextMenuState({ fileName: file.fileName, groupId: group.groupId, kind: "asset", x: event.clientX, y: event.clientY }); }}>
-                                <div className="search-result">
-                                  <strong>{file.fileName}</strong>
-                                  <span>{file.type.toUpperCase()} | {file.adminPreview ? "admin preview" : "site only"}</span>
-                                </div>
-                                <div className="render-style-actions">
-                                  <button className="action-button ghost" onClick={() => void openThemeAssetDocument(group.groupId, file.fileName)} type="button">
-                                    Open
-                                  </button>
-                                </div>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            ) : sidebarView === "outline" ? (
-              <div className="sidebar-scroll">
-                <div className="sidebar-section">
-                  <strong>Markdown Outline</strong>
-                  {isArticleDocument(activeDocument) ? (
-                    <span className="body-muted">{activeDocument.articlePath}</span>
-                  ) : (
-                    <div className="empty-state">Open a markdown article to inspect its headings.</div>
-                  )}
-                </div>
-                <div className="sidebar-section tree-section">
-                  {!isArticleDocument(activeDocument) ? (
-                    <div className="empty-state">Outline is available for article tabs only.</div>
-                  ) : activeArticleOutline.length === 0 ? (
-                    <div className="empty-state">No headings found in this article.</div>
-                  ) : (
-                    <div className="outline-tree">
-                      {activeArticleOutline.map((item) => renderOutlineNode(item))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : sidebarView === "media" ? (
-              <div className="sidebar-scroll">
-                <div className="sidebar-section">
-                  <label>
-                    <span>Upload Images</span>
-                    <input
-                      accept="image/*"
-                      onChange={(event) => void uploadMediaFiles(event.target.files)}
-                      type="file"
-                      multiple
-                    />
-                  </label>
-                </div>
-                <div className="sidebar-section media-list">
-                  {mediaAssets.length === 0 ? (
-                    <div className="empty-state">No media assets.</div>
-                  ) : (
-                    mediaAssets.map((asset) => (
-                      <button
-                        className="search-result"
-                        key={asset.relativePath}
-                        onClick={async () => {
-                          await navigator.clipboard.writeText(`@media/${asset.fileName}`);
-                        }}
-                        type="button"
-                      >
-                        <img alt={asset.fileName} src={asset.urlPath} />
-                        <strong>{asset.fileName}</strong>
-                        <span>{asset.mimeType} · {formatBytes(asset.size)}</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            ) : sidebarView === "git" ? (
-              <div className="sidebar-scroll">
-                <div className="sidebar-section">
-                  <label>
-                    <span>{gitHasPendingChanges ? "Commit Message" : "Commit Message (unused for push)"}</span>
-                    <input
-                      disabled={!gitHasPendingChanges || gitActionBusy !== null}
-                      value={gitCommitMessage}
-                      onChange={(event) => setGitCommitMessage(event.target.value)}
-                    />
-                  </label>
-                  {renderSidebarStatusPills()}
+            <div className="sidebar-host">
+              <div className="sidebar-pane-tabs">
+                {activeGroupPanes.map((pane) => (
                   <button
-                    className="action-button ghost"
-                    disabled={gitRefreshBusy || gitActionBusy !== null}
-                    onClick={() => {
-                      void refreshGitData();
-                    }}
+                    className={`sidebar-pane-tab ${pane.paneId === activePaneId ? "is-active" : ""}`}
+                    key={`${sidebarGroupId}:${pane.paneId}`}
+                    onClick={() =>
+                      setActivePaneByGroup((current) => ({
+                        ...current,
+                        [sidebarGroupId]: pane.paneId
+                      }))
+                    }
+                    title={pane.title}
                     type="button"
                   >
-                    {gitRefreshBusy ? "Refreshing..." : "Refresh Git Changes"}
+                    {pane.tabLabel}
                   </button>
-                  {!gitInitialized ? (
-                    <button
-                      className="action-button ghost"
-                      disabled={gitActionBusy !== null}
-                      onClick={async () => {
-                        setGitActionBusy("init");
-                        setBusyMessage("Initializing git repository...");
-                        try {
-                          await api.initGitRepository();
-                          await loadGitData();
-                          setPageError(null);
-                        } catch (error) {
-                          setPageError((error as Error).message);
-                        } finally {
-                          setGitActionBusy(null);
-                          setBusyMessage(null);
-                        }
-                      }}
-                      type="button"
-                    >
-                      Init Repository
-                    </button>
-                  ) : null}
-                  <button
-                    className="action-button primary"
-                    disabled={!gitInitialized || gitActionBusy !== null}
-                    onClick={async () => {
-                      if (gitPrimaryAction === "push") {
-                        await pushGitChanges();
-                        return;
-                      }
-
-                      await commitGitChanges();
-                    }}
-                    type="button"
-                  >
-                    {gitActionBusy === "commit"
-                      ? "Committing..."
-                      : gitActionBusy === "push"
-                        ? "Pushing..."
-                        : gitPrimaryAction === "push"
-                          ? "Push"
-                          : "Commit"}
-                  </button>
-                </div>
-                <div className="sidebar-section search-results">
-                  <strong>Changed Files</strong>
-                  {gitChangedFiles.length === 0 ? (
-                    <div className="empty-state">No pending changes.</div>
-                  ) : (
-                    gitChangedFiles.map((file) => (
-                      <div className="search-result" key={`${file.status}:${file.path}`}>
-                        <strong>{file.status}</strong>
-                        <span>{file.path}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="sidebar-section search-results">
-                  <strong>History</strong>
-                  {gitCommits.length === 0 ? (
-                    <div className="empty-state">No commits.</div>
-                  ) : (
-                    gitCommits.map((commit) => (
-                      <div className="search-result" key={commit.hash}>
-                        <strong>{commit.message}</strong>
-                        <span>{commit.hash.slice(0, 7)} · {commit.timestamp}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
+                ))}
               </div>
-            ) : (
-              <div className="sidebar-scroll">
-                <div className="sidebar-section plugin-list">
-                  {builtInPlugins.map((plugin) => {
-                    const enabled = !disabledPluginIds.includes(plugin.id);
-                    return (
-                      <div className="plugin-card" key={plugin.id}>
-                        <div className="plugin-card-header">
-                          <div>
-                            <strong>{plugin.label}</strong>
-                            <p>{plugin.description}</p>
-                          </div>
-                          <button className={`action-button ${enabled ? "ghost" : "primary"}`} onClick={() => setDisabledPluginIds((current) => enabled ? [...current, plugin.id] : current.filter((id) => id !== plugin.id))} type="button">
-                            {enabled ? "Disable" : "Enable"}
-                          </button>
-                        </div>
-                        <div className="plugin-card-meta">
-                          <span className={`status-pill ${enabled ? "info" : "warning"}`}>{enabled ? "Enabled" : "Disabled"}</span>
-                          <span className="body-muted">{plugin.id}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )
+              {renderSidebarPaneContent()}
+            </div>
           ) : null}
         </aside>
 
@@ -4377,9 +4079,9 @@ export function App() {
         />
 
         <section
-          className={`workspace-grid ${previewVisible && isArticleDocument(activeDocument) ? "with-preview" : ""}`}
+          className={`workspace-grid ${activeDocumentSupportsPreview ? "with-preview" : ""}`}
           style={
-            previewVisible && isArticleDocument(activeDocument)
+            activeDocumentSupportsPreview
               ? { gridTemplateColumns: `minmax(0, 1fr) 8px ${previewWidth}px` }
               : undefined
           }
@@ -4387,11 +4089,28 @@ export function App() {
           <div className="editor-group">
             <div className="tab-bar">
               {documents.map((document) => (
-                <button className={`tab-button ${document.id === activeDocumentId ? "is-active" : ""}`} key={document.id} onClick={() => setActiveDocumentId(document.id)} type="button">
+                <button
+                  className={`tab-button ${document.id === activeDocumentId ? "is-active" : ""}`}
+                  key={document.id}
+                  onClick={() => setActiveDocumentId(document.id)}
+                  type="button"
+                >
                   <span>{document.title}</span>
                   {document.dirty ? <span className="dirty-dot">*</span> : null}
                   {document.kind !== "home" ? (
-                    <span className="tab-close" onClick={(event) => { event.stopPropagation(); const nextDocuments = closeDocument(documents, document.id); setDocuments(nextDocuments); if (activeDocumentId === document.id) { const closedIndex = documents.findIndex((candidate) => candidate.id === document.id); setActiveDocumentId(nextDocuments[Math.max(0, closedIndex - 1)]?.id ?? HOME_DOCUMENT_ID); } }} role="presentation">
+                    <span
+                      className="tab-close"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const nextDocuments = closeDocument(documents, document.id);
+                        setDocuments(nextDocuments);
+                        if (activeDocumentId === document.id) {
+                          const closedIndex = documents.findIndex((candidate) => candidate.id === document.id);
+                          setActiveDocumentId(nextDocuments[Math.max(0, closedIndex - 1)]?.id ?? HOME_DOCUMENT_ID);
+                        }
+                      }}
+                      role="presentation"
+                    >
                       x
                     </span>
                   ) : null}
@@ -4399,84 +4118,46 @@ export function App() {
               ))}
             </div>
             <div className="editor-surface">
-              {isHomeDocument(activeDocument) ? (
-                adminHomePayload ? (
-                <HomeDashboard
-                  onChange={updateAdminHomeConfigValue}
-                  value={adminHomePayload.value}
-                  widgets={homeWidgetContributions}
-                />
+              {activeDocument ? (
+                ActiveEditorComponent ? (
+                  <ActiveEditorComponent
+                    adminHomeValue={adminHomePayload?.value ?? null}
+                    document={activeDocument}
+                    homeWidgets={homeWidgetContributions}
+                    onChange={handleDocumentValueChange}
+                    onChangeHomeConfig={updateAdminHomeConfigValue}
+                    onMount={handleEditorMount}
+                    path={getDocumentPath(activeDocument, null)}
+                    value={getDraftValue(activeDocument)}
+                  />
                 ) : (
-                  <div className="empty-editor">Loading admin home...</div>
+                  <div className="empty-editor">No editor is available for this document.</div>
                 )
-              ) : activeDocument ? (
-                <Editor
-                  key={activeDocument.id}
-                  beforeMount={(monaco) => {
-                    monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
-                      validate: true,
-                      schemas: getJsonSchemaDefinitions()
-                    });
-                  }}
-                  defaultLanguage={activeDocument.language}
-                  defaultValue={getDraftValue(activeDocument)}
-                  language={activeDocument.language}
-                  onMount={handleEditorMount}
-                  options={{ automaticLayout: true, fontFamily: "'Cascadia Code', 'Fira Code', monospace", fontLigatures: true, minimap: { enabled: false }, smoothScrolling: true, tabCompletion: "on", quickSuggestions: { other: true, strings: true, comments: false }, snippetSuggestions: "top", wordWrap: "on" }}
-                  path={
-                    activeDocument.kind === "article"
-                      ? activeDocument.articlePath
-                      : activeDocument.kind === "themeAsset"
-                        ? activeDocument.editorPath
-                        : getConfigDocumentPath(activeDocument.configKind)
-                  }
-                  onChange={(value) => {
-                    const nextValue = value ?? "";
-                    draftValuesRef.current[activeDocument.id] = nextValue;
-                    setDocuments((current) => {
-                      let changed = false;
-                      const nextDocuments = current.map((document) => {
-                        if (document.id !== activeDocument.id) {
-                          return document;
-                        }
-
-                        const shouldBeDirty = nextValue !== document.savedValue;
-                        if (document.dirty !== shouldBeDirty || document.value !== nextValue) {
-                          changed = true;
-                          return { ...document, value: nextValue, dirty: shouldBeDirty };
-                        }
-
-                        return document;
-                      });
-
-                      return changed ? nextDocuments : current;
-                    });
-                    if (activeDocument.kind === "article" && previewVisible) {
-                      schedulePreviewSourceUpdate(nextValue);
-                    }
-                  }}
-                />
               ) : (
-                <div className="empty-editor">Open an article or JSON config document.</div>
+                <div className="empty-editor">Open an article or config document.</div>
               )}
             </div>
           </div>
 
-          {previewVisible && isArticleDocument(activeDocument) ? (
+          {activeDocumentSupportsPreview ? (
             <>
-            <div
-              className="panel-resizer vertical"
-              onPointerDown={(event) => startResize("preview", event.clientX)}
-              role="presentation"
-            />
-            <aside className="preview-group">
-              <button className="action-button ghost preview-float-button" onClick={() => setPreviewRenderDialogOpen(true)} type="button">
-                Theme Preview
-              </button>
-              <div className="preview-scroll" ref={attachPreviewRef}>
-                <div className="preview-shadow-host" ref={attachPreviewSurfaceRef} />
-              </div>
-            </aside>
+              <div
+                className="panel-resizer vertical"
+                onPointerDown={(event) => startResize("preview", event.clientX)}
+                role="presentation"
+              />
+              <aside className="preview-group">
+                <button
+                  className="action-button ghost preview-float-button"
+                  onClick={() => setPreviewRenderDialogOpen(true)}
+                  type="button"
+                >
+                  Theme Preview
+                </button>
+                <div className="preview-scroll" ref={attachPreviewRef}>
+                  <div className="preview-shadow-host" ref={attachPreviewSurfaceRef} />
+                </div>
+              </aside>
             </>
           ) : null}
         </section>

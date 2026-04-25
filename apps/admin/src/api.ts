@@ -69,6 +69,8 @@ export interface TreePayload {
 }
 
 export interface EditorConfigPayload {
+  editorAssociations: Record<string, string>;
+  editorAssociationsRaw: string;
   markdownSnippets: EditorSnippet[];
   latexSnippets: EditorSnippet[];
   keybindings: EditorKeybinding[];
@@ -101,6 +103,7 @@ export interface ThemeGroupPayload {
 export interface ThemeAssetPayload {
   adminPreview: boolean;
   assetPath: string;
+  colorMode?: "light" | "dark";
   fileName: string;
   groupId: string;
   language: "css" | "javascript";
@@ -185,14 +188,16 @@ export const api = {
   saveEditorConfig(
     markdownSnippetsRaw: string,
     latexSnippetsRaw: string,
-    keybindingsRaw: string
+    keybindingsRaw: string,
+    editorAssociationsRaw: string
   ) {
     return request<EditorConfigPayload>("/api/editor-config", {
       method: "PUT",
       body: JSON.stringify({
         markdownSnippetsRaw,
         latexSnippetsRaw,
-        keybindingsRaw
+        keybindingsRaw,
+        editorAssociationsRaw
       })
     });
   },
@@ -264,10 +269,16 @@ export const api = {
       body: JSON.stringify({ groupId, fileName, raw })
     });
   },
-  createThemeAsset(groupId: string, fileName: string, type: "css" | "js", adminPreview: boolean) {
+  createThemeAsset(
+    groupId: string,
+    fileName: string,
+    type: "css" | "js",
+    adminPreview: boolean,
+    colorMode?: "light" | "dark"
+  ) {
     return request<ThemeAssetPayload>("/api/theme-asset/create", {
       method: "POST",
-      body: JSON.stringify({ groupId, fileName, type, adminPreview })
+      body: JSON.stringify({ groupId, fileName, type, adminPreview, colorMode })
     });
   },
   renameThemeAsset(groupId: string, fileName: string, nextFileName: string) {

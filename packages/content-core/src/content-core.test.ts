@@ -3,12 +3,16 @@ import test from "node:test";
 
 import {
   applyMarkdownBlockRules,
+  buildThemeColorModeVariantCss,
   createDefaultSlug,
   extractHeadings,
   extractMarkdownBlocks,
+  inferThemeColorModeFromCss,
+  normalizeEditorAssociations,
   normalizeArticleForSave,
   normalizeAdminHomeConfig,
   normalizeMarkdownBlockConfig,
+  normalizeThemeGroupConfig,
   renderMarkdown,
   renderMarkdownFragmentWithKatex,
   renderMarkdownWithKatex,
@@ -124,6 +128,19 @@ test("validateEditorConfigShape allows overlapping VS Code style keybindings", (
 
   assert.equal(result.valid, true);
   assert.deepEqual(result.errors, []);
+});
+
+test("normalizeEditorAssociations trims values and keeps stable ordering", () => {
+  assert.deepEqual(
+    normalizeEditorAssociations({
+      "*.json": " workbench.code-text ",
+      "*.md": "workbench.article-markdown"
+    }),
+    {
+      "*.json": "workbench.code-text",
+      "*.md": "workbench.article-markdown"
+    }
+  );
 });
 
 test("renderMarkdown outputs math placeholders for preview", async () => {
@@ -310,4 +327,80 @@ test("normalizeAdminHomeConfig keeps widget order unique", () => {
   });
 
   assert.deepEqual(config.widgetOrder, ["todo-list", "notes"]);
+});
+
+test("normalizeThemeGroupConfig keeps group mode and css color mode", () => {
+  const config = normalizeThemeGroupConfig({
+    enable: true,
+    files: [
+      {
+        adminPreview: true,
+        colorMode: "dark",
+        fileName: "prose.dark",
+        type: "css"
+      },
+      {
+        adminPreview: false,
+        fileName: "custom",
+        type: "js"
+      }
+    ],
+    label: "Atlas",
+    mode: "dark"
+  });
+
+  assert.equal(config.mode, "dark");
+  assert.deepEqual(config.files, [
+    {
+      adminPreview: true,
+      colorMode: "dark",
+      fileName: "prose.dark.css",
+      type: "css"
+    },
+    {
+      adminPreview: false,
+      fileName: "custom.js",
+      type: "js"
+    }
+  ]);
+});
+
+test("inferThemeColorModeFromCss detects light and dark themes", () => {
+  const lightCss = `
+:root {
+  --bg: #f5f1e8;
+  --ink: #1f2937;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+}`;
+  const darkCss = `
+:root {
+  --bg: #0f1720;
+  --ink: #e6edf5;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+}`;
+
+  assert.equal(inferThemeColorModeFromCss(lightCss), "light");
+  assert.equal(inferThemeColorModeFromCss(darkCss), "dark");
+});
+
+test("buildThemeColorModeVariantCss flips representative light colors into a dark variant", () => {
+  const lightCss = `
+body {
+  background: #f5f1e8;
+  color: #1f2937;
+  border-color: rgba(31, 41, 55, 0.12);
+}`;
+  const darkCss = buildThemeColorModeVariantCss(lightCss, "light", "dark");
+
+  assert.equal(inferThemeColorModeFromCss(darkCss), "dark");
+  assert.match(darkCss, /background:\s*#/i);
+  assert.match(darkCss, /color:\s*#/i);
 });

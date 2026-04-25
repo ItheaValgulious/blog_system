@@ -1,10 +1,38 @@
 import type { PluginDefinition } from "../types";
+import { ArticleMarkdownEditor } from "../editors/article-markdown-editor";
+import { CodeTextEditor } from "../editors/code-text-editor";
+import { HomeDashboardEditor } from "../editors/home-dashboard-editor";
 
 export const coreWorkbenchPlugin: PluginDefinition = {
   id: "core-workbench",
   label: "Core Workbench",
   description: "Provides the base workbench commands for layout, saving, and publishing.",
   activate(context) {
+    context.registerEditorContribution({
+      canHandle: (document) => document.kind === "home",
+      component: HomeDashboardEditor,
+      editorId: "workbench.home-dashboard",
+      label: "Home Dashboard",
+      matches: (document) => document.kind === "home"
+    });
+    context.registerEditorContribution({
+      canHandle: (document) => document.kind === "article",
+      component: ArticleMarkdownEditor,
+      editorId: "workbench.article-markdown",
+      label: "Article Markdown",
+      matches: (document) => document.kind === "article",
+      supportsPreview: true
+    });
+    context.registerEditorContribution({
+      canHandle: (document) =>
+        document.kind === "article" ||
+        document.kind === "config" ||
+        document.kind === "themeAsset",
+      component: CodeTextEditor,
+      editorId: "workbench.code-text",
+      label: "Code Text",
+      matches: (document) => document.kind === "config" || document.kind === "themeAsset"
+    });
     context.registerCommand({
       id: "workbench.toggleSidebar",
       title: "View: Toggle Sidebar",

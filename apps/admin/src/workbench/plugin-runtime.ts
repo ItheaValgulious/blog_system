@@ -1,5 +1,6 @@
 import type {
   CommandDefinition,
+  EditorContributionDefinition,
   EditorActionDefinition,
   PasteHandlerDefinition,
   PluginDefinition,
@@ -10,6 +11,7 @@ import type {
 
 export class PluginRuntime {
   private readonly commands = new Map<string, CommandDefinition>();
+  private readonly editorContributions = new Map<string, EditorContributionDefinition>();
   private readonly editorActions = new Map<string, EditorActionDefinition>();
   private readonly themes = new Map<string, ThemeDefinition>();
   private readonly pasteHandlers: PasteHandlerDefinition[] = [];
@@ -23,6 +25,9 @@ export class PluginRuntime {
       },
       registerEditorAction: (action) => {
         this.editorActions.set(action.id, action);
+      },
+      registerEditorContribution: (contribution) => {
+        this.editorContributions.set(contribution.editorId, contribution);
       },
       registerTheme: (theme) => {
         this.themes.set(theme.id, theme);
@@ -55,6 +60,14 @@ export class PluginRuntime {
 
   getEditorAction(id: string) {
     return this.editorActions.get(id);
+  }
+
+  getEditorContributions() {
+    return [...this.editorContributions.values()];
+  }
+
+  getEditorContribution(editorId: string) {
+    return this.editorContributions.get(editorId);
   }
 
   getThemes() {

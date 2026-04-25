@@ -202,7 +202,8 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       const validation = validateEditorConfigPayload(
         config.markdownSnippets,
         config.latexSnippets,
-        config.keybindings
+        config.keybindings,
+        config.editorAssociations
       );
       res.json({
         ...config,
@@ -215,7 +216,8 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.put("/api/editor-config", async (req, res, next) => {
     try {
-      const { markdownSnippetsRaw, latexSnippetsRaw, keybindingsRaw } = req.body as {
+      const { editorAssociationsRaw, markdownSnippetsRaw, latexSnippetsRaw, keybindingsRaw } = req.body as {
+        editorAssociationsRaw?: string;
         markdownSnippetsRaw?: string;
         latexSnippetsRaw?: string;
         keybindingsRaw?: string;
@@ -224,10 +226,12 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       if (
         typeof markdownSnippetsRaw !== "string" ||
         typeof latexSnippetsRaw !== "string" ||
-        typeof keybindingsRaw !== "string"
+        typeof keybindingsRaw !== "string" ||
+        typeof editorAssociationsRaw !== "string"
       ) {
         res.status(400).json({
-          error: "markdownSnippetsRaw, latexSnippetsRaw, and keybindingsRaw are required."
+          error:
+            "markdownSnippetsRaw, latexSnippetsRaw, keybindingsRaw, and editorAssociationsRaw are required."
         });
         return;
       }
@@ -237,7 +241,8 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
           settings.editorConfigDir,
           markdownSnippetsRaw,
           latexSnippetsRaw,
-          keybindingsRaw
+          keybindingsRaw,
+          editorAssociationsRaw
         )
       );
     } catch (error) {
@@ -434,8 +439,9 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.post("/api/theme-asset/create", async (req, res, next) => {
     try {
-      const { adminPreview = false, fileName, groupId, type } = req.body as {
+      const { adminPreview = false, colorMode, fileName, groupId, type } = req.body as {
         adminPreview?: boolean;
+        colorMode?: "light" | "dark";
         fileName?: string;
         groupId?: string;
         type?: "css" | "js";
@@ -446,7 +452,14 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
         return;
       }
 
-      res.json(await createThemeAsset(settings.configRoot, groupId, fileName, type, adminPreview === true));
+      res.json(await createThemeAsset(
+        settings.configRoot,
+        groupId,
+        fileName,
+        type,
+        adminPreview === true,
+        colorMode === "dark" ? "dark" : colorMode === "light" ? "light" : undefined
+      ));
     } catch (error) {
       next(error);
     }

@@ -38,6 +38,14 @@ export const commandPalettePlugin: PluginDefinition = {
       }
     });
     context.registerCommand({
+      id: "preferences.openEditorAssociationsJson",
+      title: "Preferences: Open Editor Associations (JSON)",
+      keywords: ["settings", "editor", "association", "json", "reopen"],
+      handler(api) {
+        void api.openConfigDocument("editorAssociations");
+      }
+    });
+    context.registerCommand({
       id: "preferences.openMarkdownBlockConfigJson",
       title: "Preferences: Open Markdown Block Rules (JSON)",
       keywords: ["settings", "markdown", "block", "rules", "json"],
@@ -51,6 +59,14 @@ export const commandPalettePlugin: PluginDefinition = {
       keywords: ["settings", "site", "plugins", "theme", "json"],
       handler(api) {
         void api.openConfigDocument("siteConfig");
+      }
+    });
+    context.registerCommand({
+      id: "workbench.reopenWithEditor",
+      title: "View: Reopen With Editor",
+      keywords: ["editor", "reopen", "open with"],
+      handler(api) {
+        api.showReopenWithEditor();
       }
     });
   }

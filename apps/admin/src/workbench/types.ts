@@ -1,23 +1,38 @@
 import type { ComponentType } from "react";
 import type * as monacoEditor from "monaco-editor";
 
-import type { ArticleRecord, EditorKeybinding, EditorSnippet } from "@blog-system/content-core";
+import type {
+  AdminHomeConfig,
+  ArticleRecord,
+  EditorKeybinding,
+  EditorSnippet
+} from "@blog-system/content-core";
 
-export type SidebarViewId = "explorer" | "edit" | "plugins" | "outline" | "media" | "git";
+export type PaneGroupId = string;
 export type ConfigDocumentKind =
   | "markdownBlockConfig"
   | "markdownSnippets"
   | "latexSnippets"
   | "keybindings"
+  | "editorAssociations"
   | "siteConfig";
-export type WorkbenchDocumentKind = "article" | "config" | "home" | "themeAsset";
+export type WorkbenchDocumentKind = string;
+export type WorkbenchEditorId = string;
 export type SnippetLanguageId = "markdown" | "latex";
+export type WorkbenchRefreshTarget =
+  | "adminHome"
+  | "config"
+  | "markdownBlockConfig"
+  | "siteConfig"
+  | "themeGroups"
+  | "tree";
 
 export interface WorkbenchBaseDocument {
   id: string;
   kind: WorkbenchDocumentKind;
+  editorId: WorkbenchEditorId;
   title: string;
-  language: "markdown" | "json" | "css" | "javascript";
+  language: string;
   value: string;
   savedValue: string;
   dirty: boolean;
@@ -47,11 +62,17 @@ export interface ThemeAssetWorkbenchDocument extends WorkbenchBaseDocument {
   editorPath: string;
 }
 
+export interface GenericWorkbenchDocument extends WorkbenchBaseDocument {
+  kind: WorkbenchDocumentKind;
+  [key: string]: unknown;
+}
+
 export type WorkbenchDocument =
   | ArticleWorkbenchDocument
   | ConfigWorkbenchDocument
   | HomeWorkbenchDocument
-  | ThemeAssetWorkbenchDocument;
+  | ThemeAssetWorkbenchDocument
+  | GenericWorkbenchDocument;
 
 export interface ThemeDefinition {
   id: string;
@@ -79,7 +100,7 @@ export interface PasteHandlerDefinition {
   handle: (api: PasteHandlerApi) => boolean | Promise<boolean>;
 }
 
-export type WorkbenchContributionKind = "create-dialog" | "home-widget" | "sidebar-view";
+export type WorkbenchContributionKind = "create-dialog" | "home-widget" | "pane";
 export type CreateDialogFieldInput = "text" | "tags" | "number";
 
 export interface CreateDialogFieldDefinition {
@@ -101,11 +122,19 @@ export interface CreateDialogContributionDefinition extends WorkbenchContributio
   fields: CreateDialogFieldDefinition[];
 }
 
-export interface SidebarViewContributionDefinition extends WorkbenchContributionDefinition {
-  kind: "sidebar-view";
-  label: string;
+export interface PaneComponentProps {
+  activeDocument: WorkbenchDocument | null;
+  activeArticleLineNumber: number;
+  api: WorkbenchApi;
+}
+
+export interface PaneContributionDefinition extends WorkbenchContributionDefinition {
+  component: ComponentType<PaneComponentProps>;
+  defaultGroupId: PaneGroupId;
+  kind: "pane";
+  paneId: string;
+  tabLabel: string;
   title: string;
-  viewId: SidebarViewId;
 }
 
 export interface HomeWidgetComponentProps<TState = unknown> {
@@ -119,6 +148,35 @@ export interface HomeWidgetContributionDefinition extends WorkbenchContributionD
   kind: "home-widget";
   label: string;
   widgetId: string;
+}
+
+export interface WorkbenchEditorComponentProps {
+  adminHomeValue: AdminHomeConfig | null;
+  document: WorkbenchDocument;
+  homeWidgets: HomeWidgetContributionDefinition[];
+  onChange: (nextValue: string) => void;
+  onChangeHomeConfig: (nextValue: AdminHomeConfig) => void;
+  onMount: (
+    editor: monacoEditor.editor.IStandaloneCodeEditor,
+    monaco: typeof monacoEditor
+  ) => void;
+  path: string;
+  value: string;
+}
+
+export interface EditorContributionDefinition {
+  canHandle: (document: WorkbenchDocument) => boolean;
+  component: ComponentType<WorkbenchEditorComponentProps>;
+  editorId: WorkbenchEditorId;
+  isDirty?: (document: WorkbenchDocument, nextValue: string) => boolean;
+  label: string;
+  load?: (document: WorkbenchDocument) => Promise<WorkbenchDocument> | WorkbenchDocument;
+  matches?: (document: WorkbenchDocument) => boolean;
+  save?: (
+    document: WorkbenchDocument,
+    nextValue: string
+  ) => Promise<WorkbenchDocument | null | void> | WorkbenchDocument | null | void;
+  supportsPreview?: boolean;
 }
 
 export interface PluginDefinition {
@@ -140,31 +198,47 @@ export interface ClipboardImageResult {
   markdownPath: string;
 }
 
+export type WorkbenchResourceTarget =
+  | { kind: "article"; articlePath: string; preferredEditorId?: WorkbenchEditorId }
+  | { kind: "config"; configKind: ConfigDocumentKind; preferredEditorId?: WorkbenchEditorId }
+  | { kind: "home" }
+  | { kind: "themeAsset"; fileName: string; groupId: string; preferredEditorId?: WorkbenchEditorId }
+  | { kind: "themeGroupConfig"; groupId: string; preferredEditorId?: WorkbenchEditorId };
+
 export interface WorkbenchApi {
-  openHome: () => void;
-  showCommandPalette: () => void;
   hideCommandPalette: () => void;
+  openConfigDocument: (kind: ConfigDocumentKind) => Promise<void>;
+  openHome: () => void;
+  openResource: (target: WorkbenchResourceTarget) => Promise<void>;
+  publishStaticSite: () => Promise<void>;
+  refreshWorkspaceData: (
+    target: WorkbenchRefreshTarget | WorkbenchRefreshTarget[]
+  ) => Promise<void>;
+  revealLine: (lineNumber: number) => void;
+  reopenActiveDocumentWithEditor: (editorId: WorkbenchEditorId) => void;
+  saveActiveDocument: () => Promise<void>;
+  setBusy: (message: string | null) => void;
+  setTheme: (themeId: string) => void;
+  showCommandPalette: () => void;
+  showError: (message: string | null) => void;
+  showReopenWithEditor: () => void;
   showThemePicker: () => void;
   startThemeGroupCreate: () => void;
-  toggleSidebar: () => void;
   togglePreview: () => void;
-  saveActiveDocument: () => Promise<void>;
-  openConfigDocument: (kind: ConfigDocumentKind) => Promise<void>;
-  publishStaticSite: () => Promise<void>;
-  setTheme: (themeId: string) => void;
+  toggleSidebar: () => void;
 }
 
 export interface EditorActionApi {
+  activeDocument: WorkbenchDocument | null;
   editor: monacoEditor.editor.IStandaloneCodeEditor;
   monaco: typeof monacoEditor;
-  activeDocument: WorkbenchDocument | null;
   snippets: EditorSnippet[];
 }
 
 export interface PasteHandlerApi {
-  event: ClipboardEvent;
-  editor: monacoEditor.editor.IStandaloneCodeEditor;
   activeDocument: WorkbenchDocument | null;
+  editor: monacoEditor.editor.IStandaloneCodeEditor;
+  event: ClipboardEvent;
   uploadClipboardImages: (
     articlePath: string,
     images: ClipboardImageInput[]
@@ -174,8 +248,9 @@ export interface PasteHandlerApi {
 export interface PluginSetupContext {
   registerCommand: (command: CommandDefinition) => void;
   registerEditorAction: (action: EditorActionDefinition) => void;
-  registerTheme: (theme: ThemeDefinition) => void;
+  registerEditorContribution: (contribution: EditorContributionDefinition) => void;
   registerPasteHandler: (handler: PasteHandlerDefinition) => void;
+  registerTheme: (theme: ThemeDefinition) => void;
   registerWorkbenchContribution: (contribution: WorkbenchContributionDefinition) => void;
 }
 
@@ -185,7 +260,7 @@ export interface NormalizedSnippet extends EditorSnippet {
 }
 
 export interface NormalizedEditorConfig {
-  markdownSnippets: NormalizedSnippet[];
-  latexSnippets: NormalizedSnippet[];
   keybindings: EditorKeybinding[];
+  latexSnippets: NormalizedSnippet[];
+  markdownSnippets: NormalizedSnippet[];
 }

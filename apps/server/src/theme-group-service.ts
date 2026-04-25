@@ -5,12 +5,19 @@ import Ajv from "ajv";
 import {
   buildDefaultThemeChromeCss,
   buildDefaultThemeProseCss,
+  buildThemeColorModeVariantCss,
   defaultThemeGroupConfig,
+  inferThemeColorModeFromCss,
+  inferThemeColorModeFromFileName,
+  normalizeThemeGroupConfig,
   themeGroupConfigSchema,
   toPosixPath,
   toThemeAssetLanguage,
-  normalizeThemeGroupConfig,
+  withThemeColorModeFileName,
+  type ThemeAssetConfig,
   type ThemeAssetType,
+  type ThemeColorMode,
+  type ThemeCssAssetConfig,
   type ThemeGroupConfig,
   type ThemeGroupSummary
 } from "@blog-system/content-core";
@@ -23,6 +30,7 @@ const THEME_CONFIG_FILE_NAME = "theme.json";
 interface ThemeAssetPayload {
   adminPreview: boolean;
   assetPath: string;
+  colorMode?: ThemeColorMode;
   fileName: string;
   groupId: string;
   language: "css" | "javascript";
@@ -30,8 +38,23 @@ interface ThemeAssetPayload {
   type: ThemeAssetType;
 }
 
+interface LegacyCssThemeAssetInput {
+  adminPreview: boolean;
+  fileName: string;
+  inferredMode: ThemeColorMode;
+  raw: string;
+}
+
 function getThemeRoot(configRoot: string) {
   return path.join(configRoot, THEME_DIRECTORY_NAME);
+}
+
+function serializeThemeGroupConfig(value: ThemeGroupConfig) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function getOtherThemeMode(mode: ThemeColorMode): ThemeColorMode {
+  return mode === "dark" ? "light" : "dark";
 }
 
 function normalizeThemeGroupId(groupId: string) {
@@ -192,6 +215,64 @@ async function readLegacyRenderConfig(configRoot: string) {
   }
 }
 
+function buildThemeAssetTemplate(groupId: string, fileName: string, type: ThemeAssetType) {
+  return type === "js"
+    ? `// config/theme/${groupId}/${fileName}\n\n`
+    : `/* config/theme/${groupId}/${fileName} */\n\n`;
+}
+
+async function writeThemeFile(
+  configRoot: string,
+  groupId: string,
+  fileName: string,
+  raw: string
+) {
+  const resolved = resolveThemeAssetPath(configRoot, groupId, fileName);
+  await fs.mkdir(path.dirname(resolved.absolutePath), { recursive: true });
+  await fs.writeFile(resolved.absolutePath, raw, "utf8");
+}
+
+function createCssThemeAssetConfig(
+  fileName: string,
+  colorMode: ThemeColorMode,
+  adminPreview: boolean
+): ThemeCssAssetConfig {
+  return {
+    adminPreview,
+    colorMode,
+    fileName,
+    type: "css"
+  };
+}
+
+async function writeDualCssThemeAssets(
+  configRoot: string,
+  groupId: string,
+  baseFileName: string,
+  sourceRaw: string,
+  sourceMode: ThemeColorMode,
+  adminPreview: boolean
+) {
+  const lightFileName = withThemeColorModeFileName(baseFileName, "light");
+  const darkFileName = withThemeColorModeFileName(baseFileName, "dark");
+  const lightCss =
+    sourceMode === "light"
+      ? sourceRaw
+      : buildThemeColorModeVariantCss(sourceRaw, sourceMode, "light");
+  const darkCss =
+    sourceMode === "dark"
+      ? sourceRaw
+      : buildThemeColorModeVariantCss(sourceRaw, sourceMode, "dark");
+
+  await writeThemeFile(configRoot, groupId, lightFileName, lightCss);
+  await writeThemeFile(configRoot, groupId, darkFileName, darkCss);
+
+  return [
+    createCssThemeAssetConfig(lightFileName, "light", adminPreview),
+    createCssThemeAssetConfig(darkFileName, "dark", adminPreview)
+  ] satisfies ThemeAssetConfig[];
+}
+
 async function ensureDefaultThemeGroups(configRoot: string) {
   const themeRoot = getThemeRoot(configRoot);
   await fs.mkdir(themeRoot, { recursive: true });
@@ -209,20 +290,36 @@ async function ensureDefaultThemeGroups(configRoot: string) {
   const palette = await readLegacyThemePalette(configRoot);
   const atlasGroup = getThemeGroupDirectory(configRoot, "atlas");
   await fs.mkdir(atlasGroup.groupDirectory, { recursive: true });
+
+  const atlasFiles = [
+    ...(await writeDualCssThemeAssets(
+      configRoot,
+      atlasGroup.groupId,
+      "chrome.css",
+      buildDefaultThemeChromeCss(palette),
+      "light",
+      false
+    )),
+    ...(await writeDualCssThemeAssets(
+      configRoot,
+      atlasGroup.groupId,
+      "prose.css",
+      buildDefaultThemeProseCss(palette),
+      "light",
+      true
+    ))
+  ];
+
   await fs.writeFile(
     path.join(atlasGroup.groupDirectory, THEME_CONFIG_FILE_NAME),
-    `${JSON.stringify({
+    serializeThemeGroupConfig({
       enable: true,
-      files: [
-        { fileName: "chrome.css", type: "css", adminPreview: false },
-        { fileName: "prose.css", type: "css", adminPreview: true }
-      ],
-      label: "Atlas"
-    }, null, 2)}\n`,
+      files: atlasFiles,
+      label: "Atlas",
+      mode: "light"
+    }),
     "utf8"
   );
-  await fs.writeFile(path.join(atlasGroup.groupDirectory, "chrome.css"), buildDefaultThemeChromeCss(palette), "utf8");
-  await fs.writeFile(path.join(atlasGroup.groupDirectory, "prose.css"), buildDefaultThemeProseCss(palette), "utf8");
 
   const legacyStyles = await readLegacyRenderConfig(configRoot);
   const renderRoot = path.join(configRoot, "render");
@@ -231,43 +328,197 @@ async function ensureDefaultThemeGroups(configRoot: string) {
     const baseName = path.posix.basename(style.directory, path.posix.extname(style.directory));
     const groupId = `render-${baseName}`;
     const resolvedGroup = getThemeGroupDirectory(configRoot, groupId);
-    await fs.mkdir(path.dirname(path.join(resolvedGroup.groupDirectory, path.posix.basename(style.directory))), { recursive: true });
     await fs.mkdir(resolvedGroup.groupDirectory, { recursive: true });
-    await fs.writeFile(
-      path.join(resolvedGroup.groupDirectory, THEME_CONFIG_FILE_NAME),
-      `${JSON.stringify({
-        enable: style.enable,
-        files: [
-          {
-            fileName: path.posix.basename(style.directory),
-            type: "css",
-            adminPreview: true
-          }
-        ],
-        label: `Render ${baseName}`
-      }, null, 2)}\n`,
-      "utf8"
-    );
 
     const legacySource = path.join(renderRoot, style.directory);
-    if (await pathExists(legacySource)) {
-      await fs.copyFile(legacySource, path.join(resolvedGroup.groupDirectory, path.posix.basename(style.directory)));
+    if (!(await pathExists(legacySource))) {
+      continue;
+    }
+
+    const sourceRaw = await fs.readFile(legacySource, "utf8");
+    const sourceMode = inferThemeColorModeFromCss(sourceRaw);
+    const files = await writeDualCssThemeAssets(
+      configRoot,
+      resolvedGroup.groupId,
+      path.posix.basename(style.directory),
+      sourceRaw,
+      sourceMode,
+      true
+    );
+
+    await fs.writeFile(
+      path.join(resolvedGroup.groupDirectory, THEME_CONFIG_FILE_NAME),
+      serializeThemeGroupConfig({
+        enable: style.enable,
+        files,
+        label: `Render ${baseName}`,
+        mode: sourceMode
+      }),
+      "utf8"
+    );
+  }
+}
+
+function isThemeColorMode(value: unknown): value is ThemeColorMode {
+  return value === "light" || value === "dark";
+}
+
+function getThemeGroupCssBaseName(fileName: string) {
+  return normalizeThemeAssetFileName(fileName, "css").replace(/\.(light|dark)\.css$/i, ".css");
+}
+
+async function migrateLegacyThemeGroupConfig(
+  configRoot: string,
+  groupId: string,
+  value: Record<string, unknown>
+) {
+  const rawFiles = Array.isArray(value.files) ? value.files : [];
+  const nextFiles: ThemeAssetConfig[] = [];
+  const legacyCssEntries = new Map<string, Array<LegacyCssThemeAssetInput>>();
+  const baseFileOrder: string[] = [];
+
+  for (const rawFile of rawFiles) {
+    if (!rawFile || typeof rawFile !== "object") {
+      continue;
+    }
+
+    const file = rawFile as Partial<ThemeAssetConfig>;
+    const type: ThemeAssetType = file.type === "js" ? "js" : "css";
+    const fileName =
+      typeof file.fileName === "string" && file.fileName.trim()
+        ? normalizeThemeAssetFileName(file.fileName, type)
+        : "";
+
+    if (!fileName) {
+      continue;
+    }
+
+    if (type === "js") {
+      nextFiles.push({
+        adminPreview: file.adminPreview === true,
+        fileName,
+        type
+      });
+      continue;
+    }
+
+    const resolved = resolveThemeAssetPath(configRoot, groupId, fileName, "css");
+    const raw = await fs.readFile(resolved.absolutePath, "utf8");
+    const inferredMode =
+      (isThemeColorMode(file.colorMode) ? file.colorMode : null) ??
+      inferThemeColorModeFromFileName(fileName) ??
+      inferThemeColorModeFromCss(raw);
+    const baseFileName = getThemeGroupCssBaseName(fileName);
+    const bucketKey = baseFileName.toLowerCase();
+
+    if (!legacyCssEntries.has(bucketKey)) {
+      legacyCssEntries.set(bucketKey, []);
+      baseFileOrder.push(baseFileName);
+    }
+
+    legacyCssEntries.get(bucketKey)?.push({
+      adminPreview: file.adminPreview === true,
+      fileName,
+      inferredMode,
+      raw
+    });
+  }
+
+  for (const baseFileName of baseFileOrder) {
+    const entries = legacyCssEntries.get(baseFileName.toLowerCase()) ?? [];
+    const variants = new Map<ThemeColorMode, LegacyCssThemeAssetInput>();
+
+    for (const entry of entries) {
+      if (!variants.has(entry.inferredMode)) {
+        variants.set(entry.inferredMode, entry);
+      }
+    }
+
+    for (const colorMode of ["light", "dark"] as const) {
+      const variant = variants.get(colorMode);
+      const targetFileName = withThemeColorModeFileName(baseFileName, colorMode);
+
+      if (variant) {
+        const source = resolveThemeAssetPath(configRoot, groupId, variant.fileName, "css");
+        const target = resolveThemeAssetPath(configRoot, groupId, targetFileName, "css");
+
+        if (source.absolutePath !== target.absolutePath && !(await pathExists(target.absolutePath))) {
+          await fs.mkdir(path.dirname(target.absolutePath), { recursive: true });
+          await fs.rename(source.absolutePath, target.absolutePath);
+        }
+
+        if (!(await pathExists(target.absolutePath))) {
+          await fs.writeFile(target.absolutePath, variant.raw, "utf8");
+        }
+
+        nextFiles.push(createCssThemeAssetConfig(targetFileName, colorMode, variant.adminPreview));
+        continue;
+      }
+
+      const sourceVariant = variants.get(getOtherThemeMode(colorMode)) ?? entries[0];
+      if (!sourceVariant) {
+        continue;
+      }
+
+      await writeThemeFile(
+        configRoot,
+        groupId,
+        targetFileName,
+        buildThemeColorModeVariantCss(sourceVariant.raw, sourceVariant.inferredMode, colorMode)
+      );
+      nextFiles.push(createCssThemeAssetConfig(targetFileName, colorMode, sourceVariant.adminPreview));
     }
   }
+
+  const primaryCssEntry =
+    [...legacyCssEntries.values()].flat().find((entry) => entry.adminPreview === false) ??
+    [...legacyCssEntries.values()].flat()[0];
+  const migratedConfig = normalizeThemeGroupConfig({
+    enable: value.enable !== false,
+    files: nextFiles,
+    label: typeof value.label === "string" && value.label.trim() ? value.label.trim() : defaultThemeGroupConfig.label,
+    mode: isThemeColorMode(value.mode) ? value.mode : primaryCssEntry?.inferredMode ?? "light"
+  });
+
+  return {
+    raw: serializeThemeGroupConfig(migratedConfig),
+    value: migratedConfig
+  };
 }
 
 async function readThemeGroupConfigInternal(configRoot: string, groupId: string) {
   await ensureDefaultThemeGroups(configRoot);
   const resolved = getThemeConfigPath(configRoot, groupId);
   const raw = await fs.readFile(resolved.configPath, "utf8");
-  const value = validateParsedThemeGroupConfig(JSON.parse(raw));
-  const normalizedRaw = `${JSON.stringify(value, null, 2)}\n`;
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  const hasLegacyShape =
+    !isThemeColorMode(parsed.mode) ||
+    (Array.isArray(parsed.files) &&
+      parsed.files.some(
+        (file) =>
+          file &&
+          typeof file === "object" &&
+          ((file as Partial<ThemeAssetConfig>).type ?? "css") !== "js" &&
+          !isThemeColorMode((file as Partial<ThemeCssAssetConfig>).colorMode)
+      ));
+
+  const loaded = hasLegacyShape
+    ? await migrateLegacyThemeGroupConfig(configRoot, resolved.groupId, parsed)
+    : {
+        raw: serializeThemeGroupConfig(validateParsedThemeGroupConfig(parsed)),
+        value: validateParsedThemeGroupConfig(parsed)
+      };
+
+  if (loaded.raw !== raw) {
+    await fs.mkdir(resolved.groupDirectory, { recursive: true });
+    await fs.writeFile(resolved.configPath, loaded.raw, "utf8");
+  }
 
   return {
-    groupId: resolved.groupId,
     groupDirectory: resolved.groupDirectory,
-    raw: normalizedRaw,
-    value
+    groupId: resolved.groupId,
+    raw: loaded.raw,
+    value: loaded.value
   };
 }
 
@@ -316,7 +567,7 @@ export async function readThemeGroupConfig(configRoot: string, groupId: string) 
 export async function saveThemeGroupConfig(configRoot: string, groupId: string, raw: string) {
   const resolved = getThemeConfigPath(configRoot, groupId);
   const value = validateParsedThemeGroupConfig(JSON.parse(raw));
-  const normalizedRaw = `${JSON.stringify(value, null, 2)}\n`;
+  const normalizedRaw = serializeThemeGroupConfig(value);
 
   await fs.mkdir(resolved.groupDirectory, { recursive: true });
   await fs.writeFile(resolved.configPath, normalizedRaw, "utf8");
@@ -338,10 +589,10 @@ export async function createThemeGroup(configRoot: string, groupId: string) {
   await fs.mkdir(resolved.groupDirectory, { recursive: false });
   await fs.writeFile(
     path.join(resolved.groupDirectory, THEME_CONFIG_FILE_NAME),
-    `${JSON.stringify({
+    serializeThemeGroupConfig({
       ...defaultThemeGroupConfig,
       label: resolved.groupId
-    }, null, 2)}\n`,
+    }),
     "utf8"
   );
 
@@ -398,6 +649,7 @@ export async function readThemeAsset(configRoot: string, groupId: string, fileNa
   return {
     adminPreview: metadata.adminPreview,
     assetPath: resolved.assetPath,
+    colorMode: metadata.type === "css" ? metadata.colorMode : undefined,
     fileName: metadata.fileName,
     groupId: config.groupId,
     language: toThemeAssetLanguage(metadata.type),
@@ -423,21 +675,20 @@ export async function saveThemeAsset(configRoot: string, groupId: string, fileNa
   return readThemeAsset(configRoot, config.groupId, metadata.fileName);
 }
 
-function buildThemeAssetTemplate(groupId: string, fileName: string, type: ThemeAssetType) {
-  return type === "js"
-    ? `// config/theme/${groupId}/${fileName}\n\n`
-    : `/* config/theme/${groupId}/${fileName} */\n\n`;
-}
-
 export async function createThemeAsset(
   configRoot: string,
   groupId: string,
   fileName: string,
   type: ThemeAssetType,
-  adminPreview: boolean
+  adminPreview: boolean,
+  colorMode?: ThemeColorMode
 ) {
   const config = await readThemeGroupConfigInternal(configRoot, groupId);
-  const normalizedFileName = normalizeThemeAssetFileName(fileName, type);
+  const resolvedColorMode = type === "css" ? colorMode ?? config.value.mode : undefined;
+  const normalizedFileName =
+    type === "css"
+      ? withThemeColorModeFileName(fileName, resolvedColorMode ?? "light")
+      : normalizeThemeAssetFileName(fileName, type);
 
   if (config.value.files.some((file) => file.fileName.toLowerCase() === normalizedFileName.toLowerCase())) {
     throw new Error(`Theme asset "${normalizedFileName}" already exists in group "${config.groupId}".`);
@@ -459,11 +710,18 @@ export async function createThemeAsset(
         ...config.value,
         files: [
           ...config.value.files,
-          {
-            adminPreview,
-            fileName: normalizedFileName,
-            type
-          }
+          type === "css"
+            ? {
+                adminPreview,
+                colorMode: resolvedColorMode ?? "light",
+                fileName: normalizedFileName,
+                type
+              }
+            : {
+                adminPreview,
+                fileName: normalizedFileName,
+                type
+              }
         ]
       },
       null,
@@ -489,7 +747,11 @@ export async function renameThemeAsset(
     throw new Error(`Theme asset "${fileName}" is not registered in group "${config.groupId}".`);
   }
 
-  const nextNormalizedFileName = normalizeThemeAssetFileName(nextFileName, metadata.type);
+  const nextNormalizedFileName =
+    metadata.type === "css"
+      ? withThemeColorModeFileName(nextFileName, metadata.colorMode)
+      : normalizeThemeAssetFileName(nextFileName, metadata.type);
+
   if (
     config.value.files.some(
       (file) =>
@@ -563,12 +825,14 @@ export async function listEnabledThemeAssets(configRoot: string) {
   const payload = await listThemeGroups(configRoot);
   return payload.groups.flatMap((group) =>
     group.enable
-      ? group.files.map((file) => ({
-          ...file,
-          assetPath: `${group.groupId}/${file.fileName}`,
-          groupId: group.groupId,
-          language: toThemeAssetLanguage(file.type)
-        }))
+      ? group.files
+          .filter((file) => file.type === "js" || file.colorMode === group.mode)
+          .map((file) => ({
+            ...file,
+            assetPath: `${group.groupId}/${file.fileName}`,
+            groupId: group.groupId,
+            language: toThemeAssetLanguage(file.type)
+          }))
       : []
   );
 }

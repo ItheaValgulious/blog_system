@@ -179,17 +179,27 @@ test("editor config endpoint accepts VS Code style snippet objects and jsonc", a
     "command": "hideSuggestWidget",
     "when": "suggestWidgetVisible"
   },
-]`
+]`,
+      editorAssociationsRaw: `{
+  "*.md": "workbench.article-markdown",
+  "*.json": "workbench.code-text"
+}`
     })
     .expect(200);
 
   assert.equal(response.body.markdownSnippets[0].name, "Article Frontmatter");
   assert.equal(response.body.latexSnippets[0].name, "divide");
   assert.equal(response.body.keybindings[0].command, "workbench.action.showCommands");
+  assert.equal(response.body.editorAssociations["*.md"], "workbench.article-markdown");
 
   const persistedLatexRaw = await fs.readFile(path.join(tempRoot, "config", "editor", "latex.snippets.json"), "utf8");
+  const persistedEditorAssociationsRaw = await fs.readFile(
+    path.join(tempRoot, "config", "editor", "editor.associations.json"),
+    "utf8"
+  );
   assert.match(persistedLatexRaw, /"divide": \{/);
   assert.doesNotMatch(persistedLatexRaw, /"name": "divide"/);
+  assert.match(persistedEditorAssociationsRaw, /"\*\.md": "workbench\.article-markdown"/);
 });
 
 test("file system endpoints create, rename, copy, and delete entries", async () => {
@@ -333,7 +343,10 @@ test("theme group endpoints seed atlas and allow group asset creation", async ()
 
   const seeded = await agent.get("/api/theme-groups").expect(200);
   assert.equal(seeded.body.groups[0].groupId, "atlas");
-  assert.equal(seeded.body.groups[0].files.length >= 2, true);
+  assert.equal(seeded.body.groups[0].mode, "light");
+  assert.equal(seeded.body.groups[0].files.length >= 4, true);
+  assert.ok(seeded.body.groups[0].files.some((file: { fileName: string; colorMode?: string }) => file.fileName === "chrome.light.css" && file.colorMode === "light"));
+  assert.ok(seeded.body.groups[0].files.some((file: { fileName: string; colorMode?: string }) => file.fileName === "chrome.dark.css" && file.colorMode === "dark"));
 
   const createdGroup = await agent
     .post("/api/theme-group/create")
@@ -354,7 +367,8 @@ test("theme group endpoints seed atlas and allow group asset creation", async ()
     })
     .expect(200);
 
-  assert.equal(createdAsset.body.fileName, "notes.css");
+  assert.equal(createdAsset.body.fileName, "notes.light.css");
   assert.equal(createdAsset.body.adminPreview, true);
-  await fs.access(path.join(tempRoot, "config", "theme", "chalk", "notes.css"));
+  assert.equal(createdAsset.body.colorMode, "light");
+  await fs.access(path.join(tempRoot, "config", "theme", "chalk", "notes.light.css"));
 });

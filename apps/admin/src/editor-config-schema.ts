@@ -1,4 +1,10 @@
-import { keybindingSchema, markdownBlockConfigSchema, snippetSchema, themeGroupConfigSchema } from "@blog-system/content-core";
+import {
+  editorAssociationsSchema,
+  keybindingSchema,
+  markdownBlockConfigSchema,
+  snippetSchema,
+  themeGroupConfigSchema
+} from "@blog-system/content-core";
 
 const siteConfigSchema = {
   type: "object",
@@ -19,6 +25,7 @@ const siteConfigSchema = {
 export const jsonSchemas = {
   snippetSchema,
   keybindingSchema,
+  editorAssociationsSchema,
   markdownBlockConfigSchema,
   siteConfigSchema,
   themeGroupConfigSchema
