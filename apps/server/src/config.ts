@@ -18,6 +18,7 @@ export interface ServerSettings {
   editorConfigDir: string;
   npmCommand: string;
   projectRoot: string;
+  projectsRoot: string;
   port: number;
   sessionSecret: string;
   siteDistDir: string;
@@ -35,6 +36,7 @@ export function getDefaultSettings(): ServerSettings {
     editorConfigDir: workspacePaths.editorConfigDir,
     npmCommand: process.platform === "win32" ? "npm.cmd" : "npm",
     projectRoot,
+    projectsRoot: workspacePaths.projectsRoot,
     port: Number(process.env.PORT ?? 8787),
     sessionSecret: process.env.SESSION_SECRET ?? "blog-system-dev-session-secret",
     siteDistDir: path.join(projectRoot, "apps", "site", "dist"),

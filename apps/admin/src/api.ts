@@ -6,6 +6,10 @@ import type {
   EditorSnippet,
   FileSystemNode,
   MarkdownBlockConfig,
+  ProjectLogRecord,
+  ProjectResourceRecord,
+  ProjectSummary,
+  ProjectTaskRecord,
   ThemeGroupConfig,
   ThemeGroupSummary,
   TagInfo
@@ -146,6 +150,47 @@ export interface FileSystemMetadataPayload {
   type: "directory" | "file";
 }
 
+export interface ProjectsPayload {
+  projects: ProjectSummary[];
+}
+
+export interface ProjectPayload {
+  raw: string;
+  value: ProjectSummary;
+}
+
+export interface ProjectTasksPayload {
+  projectId: string;
+  tasks: ProjectTaskRecord[];
+}
+
+export interface ProjectTaskPayload {
+  projectId: string;
+  raw: string;
+  value: ProjectTaskRecord;
+}
+
+export interface ProjectLogsPayload {
+  logs: ProjectLogRecord[];
+  projectId: string;
+}
+
+export interface ProjectLogPayload {
+  projectId: string;
+  raw: string;
+  value: ProjectLogRecord;
+}
+
+export interface ProjectResourcesPayload {
+  projectId: string;
+  resources: ProjectResourceRecord[];
+}
+
+export interface ProjectResourcePayload {
+  projectId: string;
+  value: ProjectResourceRecord;
+}
+
 export const api = {
   login(username: string, password: string) {
     return request<{ ok: true; username: string }>("/api/auth/login", {
@@ -226,6 +271,92 @@ export const api = {
     return request<AdminHomeConfigPayload>("/api/admin-home-config", {
       method: "PUT",
       body: JSON.stringify({ raw })
+    });
+  },
+  listProjects() {
+    return request<ProjectsPayload>("/api/projects");
+  },
+  createProject(input: { title: string; goal?: string; targetDate?: string }) {
+    return request<ProjectPayload>("/api/project/create", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  getProject(projectId: string) {
+    return request<ProjectPayload>(`/api/project?projectId=${encodeURIComponent(projectId)}`);
+  },
+  saveProject(projectId: string, raw: string) {
+    return request<ProjectPayload>("/api/project", {
+      method: "PUT",
+      body: JSON.stringify({ projectId, raw })
+    });
+  },
+  deleteProject(projectId: string) {
+    return request<{ projectId: string }>("/api/project/delete", {
+      method: "POST",
+      body: JSON.stringify({ projectId })
+    });
+  },
+  listProjectTasks(projectId: string) {
+    return request<ProjectTasksPayload>(`/api/project/tasks?projectId=${encodeURIComponent(projectId)}`);
+  },
+  createProjectTask(projectId: string, title: string) {
+    return request<ProjectTaskPayload>("/api/project/task/create", {
+      method: "POST",
+      body: JSON.stringify({ projectId, title })
+    });
+  },
+  getProjectTask(projectId: string, taskId: string) {
+    return request<ProjectTaskPayload>(
+      `/api/project/task?projectId=${encodeURIComponent(projectId)}&taskId=${encodeURIComponent(taskId)}`
+    );
+  },
+  saveProjectTask(projectId: string, taskId: string, raw: string) {
+    return request<ProjectTaskPayload>("/api/project/task", {
+      method: "PUT",
+      body: JSON.stringify({ projectId, taskId, raw })
+    });
+  },
+  listProjectLogs(projectId: string) {
+    return request<ProjectLogsPayload>(`/api/project/logs?projectId=${encodeURIComponent(projectId)}`);
+  },
+  createProjectLog(projectId: string, type?: string) {
+    return request<ProjectLogPayload>("/api/project/log/create", {
+      method: "POST",
+      body: JSON.stringify({ projectId, type })
+    });
+  },
+  getProjectLog(projectId: string, logId: string) {
+    return request<ProjectLogPayload>(
+      `/api/project/log?projectId=${encodeURIComponent(projectId)}&logId=${encodeURIComponent(logId)}`
+    );
+  },
+  saveProjectLog(projectId: string, logId: string, raw: string) {
+    return request<ProjectLogPayload>("/api/project/log", {
+      method: "PUT",
+      body: JSON.stringify({ projectId, logId, raw })
+    });
+  },
+  listProjectResources(projectId: string) {
+    return request<ProjectResourcesPayload>(`/api/project/resources?projectId=${encodeURIComponent(projectId)}`);
+  },
+  createProjectResource(input: {
+    description?: string;
+    file?: { base64Data: string; fileName: string };
+    projectId: string;
+    source?: string;
+    title?: string;
+    type: "file" | "note" | "webpage";
+  }) {
+    return request<ProjectResourcePayload>("/api/project/resource/create", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  deleteProjectResource(projectId: string, resourceId: string) {
+    return request<{ projectId: string; resourceId: string }>("/api/project/resource/delete", {
+      method: "POST",
+      body: JSON.stringify({ projectId, resourceId })
     });
   },
   listThemeGroups() {

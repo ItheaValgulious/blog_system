@@ -3,6 +3,7 @@ export * from "./editor-config.js";
 export * from "./highlight-theme.js";
 export * from "./markdown.js";
 export * from "./markdown-block-config.js";
+export * from "./project.js";
 export * from "./theme-groups.js";
 export * from "./theme-group-defaults.js";
 export * from "./types.js";

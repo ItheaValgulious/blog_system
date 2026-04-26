@@ -18,6 +18,10 @@ export default defineConfig({
         target: "http://localhost:8787",
         changeOrigin: true
       },
+      "/project-files": {
+        target: "http://localhost:8787",
+        changeOrigin: true
+      },
       "/theme-files": {
         target: "http://localhost:8787",
         changeOrigin: true

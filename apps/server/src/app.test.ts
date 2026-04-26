@@ -13,10 +13,12 @@ async function setupTempApp() {
   const assetsRoot = path.join(tempRoot, "assets");
   const configRoot = path.join(tempRoot, "config");
   const contentRoot = path.join(tempRoot, "content");
+  const projectsRoot = path.join(tempRoot, "projects");
   const editorConfigDir = path.join(configRoot, "editor");
   await fs.mkdir(path.join(contentRoot, "notes"), { recursive: true });
   await fs.mkdir(assetsRoot, { recursive: true });
   await fs.mkdir(editorConfigDir, { recursive: true });
+  await fs.mkdir(projectsRoot, { recursive: true });
 
   await fs.writeFile(
     path.join(contentRoot, "notes", "draft.md"),
@@ -44,6 +46,7 @@ status: draft
     port: 0,
     npmCommand: process.platform === "win32" ? "npm.cmd" : "npm",
     projectRoot: tempRoot,
+    projectsRoot,
     workspaceRoot: tempRoot,
     configRoot,
     assetsRoot
@@ -52,7 +55,7 @@ status: draft
 
   await agent.post("/api/auth/login").send({ username: "admin", password: "secret" }).expect(200);
 
-  return { tempRoot, assetsRoot, contentRoot, agent };
+  return { tempRoot, assetsRoot, contentRoot, projectsRoot, agent };
 }
 
 test("save endpoint fills missing title from first heading", async () => {
@@ -336,6 +339,172 @@ test("site config rejects legacy about payloads", async () => {
     .expect(500);
 
   assert.match(response.body.error, /siteConfig must NOT have additional properties/);
+});
+
+test("project endpoints create resources and index task and log references", async () => {
+  const { agent, projectsRoot } = await setupTempApp();
+
+  const createdProject = await agent
+    .post("/api/project/create")
+    .send({
+      goal: "Ship the project workspace",
+      targetDate: "2026-05-31",
+      title: "Demo Project"
+    })
+    .expect(200);
+
+  assert.equal(createdProject.body.value.id, "demo-project");
+  assert.equal(createdProject.body.value.status, "active");
+  assert.equal(createdProject.body.value.taskCount, 0);
+  assert.match(createdProject.body.value.startDate, /^\d{4}-\d{2}-\d{2}$/);
+  await fs.access(path.join(projectsRoot, "demo-project", "project.json"));
+
+  const savedProject = await agent
+    .put("/api/project")
+    .send({
+      projectId: "demo-project",
+      raw: (createdProject.body.raw as string).replace('"status": "active"', '"status": "archieved"')
+    })
+    .expect(200);
+
+  assert.equal(savedProject.body.value.status, "active");
+
+  const createdResource = await agent
+    .post("/api/project/resource/create")
+    .send({
+      projectId: "demo-project",
+      title: "Spec Image",
+      type: "file",
+      file: {
+        base64Data: Buffer.from("fakepngbytes").toString("base64"),
+        fileName: "spec.png"
+      }
+    })
+    .expect(200);
+
+  const resourceId = createdResource.body.value.id as string;
+  const resourceRef = `@resource/${resourceId}`;
+  await fs.access(path.join(projectsRoot, "demo-project", createdResource.body.value.filePath));
+
+  const createdTask = await agent
+    .post("/api/project/task/create")
+    .send({
+      projectId: "demo-project",
+      title: "Implement UI"
+    })
+    .expect(200);
+
+  const savedTask = await agent
+    .put("/api/project/task")
+    .send({
+      projectId: "demo-project",
+      taskId: createdTask.body.value.id,
+      raw: `${(createdTask.body.raw as string).replace("status: todo", "status: blocked")}\nUses ${resourceRef}\n`
+    })
+    .expect(200);
+
+  assert.equal(savedTask.body.value.status, "todo");
+  assert.deepEqual(savedTask.body.value.resourceIds, [resourceId]);
+
+  const createdLog = await agent
+    .post("/api/project/log/create")
+    .send({
+      projectId: "demo-project",
+      type: "progress"
+    })
+    .expect(200);
+
+  const savedLog = await agent
+    .put("/api/project/log")
+    .send({
+      projectId: "demo-project",
+      logId: createdLog.body.value.id,
+      raw: `${createdLog.body.raw}\nCaptured ${resourceRef}\n`
+    })
+    .expect(200);
+
+  assert.deepEqual(savedLog.body.value.resourceIds, [resourceId]);
+
+  const listedProjects = await agent.get("/api/projects").expect(200);
+  assert.equal(listedProjects.body.projects[0].taskCount, 1);
+  assert.equal(listedProjects.body.projects[0].completedTaskCount, 0);
+  assert.equal(listedProjects.body.projects[0].recentActivityCount, 1);
+});
+
+test("project resource endpoint rejects textbook type", async () => {
+  const { agent } = await setupTempApp();
+
+  await agent
+    .post("/api/project/create")
+    .send({
+      title: "Resource Validation"
+    })
+    .expect(200);
+
+  await agent
+    .post("/api/project/resource/create")
+    .send({
+      projectId: "resource-validation",
+      title: "Legacy Textbook",
+      type: "textbook"
+    })
+    .expect(400);
+});
+
+test("project delete endpoint removes the project directory and listings", async () => {
+  const { agent, projectsRoot } = await setupTempApp();
+
+  await agent
+    .post("/api/project/create")
+    .send({
+      title: "Delete Me"
+    })
+    .expect(200);
+
+  const createdTask = await agent
+    .post("/api/project/task/create")
+    .send({
+      projectId: "delete-me",
+      title: "Temporary Task"
+    })
+    .expect(200);
+
+  const createdLog = await agent
+    .post("/api/project/log/create")
+    .send({
+      projectId: "delete-me",
+      type: "note"
+    })
+    .expect(200);
+
+  await agent
+    .post("/api/project/resource/create")
+    .send({
+      projectId: "delete-me",
+      title: "Temporary File",
+      type: "file",
+      file: {
+        base64Data: Buffer.from("temporary-bytes").toString("base64"),
+        fileName: "temp.txt"
+      }
+    })
+    .expect(200);
+
+  assert.ok(createdTask.body.value.id);
+  assert.ok(createdLog.body.value.id);
+  await fs.access(path.join(projectsRoot, "delete-me"));
+
+  await agent
+    .post("/api/project/delete")
+    .send({
+      projectId: "delete-me"
+    })
+    .expect(200);
+
+  await assert.rejects(() => fs.access(path.join(projectsRoot, "delete-me")));
+
+  const listedProjects = await agent.get("/api/projects").expect(200);
+  assert.equal(listedProjects.body.projects.some((project: { id: string }) => project.id === "delete-me"), false);
 });
 
 test("theme group endpoints seed atlas and allow group asset creation", async () => {

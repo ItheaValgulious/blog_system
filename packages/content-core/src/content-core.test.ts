@@ -7,12 +7,18 @@ import {
   createDefaultSlug,
   extractHeadings,
   extractMarkdownBlocks,
+  extractProjectResourceIds,
   inferThemeColorModeFromCss,
+  isProjectTaskCompletedStatus,
   normalizeEditorAssociations,
   normalizeArticleForSave,
   normalizeAdminHomeConfig,
   normalizeMarkdownBlockConfig,
   normalizeThemeGroupConfig,
+  parseProjectLogRecord,
+  parseProjectRecord,
+  parseProjectResourceRecord,
+  parseProjectTaskRecord,
   renderMarkdown,
   renderMarkdownFragmentWithKatex,
   renderMarkdownWithKatex,
@@ -141,6 +147,113 @@ test("normalizeEditorAssociations trims values and keeps stable ordering", () =>
       "*.md": "workbench.article-markdown"
     }
   );
+});
+
+test("project task parsing infers title from the body heading", () => {
+  const record = parseProjectTaskRecord(
+    "draft-task",
+    `---
+status: todo
+order: 2
+---
+
+# Draft Task
+
+Body`
+  );
+
+  assert.equal(record.id, "draft-task");
+  assert.equal(record.title, "Draft Task");
+  assert.equal(record.order, 2);
+});
+
+test("project parsing normalizes unknown status to active", () => {
+  const record = parseProjectRecord(
+    "demo-project",
+    JSON.stringify({
+      title: "Demo Project",
+      status: "activef"
+    })
+  );
+
+  assert.equal(record.status, "active");
+});
+
+test("project task parsing normalizes legacy done status to completed", () => {
+  const record = parseProjectTaskRecord(
+    "done-task",
+    `---
+status: done
+---
+
+# Done Task`
+  );
+
+  assert.equal(record.status, "completed");
+});
+
+test("project task parsing normalizes unknown status to todo", () => {
+  const record = parseProjectTaskRecord(
+    "unknown-task",
+    `---
+status: blocked
+---
+
+# Unknown Task`
+  );
+
+  assert.equal(record.status, "todo");
+});
+
+test("project log parsing builds a title from the first heading", () => {
+  const record = parseProjectLogRecord(
+    "event-1",
+    `---
+type: progress
+taskIds:
+  - task-a
+---
+
+## Finished the integration
+
+Notes`
+  );
+
+  assert.equal(record.type, "progress");
+  assert.equal(record.title, "Finished the integration");
+  assert.deepEqual(record.taskIds, ["task-a"]);
+});
+
+test("extractProjectResourceIds deduplicates body references", () => {
+  assert.deepEqual(extractProjectResourceIds("Use @resource/spec-image and @resource/spec-image again."), [
+    "spec-image"
+  ]);
+});
+
+test("project resource parsing normalizes textbook and unknown types to note", () => {
+  const textbook = parseProjectResourceRecord(
+    "textbook-resource",
+    JSON.stringify({
+      title: "Textbook",
+      type: "textbook"
+    })
+  );
+  const unknown = parseProjectResourceRecord(
+    "unknown-resource",
+    JSON.stringify({
+      title: "Unknown",
+      type: "other"
+    })
+  );
+
+  assert.equal(textbook.type, "note");
+  assert.equal(unknown.type, "note");
+});
+
+test("isProjectTaskCompletedStatus matches done and completed", () => {
+  assert.equal(isProjectTaskCompletedStatus("done"), true);
+  assert.equal(isProjectTaskCompletedStatus("completed"), true);
+  assert.equal(isProjectTaskCompletedStatus("todo"), false);
 });
 
 test("renderMarkdown outputs math placeholders for preview", async () => {

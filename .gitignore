@@ -11,3 +11,4 @@ test-results
 .env
 .DS_Store
 config/site-publish.local.json
+.playwright-mcp

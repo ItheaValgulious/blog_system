@@ -5,7 +5,10 @@ import type {
   AdminHomeConfig,
   ArticleRecord,
   EditorKeybinding,
-  EditorSnippet
+  EditorSnippet,
+  ProjectLogRecord,
+  ProjectSummary,
+  ProjectTaskRecord
 } from "@blog-system/content-core";
 
 export type PaneGroupId = string;
@@ -23,6 +26,7 @@ export type WorkbenchRefreshTarget =
   | "adminHome"
   | "config"
   | "markdownBlockConfig"
+  | "projects"
   | "siteConfig"
   | "themeGroups"
   | "tree";
@@ -62,6 +66,26 @@ export interface ThemeAssetWorkbenchDocument extends WorkbenchBaseDocument {
   editorPath: string;
 }
 
+export interface ProjectWorkbenchDocument extends WorkbenchBaseDocument {
+  kind: "project";
+  projectId: string;
+  record: ProjectSummary;
+}
+
+export interface ProjectTaskWorkbenchDocument extends WorkbenchBaseDocument {
+  kind: "projectTask";
+  projectId: string;
+  record: ProjectTaskRecord;
+  taskId: string;
+}
+
+export interface ProjectLogWorkbenchDocument extends WorkbenchBaseDocument {
+  kind: "projectLog";
+  logId: string;
+  projectId: string;
+  record: ProjectLogRecord;
+}
+
 export interface GenericWorkbenchDocument extends WorkbenchBaseDocument {
   kind: WorkbenchDocumentKind;
   [key: string]: unknown;
@@ -71,6 +95,9 @@ export type WorkbenchDocument =
   | ArticleWorkbenchDocument
   | ConfigWorkbenchDocument
   | HomeWorkbenchDocument
+  | ProjectLogWorkbenchDocument
+  | ProjectTaskWorkbenchDocument
+  | ProjectWorkbenchDocument
   | ThemeAssetWorkbenchDocument
   | GenericWorkbenchDocument;
 
@@ -100,7 +127,7 @@ export interface PasteHandlerDefinition {
   handle: (api: PasteHandlerApi) => boolean | Promise<boolean>;
 }
 
-export type WorkbenchContributionKind = "create-dialog" | "home-widget" | "pane";
+export type WorkbenchContributionKind = "create-dialog" | "home-widget" | "module" | "pane";
 export type CreateDialogFieldInput = "text" | "tags" | "number";
 
 export interface CreateDialogFieldDefinition {
@@ -126,6 +153,7 @@ export interface PaneComponentProps {
   activeDocument: WorkbenchDocument | null;
   activeArticleLineNumber: number;
   api: WorkbenchApi;
+  projects: ProjectSummary[];
 }
 
 export interface PaneContributionDefinition extends WorkbenchContributionDefinition {
@@ -134,6 +162,14 @@ export interface PaneContributionDefinition extends WorkbenchContributionDefinit
   kind: "pane";
   paneId: string;
   tabLabel: string;
+  title: string;
+}
+
+export interface ModuleContributionDefinition extends WorkbenchContributionDefinition {
+  icon: string;
+  kind: "module";
+  moduleId: PaneGroupId;
+  order?: number;
   title: string;
 }
 
@@ -151,6 +187,7 @@ export interface HomeWidgetContributionDefinition extends WorkbenchContributionD
 }
 
 export interface WorkbenchEditorComponentProps {
+  api: WorkbenchApi;
   adminHomeValue: AdminHomeConfig | null;
   document: WorkbenchDocument;
   homeWidgets: HomeWidgetContributionDefinition[];
@@ -198,14 +235,22 @@ export interface ClipboardImageResult {
   markdownPath: string;
 }
 
+export type ClipboardImageUploadTarget =
+  | { kind: "article"; articlePath: string }
+  | { kind: "project"; projectId: string };
+
 export type WorkbenchResourceTarget =
   | { kind: "article"; articlePath: string; preferredEditorId?: WorkbenchEditorId }
   | { kind: "config"; configKind: ConfigDocumentKind; preferredEditorId?: WorkbenchEditorId }
   | { kind: "home" }
+  | { kind: "project"; projectId: string; preferredEditorId?: WorkbenchEditorId }
+  | { kind: "projectLog"; logId: string; projectId: string; preferredEditorId?: WorkbenchEditorId }
+  | { kind: "projectTask"; projectId: string; preferredEditorId?: WorkbenchEditorId; taskId: string }
   | { kind: "themeAsset"; fileName: string; groupId: string; preferredEditorId?: WorkbenchEditorId }
   | { kind: "themeGroupConfig"; groupId: string; preferredEditorId?: WorkbenchEditorId };
 
 export interface WorkbenchApi {
+  closeProjectDocuments: (projectId: string) => void;
   hideCommandPalette: () => void;
   openConfigDocument: (kind: ConfigDocumentKind) => Promise<void>;
   openHome: () => void;
@@ -221,6 +266,7 @@ export interface WorkbenchApi {
   setTheme: (themeId: string) => void;
   showCommandPalette: () => void;
   showError: (message: string | null) => void;
+  showSidebarModule: (moduleId: PaneGroupId, paneId?: string) => void;
   showReopenWithEditor: () => void;
   showThemePicker: () => void;
   startThemeGroupCreate: () => void;
@@ -240,7 +286,7 @@ export interface PasteHandlerApi {
   editor: monacoEditor.editor.IStandaloneCodeEditor;
   event: ClipboardEvent;
   uploadClipboardImages: (
-    articlePath: string,
+    target: ClipboardImageUploadTarget,
     images: ClipboardImageInput[]
   ) => Promise<ClipboardImageResult[]>;
 }

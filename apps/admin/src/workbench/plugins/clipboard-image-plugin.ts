@@ -22,7 +22,12 @@ export const clipboardImagePlugin: PluginDefinition = {
     context.registerPasteHandler({
       id: "clipboard-image",
       async handle({ event, editor, activeDocument, uploadClipboardImages }) {
-        if (!activeDocument || activeDocument.kind !== "article") {
+        if (
+          !activeDocument ||
+          (activeDocument.kind !== "article" &&
+            activeDocument.kind !== "projectTask" &&
+            activeDocument.kind !== "projectLog")
+        ) {
           return false;
         }
 
@@ -66,10 +71,17 @@ export const clipboardImagePlugin: PluginDefinition = {
             };
           })
         );
-        const uploadedAssets = await uploadClipboardImages(activeDocument.articlePath, images);
-        const imageMarkdown = uploadedAssets
-          .map((asset, index) => `![pasted-image-${index + 1}](${asset.markdownPath})`)
-          .join("\n");
+        const uploadTarget =
+          activeDocument.kind === "article"
+            ? { kind: "article" as const, articlePath: activeDocument.articlePath }
+            : { kind: "project" as const, projectId: activeDocument.projectId };
+        const uploadedAssets = await uploadClipboardImages(uploadTarget, images);
+        const imageMarkdown =
+          activeDocument.kind === "article"
+            ? uploadedAssets
+                .map((asset, index) => `![pasted-image-${index + 1}](${asset.markdownPath})`)
+                .join("\n")
+            : uploadedAssets.map((asset) => asset.markdownPath).join("\n");
         const combinedText = [textPayload.trim(), imageMarkdown].filter(Boolean).join("\n\n");
         const selection = editor.getSelection();
         const position = editor.getPosition();

@@ -11,6 +11,7 @@ export interface WorkspacePaths {
   configRoot: string;
   contentRoot: string;
   editorConfigDir: string;
+  projectsRoot: string;
   workspaceConfigPath: string;
   workspaceRoot: string;
 }
@@ -33,6 +34,7 @@ export function loadWorkspacePaths(codeRoot: string): WorkspacePaths {
     configRoot: path.join(workspaceRoot, "config"),
     contentRoot: path.join(workspaceRoot, "content"),
     editorConfigDir: path.join(workspaceRoot, "config", "editor"),
+    projectsRoot: path.join(workspaceRoot, "projects"),
     workspaceConfigPath,
     workspaceRoot
   };

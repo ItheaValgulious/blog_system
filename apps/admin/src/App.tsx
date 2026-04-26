@@ -12,6 +12,9 @@ import {
   normalizeAdminHomeConfig,
   normalizeEditorConfig,
   parseArticleSource,
+  type ProjectLogRecord,
+  type ProjectSummary,
+  type ProjectTaskRecord,
   renderMarkdownFragmentWithKatex,
   rewriteManagedMediaTextReferences,
   rewriteManagedMediaUrls,
@@ -27,6 +30,10 @@ import {
   type AdminHomeConfigPayload,
   type EditorConfigPayload,
   type MarkdownBlockConfigPayload,
+  type ProjectLogPayload,
+  type ProjectPayload,
+  type ProjectsPayload,
+  type ProjectTaskPayload,
   type SiteConfigPayload,
   type ThemeAssetPayload,
   type ThemeGroupsPayload,
@@ -48,16 +55,28 @@ import type {
   EditorContributionDefinition,
   HomeWidgetContributionDefinition,
   HomeWorkbenchDocument,
+  ModuleContributionDefinition,
   NormalizedEditorConfig,
   NormalizedSnippet,
   PaneContributionDefinition,
   PaneGroupId,
+  ProjectLogWorkbenchDocument,
+  ProjectTaskWorkbenchDocument,
+  ProjectWorkbenchDocument,
   ThemeAssetWorkbenchDocument,
   WorkbenchApi,
   WorkbenchDocument,
   WorkbenchEditorId,
   WorkbenchResourceTarget
 } from "./workbench/types";
+import {
+  getProjectDocumentPath,
+  getProjectLogDocumentPath,
+  getProjectResourceReference,
+  getProjectTaskDocumentPath,
+  PROJECT_MODULE_ID,
+  PROJECT_OVERVIEW_PANE_ID
+} from "./workbench/project-utils";
 
 loader.config({ monaco: monacoEditor });
 
@@ -101,6 +120,13 @@ interface SidebarPaneItem {
   tabLabel: string;
   title: string;
   component?: PaneContributionDefinition["component"];
+}
+
+interface SidebarModuleItem {
+  icon: string;
+  id: PaneGroupId;
+  order?: number;
+  title: string;
 }
 
 function loadStoredArticleCursorStates() {
@@ -216,10 +242,26 @@ function getDocumentPath(document: WorkbenchDocument | null, fallbackPath: strin
     return document.editorPath;
   }
 
-  return getConfigDocumentPath(document.configKind);
+  if (document.kind === "project") {
+    return getProjectDocumentPath(document.projectId);
+  }
+
+  if (document.kind === "projectTask") {
+    return getProjectTaskDocumentPath(document.projectId, document.taskId);
+  }
+
+  if (document.kind === "projectLog") {
+    return getProjectLogDocumentPath(document.projectId, document.logId);
+  }
+
+  if (document.kind === "config") {
+    return getConfigDocumentPath(document.configKind);
+  }
+
+  return fallbackPath ?? document.title;
 }
 
-function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "outline" | "media" | "git" | "command" }) {
+function ActivityIcon({ icon }: { icon: string }) {
   const commonProps = {
     "aria-hidden": true,
     className: "activity-icon",
@@ -290,35 +332,52 @@ function ActivityIcon({ icon }: { icon: "explorer" | "edit" | "plugins" | "outli
           <path d="M6.5 13.5h11" />
         </svg>
       );
+    case "project":
+      return (
+        <svg {...commonProps}>
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <path d="M8 9.5h8" />
+          <path d="M8 13.5h5" />
+          <path d="M8 17.5h8" />
+        </svg>
+      );
+    default:
+      return (
+        <svg {...commonProps}>
+          <rect x="5" y="5" width="14" height="14" rx="3" />
+          <path d="M12 8v8" />
+          <path d="M8 12h8" />
+        </svg>
+      );
   }
 }
 
-const SIDEBAR_GROUPS = [
+const CORE_MODULES = [
   {
     id: "explorer",
     icon: "explorer",
+    order: 0,
     title: "Explorer"
   },
   {
     id: "outline",
     icon: "outline",
+    order: 10,
     title: "Outline"
   },
   {
     id: "edit",
     icon: "edit",
+    order: 20,
     title: "Edit"
   },
   {
     id: "plugins",
     icon: "plugins",
+    order: 30,
     title: "Plugins"
   }
-] as const satisfies Array<{
-  icon: "explorer" | "outline" | "edit" | "plugins";
-  id: PaneGroupId;
-  title: string;
-}>;
+] as const satisfies SidebarModuleItem[];
 
 const PREVIEW_SHADOW_BASE_CSS = `
 html,
@@ -633,6 +692,18 @@ function isThemeAssetDocument(document: WorkbenchDocument | null): document is T
   return Boolean(document && document.kind === "themeAsset");
 }
 
+function isProjectDocument(document: WorkbenchDocument | null): document is ProjectWorkbenchDocument {
+  return Boolean(document && document.kind === "project");
+}
+
+function isProjectTaskDocument(document: WorkbenchDocument | null): document is ProjectTaskWorkbenchDocument {
+  return Boolean(document && document.kind === "projectTask");
+}
+
+function isProjectLogDocument(document: WorkbenchDocument | null): document is ProjectLogWorkbenchDocument {
+  return Boolean(document && document.kind === "projectLog");
+}
+
 function buildNormalizedEditorConfig(configPayload: EditorConfigPayload | null): NormalizedEditorConfig {
   const payload = configPayload ?? emptyConfigPayload;
   return {
@@ -718,6 +789,56 @@ function buildThemeAssetDocument(payload: ThemeAssetPayload): ThemeAssetWorkbenc
   };
 }
 
+function buildProjectDocument(payload: ProjectPayload): ProjectWorkbenchDocument {
+  return {
+    id: `project:${payload.value.id}`,
+    kind: "project",
+    editorId: "project.overview",
+    projectId: payload.value.id,
+    record: payload.value,
+    title: payload.value.title,
+    language: "json",
+    value: payload.raw,
+    savedValue: payload.raw,
+    dirty: false,
+    previewable: false
+  };
+}
+
+function buildProjectTaskDocument(payload: ProjectTaskPayload): ProjectTaskWorkbenchDocument {
+  return {
+    id: `project-task:${payload.projectId}:${payload.value.id}`,
+    kind: "projectTask",
+    editorId: "project.task-markdown",
+    projectId: payload.projectId,
+    record: payload.value,
+    taskId: payload.value.id,
+    title: payload.value.title,
+    language: "markdown",
+    value: payload.raw,
+    savedValue: payload.raw,
+    dirty: false,
+    previewable: false
+  };
+}
+
+function buildProjectLogDocument(payload: ProjectLogPayload): ProjectLogWorkbenchDocument {
+  return {
+    id: `project-log:${payload.projectId}:${payload.value.id}`,
+    kind: "projectLog",
+    editorId: "project.log-markdown",
+    logId: payload.value.id,
+    projectId: payload.projectId,
+    record: payload.value,
+    title: payload.value.title,
+    language: "markdown",
+    value: payload.raw,
+    savedValue: payload.raw,
+    dirty: false,
+    previewable: false
+  };
+}
+
 function upsertDocument(documents: WorkbenchDocument[], nextDocument: WorkbenchDocument) {
   const index = documents.findIndex((document) => document.id === nextDocument.id);
   if (index === -1) {
@@ -730,6 +851,32 @@ function upsertDocument(documents: WorkbenchDocument[], nextDocument: WorkbenchD
 
 function closeDocument(documents: WorkbenchDocument[], documentId: string) {
   return documents.filter((document) => document.id === HOME_DOCUMENT_ID || document.id !== documentId);
+}
+
+function isDocumentInProject(document: WorkbenchDocument, projectId: string) {
+  return (
+    (document.kind === "project" ||
+      document.kind === "projectTask" ||
+      document.kind === "projectLog") &&
+    document.projectId === projectId
+  );
+}
+
+function closeProjectDocuments(documents: WorkbenchDocument[], projectId: string) {
+  return documents.filter((document) => document.kind === "home" || !isDocumentInProject(document, projectId));
+}
+
+function removeProjectDraftValues(draftValues: Record<string, string>, projectId: string) {
+  return Object.fromEntries(
+    Object.entries(draftValues).filter(
+      ([key]) =>
+        !(
+          key === `project:${projectId}` ||
+          key.startsWith(`project-task:${projectId}:`) ||
+          key.startsWith(`project-log:${projectId}:`)
+        )
+    )
+  );
 }
 
 function getParentPath(path: string) {
@@ -1113,6 +1260,7 @@ export function App() {
   const [adminHomePayload, setAdminHomePayload] = useState<AdminHomeConfigPayload | null>(null);
   const [configPayload, setConfigPayload] = useState<EditorConfigPayload | null>(null);
   const [markdownBlockConfigPayload, setMarkdownBlockConfigPayload] = useState<MarkdownBlockConfigPayload | null>(null);
+  const [projectsPayload, setProjectsPayload] = useState<ProjectsPayload | null>(null);
   const [themeGroupsPayload, setThemeGroupsPayload] = useState<ThemeGroupsPayload | null>(null);
   const [siteConfigPayload, setSiteConfigPayload] = useState<SiteConfigPayload | null>(null);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>(() => [buildHomeDocument()]);
@@ -1194,6 +1342,15 @@ export function App() {
   const availableCommands = useMemo(() => pluginRuntime.getCommands(), [pluginRuntime]);
   const availableEditors = useMemo(() => pluginRuntime.getEditorContributions(), [pluginRuntime]);
   const availableThemes = useMemo(() => pluginRuntime.getThemes(), [pluginRuntime]);
+  const moduleContributions = useMemo(
+    () =>
+      pluginRuntime
+        .getWorkbenchContributions()
+        .filter(
+          (contribution): contribution is ModuleContributionDefinition => contribution.kind === "module"
+        ),
+    [pluginRuntime]
+  );
   const paneContributions = useMemo(
     () =>
       pluginRuntime
@@ -1201,70 +1358,64 @@ export function App() {
         .filter((contribution): contribution is PaneContributionDefinition => contribution.kind === "pane"),
     [pluginRuntime]
   );
+  const sidebarModules = useMemo<SidebarModuleItem[]>(
+    () =>
+      [...CORE_MODULES, ...moduleContributions.map((module) => ({
+        icon: module.icon,
+        id: module.moduleId,
+        order: module.order,
+        title: module.title
+      }))].sort((left, right) => (left.order ?? 0) - (right.order ?? 0)),
+    [moduleContributions]
+  );
   const groupedPanes = useMemo<Record<string, SidebarPaneItem[]>>(
-    () => ({
-      explorer: [
-        {
-          kind: "core",
-          paneId: "files",
-          tabLabel: "Files",
-          title: "Files"
-        },
-        ...paneContributions
-          .filter((pane) => pane.defaultGroupId === "explorer")
-          .map((pane) => ({
-            component: pane.component,
-            kind: "plugin" as const,
-            paneId: pane.paneId,
-            tabLabel: pane.tabLabel,
-            title: pane.title
-          }))
-      ],
-      outline: paneContributions
-        .filter((pane) => pane.defaultGroupId === "outline")
-        .map((pane) => ({
+    () => {
+      const groups: Record<string, SidebarPaneItem[]> = {
+        edit: [
+          {
+            kind: "core",
+            paneId: "edit-actions",
+            tabLabel: "Actions",
+            title: "Edit Actions"
+          }
+        ],
+        explorer: [
+          {
+            kind: "core",
+            paneId: "files",
+            tabLabel: "Files",
+            title: "Files"
+          }
+        ],
+        outline: [],
+        plugins: [
+          {
+            kind: "core",
+            paneId: "plugin-manager",
+            tabLabel: "Plugins",
+            title: "Plugins"
+          }
+        ]
+      };
+
+      for (const module of sidebarModules) {
+        groups[module.id] ??= [];
+      }
+
+      for (const pane of paneContributions) {
+        groups[pane.defaultGroupId] ??= [];
+        groups[pane.defaultGroupId].push({
           component: pane.component,
-          kind: "plugin" as const,
+          kind: "plugin",
           paneId: pane.paneId,
           tabLabel: pane.tabLabel,
           title: pane.title
-        })),
-      edit: [
-        {
-          kind: "core",
-          paneId: "edit-actions",
-          tabLabel: "Actions",
-          title: "Edit Actions"
-        },
-        ...paneContributions
-          .filter((pane) => pane.defaultGroupId === "edit")
-          .map((pane) => ({
-            component: pane.component,
-            kind: "plugin" as const,
-            paneId: pane.paneId,
-            tabLabel: pane.tabLabel,
-            title: pane.title
-          }))
-      ],
-      plugins: [
-        {
-          kind: "core",
-          paneId: "plugin-manager",
-          tabLabel: "Plugins",
-          title: "Plugins"
-        },
-        ...paneContributions
-          .filter((pane) => pane.defaultGroupId === "plugins")
-          .map((pane) => ({
-            component: pane.component,
-            kind: "plugin" as const,
-            paneId: pane.paneId,
-            tabLabel: pane.tabLabel,
-            title: pane.title
-          }))
-      ]
-    }),
-    [paneContributions]
+        });
+      }
+
+      return groups;
+    },
+    [paneContributions, sidebarModules]
   );
   const activeGroupPanes = groupedPanes[sidebarGroupId] ?? groupedPanes.explorer ?? [];
   const activePaneId =
@@ -1811,6 +1962,14 @@ export function App() {
     return payload;
   };
 
+  const loadProjects = async () => {
+    const payload = await api.listProjects();
+    startTransition(() => {
+      setProjectsPayload(payload);
+    });
+    return payload;
+  };
+
   const loadAdminHomeConfig = async () => {
     const payload = await api.getAdminHomeConfig();
     startTransition(() => {
@@ -1981,6 +2140,176 @@ export function App() {
     }
   };
 
+  const openProjectDocument = async (projectId: string, preferredEditorId?: WorkbenchEditorId) => {
+    try {
+      const existingDocument = documents.find(
+        (document) => document.kind === "project" && document.projectId === projectId
+      );
+      if (existingDocument) {
+        if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+          setDocuments((current) =>
+            current.map((document) =>
+              document.id === existingDocument.id
+                ? {
+                    ...document,
+                    editorId: resolveDocumentEditorId(document, preferredEditorId)
+                  }
+                : document
+            )
+          );
+        }
+        setActiveDocumentId(existingDocument.id);
+        setSidebarGroupId(PROJECT_MODULE_ID);
+        return;
+      }
+
+      const payload = await api.getProject(projectId);
+      const nextDocument = withResolvedEditor(buildProjectDocument(payload), preferredEditorId);
+      draftValuesRef.current[nextDocument.id] = nextDocument.value;
+      setDocuments((current) => upsertDocument(current, nextDocument));
+      setActiveDocumentId(nextDocument.id);
+      setSidebarGroupId(PROJECT_MODULE_ID);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const openProjectTaskDocument = async (
+    projectId: string,
+    taskId: string,
+    preferredEditorId?: WorkbenchEditorId
+  ) => {
+    try {
+      const existingDocument = documents.find(
+        (document) =>
+          document.kind === "projectTask" &&
+          document.projectId === projectId &&
+          document.taskId === taskId
+      );
+      if (existingDocument) {
+        if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+          setDocuments((current) =>
+            current.map((document) =>
+              document.id === existingDocument.id
+                ? {
+                    ...document,
+                    editorId: resolveDocumentEditorId(document, preferredEditorId)
+                  }
+                : document
+            )
+          );
+        }
+        setActiveDocumentId(existingDocument.id);
+        setSidebarGroupId(PROJECT_MODULE_ID);
+        return;
+      }
+
+      const payload = await api.getProjectTask(projectId, taskId);
+      const nextDocument = withResolvedEditor(buildProjectTaskDocument(payload), preferredEditorId);
+      draftValuesRef.current[nextDocument.id] = nextDocument.value;
+      setDocuments((current) => upsertDocument(current, nextDocument));
+      setActiveDocumentId(nextDocument.id);
+      setSidebarGroupId(PROJECT_MODULE_ID);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const openProjectLogDocument = async (
+    projectId: string,
+    logId: string,
+    preferredEditorId?: WorkbenchEditorId
+  ) => {
+    try {
+      const existingDocument = documents.find(
+        (document) =>
+          document.kind === "projectLog" &&
+          document.projectId === projectId &&
+          document.logId === logId
+      );
+      if (existingDocument) {
+        if (preferredEditorId && existingDocument.editorId !== preferredEditorId) {
+          setDocuments((current) =>
+            current.map((document) =>
+              document.id === existingDocument.id
+                ? {
+                    ...document,
+                    editorId: resolveDocumentEditorId(document, preferredEditorId)
+                  }
+                : document
+            )
+          );
+        }
+        setActiveDocumentId(existingDocument.id);
+        setSidebarGroupId(PROJECT_MODULE_ID);
+        return;
+      }
+
+      const payload = await api.getProjectLog(projectId, logId);
+      const nextDocument = withResolvedEditor(buildProjectLogDocument(payload), preferredEditorId);
+      draftValuesRef.current[nextDocument.id] = nextDocument.value;
+      setDocuments((current) => upsertDocument(current, nextDocument));
+      setActiveDocumentId(nextDocument.id);
+      setSidebarGroupId(PROJECT_MODULE_ID);
+      setPageError(null);
+    } catch (error) {
+      setPageError((error as Error).message);
+    }
+  };
+
+  const saveProjectWorkbenchDocument = async () => {
+    if (!isProjectDocument(activeDocument)) {
+      return;
+    }
+
+    const raw = getDraftValue(activeDocument);
+    const savedPayload = await api.saveProject(activeDocument.projectId, raw);
+    const savedDocument = withResolvedEditor(
+      buildProjectDocument(savedPayload),
+      activeDocument.editorId
+    );
+    draftValuesRef.current[savedDocument.id] = savedDocument.value;
+    setDocuments((current) => upsertDocument(current, savedDocument));
+    setActiveDocumentId(savedDocument.id);
+    await loadProjects();
+  };
+
+  const saveProjectTaskWorkbenchDocument = async () => {
+    if (!isProjectTaskDocument(activeDocument)) {
+      return;
+    }
+
+    const raw = getDraftValue(activeDocument);
+    const savedPayload = await api.saveProjectTask(activeDocument.projectId, activeDocument.taskId, raw);
+    const savedDocument = withResolvedEditor(
+      buildProjectTaskDocument(savedPayload),
+      activeDocument.editorId
+    );
+    draftValuesRef.current[savedDocument.id] = savedDocument.value;
+    setDocuments((current) => upsertDocument(current, savedDocument));
+    setActiveDocumentId(savedDocument.id);
+    await loadProjects();
+  };
+
+  const saveProjectLogWorkbenchDocument = async () => {
+    if (!isProjectLogDocument(activeDocument)) {
+      return;
+    }
+
+    const raw = getDraftValue(activeDocument);
+    const savedPayload = await api.saveProjectLog(activeDocument.projectId, activeDocument.logId, raw);
+    const savedDocument = withResolvedEditor(
+      buildProjectLogDocument(savedPayload),
+      activeDocument.editorId
+    );
+    draftValuesRef.current[savedDocument.id] = savedDocument.value;
+    setDocuments((current) => upsertDocument(current, savedDocument));
+    setActiveDocumentId(savedDocument.id);
+    await loadProjects();
+  };
+
   const saveThemeAssetDocument = async () => {
     if (!isThemeAssetDocument(activeDocument)) {
       return;
@@ -2136,6 +2465,7 @@ export function App() {
       loadTree(),
       loadConfig(),
       loadMarkdownBlockConfig(),
+      loadProjects(),
       loadAdminHomeConfig(),
       loadThemeGroups(),
       loadSiteConfig()
@@ -2257,6 +2587,12 @@ export function App() {
         syncEditorValuePreservingView(savedDocument.value);
         schedulePreviewSourceUpdate(savedDocument.value, { immediate: true });
         await loadTree();
+      } else if (activeDocument.kind === "project") {
+        await saveProjectWorkbenchDocument();
+      } else if (activeDocument.kind === "projectTask") {
+        await saveProjectTaskWorkbenchDocument();
+      } else if (activeDocument.kind === "projectLog") {
+        await saveProjectLogWorkbenchDocument();
       } else if (activeDocument.kind === "themeAsset") {
         await saveThemeAssetDocument();
       } else if (activeDocument.configKind === "markdownBlockConfig") {
@@ -2289,7 +2625,25 @@ export function App() {
   };
 
   const refreshWorkspaceData = useCallback(
-    async (target: "adminHome" | "config" | "markdownBlockConfig" | "siteConfig" | "themeGroups" | "tree" | Array<"adminHome" | "config" | "markdownBlockConfig" | "siteConfig" | "themeGroups" | "tree">) => {
+    async (
+      target:
+        | "adminHome"
+        | "config"
+        | "markdownBlockConfig"
+        | "projects"
+        | "siteConfig"
+        | "themeGroups"
+        | "tree"
+        | Array<
+            | "adminHome"
+            | "config"
+            | "markdownBlockConfig"
+            | "projects"
+            | "siteConfig"
+            | "themeGroups"
+            | "tree"
+          >
+    ) => {
       const targets = Array.isArray(target) ? target : [target];
       await Promise.all(
         targets.map((entry) => {
@@ -2300,6 +2654,8 @@ export function App() {
               return loadConfig();
             case "markdownBlockConfig":
               return loadMarkdownBlockConfig();
+            case "projects":
+              return loadProjects();
             case "adminHome":
               return loadAdminHomeConfig();
             case "themeGroups":
@@ -2341,6 +2697,14 @@ export function App() {
       )
     );
   }, [activeDocument, resolveDocumentEditorId]);
+  const closeProjectWorkbenchDocuments = useCallback((projectId: string) => {
+    draftValuesRef.current = removeProjectDraftValues(draftValuesRef.current, projectId);
+    setDocuments((current) => closeProjectDocuments(current, projectId));
+
+    if (activeDocument && isDocumentInProject(activeDocument, projectId)) {
+      setActiveDocumentId(HOME_DOCUMENT_ID);
+    }
+  }, [activeDocument]);
   const openResource = useCallback(
     async (target: WorkbenchResourceTarget) => {
       switch (target.kind) {
@@ -2354,6 +2718,15 @@ export function App() {
         case "config":
           await openConfigDocument(target.configKind, target.preferredEditorId);
           return;
+        case "project":
+          await openProjectDocument(target.projectId, target.preferredEditorId);
+          return;
+        case "projectTask":
+          await openProjectTaskDocument(target.projectId, target.taskId, target.preferredEditorId);
+          return;
+        case "projectLog":
+          await openProjectLogDocument(target.projectId, target.logId, target.preferredEditorId);
+          return;
         case "themeAsset":
           await openThemeAssetDocument(target.groupId, target.fileName, target.preferredEditorId);
           return;
@@ -2362,7 +2735,15 @@ export function App() {
           return;
       }
     },
-    [openArticleDocument, openConfigDocument, openThemeAssetDocument, openThemeGroupConfigDocument]
+    [
+      openArticleDocument,
+      openConfigDocument,
+      openProjectDocument,
+      openProjectLogDocument,
+      openProjectTaskDocument,
+      openThemeAssetDocument,
+      openThemeGroupConfigDocument
+    ]
   );
   const renderSidebarStatusPills = () => (
     <>
@@ -2372,6 +2753,7 @@ export function App() {
   );
 
   const workbenchApi: WorkbenchApi = {
+    closeProjectDocuments: closeProjectWorkbenchDocuments,
     openHome: () => {
       setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
       setActiveDocumentId(HOME_DOCUMENT_ID);
@@ -2379,6 +2761,25 @@ export function App() {
     openResource,
     showCommandPalette: () => openPalette("commands"),
     hideCommandPalette: () => setCommandPaletteOpen(false),
+    showSidebarModule: (moduleId, paneId) => {
+      setSidebarGroupId(moduleId);
+      if (paneId) {
+        setActivePaneByGroup((current) => ({
+          ...current,
+          [moduleId]: paneId
+        }));
+      } else {
+        setActivePaneByGroup((current) =>
+          current[moduleId]
+            ? current
+            : {
+                ...current,
+                [moduleId]: groupedPanes[moduleId]?.[0]?.paneId ?? ""
+              }
+        );
+      }
+      setSidebarVisible(true);
+    },
     showReopenWithEditor: () => openPalette("editors"),
     showThemePicker: () => openPalette("themes"),
     startThemeGroupCreate: () => {
@@ -3325,10 +3726,35 @@ export function App() {
           event,
           editor,
           activeDocument,
-          uploadClipboardImages: async (articlePath: string, images: ClipboardImageInput[]) => {
-            const response = await api.uploadPastedImages(articlePath, images);
-            await loadTree();
-            return response.assets;
+          uploadClipboardImages: async (target, images: ClipboardImageInput[]) => {
+            if (target.kind === "article") {
+              const response = await api.uploadPastedImages(target.articlePath, images);
+              await loadTree();
+              return response.assets;
+            }
+
+            const uploadedResources = await Promise.all(
+              images.map(async (image) => {
+                const payload = await api.createProjectResource({
+                  file: {
+                    base64Data: image.base64Data,
+                    fileName: image.fileName ?? "pasted-image.png"
+                  },
+                  projectId: target.projectId,
+                  title: image.fileName ?? "Pasted image",
+                  type: "file"
+                });
+
+                return {
+                  fileName: payload.value.fileName || image.fileName || "pasted-image.png",
+                  markdownPath: getProjectResourceReference(payload.value.id),
+                  relativePath: payload.value.filePath
+                };
+              })
+            );
+
+            await loadProjects();
+            return uploadedResources;
           }
         });
         if (handled) {
@@ -3477,6 +3903,7 @@ export function App() {
           activeArticleLineNumber={activeArticleLineNumber ?? 1}
           activeDocument={activeDocument}
           api={workbenchApi}
+          projects={projectsPayload?.projects ?? []}
         />
       );
     }
@@ -4003,7 +4430,7 @@ export function App() {
 
       <div className="activity-bar">
         <div className="activity-brand">KB</div>
-        {SIDEBAR_GROUPS.map((group) => (
+        {sidebarModules.map((group) => (
           <button
             aria-label={group.title}
             className={`activity-button ${sidebarVisible && sidebarGroupId === group.id ? "is-active" : ""}`}
@@ -4121,6 +4548,7 @@ export function App() {
               {activeDocument ? (
                 ActiveEditorComponent ? (
                   <ActiveEditorComponent
+                    api={workbenchApi}
                     adminHomeValue={adminHomePayload?.value ?? null}
                     document={activeDocument}
                     homeWidgets={homeWidgetContributions}

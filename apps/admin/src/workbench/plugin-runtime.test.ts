@@ -7,8 +7,9 @@ import { commandPalettePlugin } from "./plugins/command-palette-plugin";
 import { coreWorkbenchPlugin } from "./plugins/core-workbench-plugin";
 import { markdownOutlinePlugin } from "./plugins/markdown-outline-plugin";
 import { mediaLibraryPlugin } from "./plugins/media-library-plugin";
+import { projectPlugin } from "./plugins/project-plugin";
 
-import type { PaneContributionDefinition, WorkbenchApi } from "./types";
+import type { ModuleContributionDefinition, PaneContributionDefinition, WorkbenchApi } from "./types";
 
 function getPaneIds(runtime: PluginRuntime) {
   return runtime
@@ -61,4 +62,25 @@ test("disabling a built-in plugin removes only that plugin's pane contribution",
   const paneIds = getPaneIds(runtime);
   assert.ok(paneIds.includes("media"));
   assert.equal(paneIds.includes("git"), false);
+});
+
+test("project plugin registers module, panes, and editors", () => {
+  const runtime = new PluginRuntime();
+  runtime.activate([projectPlugin]);
+
+  const moduleContribution = runtime
+    .getWorkbenchContributions()
+    .find(
+      (contribution): contribution is ModuleContributionDefinition =>
+        contribution.kind === "module" && contribution.moduleId === "project"
+    );
+
+  assert.ok(moduleContribution);
+  assert.deepEqual(
+    getPaneIds(runtime).filter((paneId) => paneId.startsWith("project-")).sort(),
+    ["project-overview"]
+  );
+  assert.ok(runtime.getEditorContribution("project.overview"));
+  assert.ok(runtime.getEditorContribution("project.task-markdown"));
+  assert.ok(runtime.getEditorContribution("project.log-markdown"));
 });

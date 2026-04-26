@@ -1,3 +1,8 @@
+import {
+  getProjectDocumentPath,
+  getProjectLogDocumentPath,
+  getProjectTaskDocumentPath
+} from "./project-utils";
 import type {
   ConfigDocumentKind,
   EditorContributionDefinition,
@@ -37,6 +42,18 @@ export function getWorkbenchDocumentPath(document: WorkbenchDocument) {
 
   if (document.kind === "themeAsset") {
     return document.editorPath;
+  }
+
+  if (document.kind === "project") {
+    return getProjectDocumentPath(document.projectId);
+  }
+
+  if (document.kind === "projectTask") {
+    return getProjectTaskDocumentPath(document.projectId, document.taskId);
+  }
+
+  if (document.kind === "projectLog") {
+    return getProjectLogDocumentPath(document.projectId, document.logId);
   }
 
   if (document.kind === "config") {

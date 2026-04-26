@@ -11,7 +11,12 @@ export const snippetActionsPlugin: PluginDefinition = {
       id: "editor.expandMatchingSnippet",
       title: "Editor: Expand Matching Snippet",
       handler({ editor, monaco, activeDocument, snippets }) {
-        if (!activeDocument || activeDocument.kind !== "article") {
+        if (
+          !activeDocument ||
+          (activeDocument.kind !== "article" &&
+            activeDocument.kind !== "projectTask" &&
+            activeDocument.kind !== "projectLog")
+        ) {
           return false;
         }
 
