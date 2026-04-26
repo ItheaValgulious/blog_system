@@ -7,7 +7,6 @@ import type {
   FileSystemNode,
   MarkdownBlockConfig,
   ProjectLogRecord,
-  ProjectResourceRecord,
   ProjectSummary,
   ProjectTaskRecord,
   ThemeGroupConfig,
@@ -181,16 +180,6 @@ export interface ProjectLogPayload {
   value: ProjectLogRecord;
 }
 
-export interface ProjectResourcesPayload {
-  projectId: string;
-  resources: ProjectResourceRecord[];
-}
-
-export interface ProjectResourcePayload {
-  projectId: string;
-  value: ProjectResourceRecord;
-}
-
 export const api = {
   login(username: string, password: string) {
     return request<{ ok: true; username: string }>("/api/auth/login", {
@@ -335,28 +324,6 @@ export const api = {
     return request<ProjectLogPayload>("/api/project/log", {
       method: "PUT",
       body: JSON.stringify({ projectId, logId, raw })
-    });
-  },
-  listProjectResources(projectId: string) {
-    return request<ProjectResourcesPayload>(`/api/project/resources?projectId=${encodeURIComponent(projectId)}`);
-  },
-  createProjectResource(input: {
-    description?: string;
-    file?: { base64Data: string; fileName: string };
-    projectId: string;
-    source?: string;
-    title?: string;
-    type: "file" | "note" | "webpage";
-  }) {
-    return request<ProjectResourcePayload>("/api/project/resource/create", {
-      method: "POST",
-      body: JSON.stringify(input)
-    });
-  },
-  deleteProjectResource(projectId: string, resourceId: string) {
-    return request<{ projectId: string; resourceId: string }>("/api/project/resource/delete", {
-      method: "POST",
-      body: JSON.stringify({ projectId, resourceId })
     });
   },
   listThemeGroups() {

@@ -3,6 +3,7 @@ import { HomeDashboard } from "../../home-dashboard";
 import type { WorkbenchEditorComponentProps } from "../types";
 
 export function HomeDashboardEditor({
+  api: workbenchApi,
   adminHomeValue,
   homeWidgets,
   onChangeHomeConfig
@@ -16,6 +17,7 @@ export function HomeDashboardEditor({
       onChange={onChangeHomeConfig}
       value={adminHomeValue}
       widgets={homeWidgets}
+      workbenchApi={workbenchApi}
     />
   );
 }

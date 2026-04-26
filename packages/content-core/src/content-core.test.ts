@@ -7,7 +7,6 @@ import {
   createDefaultSlug,
   extractHeadings,
   extractMarkdownBlocks,
-  extractProjectResourceIds,
   inferThemeColorModeFromCss,
   isProjectTaskCompletedStatus,
   normalizeEditorAssociations,
@@ -17,7 +16,6 @@ import {
   normalizeThemeGroupConfig,
   parseProjectLogRecord,
   parseProjectRecord,
-  parseProjectResourceRecord,
   parseProjectTaskRecord,
   renderMarkdown,
   renderMarkdownFragmentWithKatex,
@@ -224,32 +222,6 @@ Notes`
   assert.deepEqual(record.taskIds, ["task-a"]);
 });
 
-test("extractProjectResourceIds deduplicates body references", () => {
-  assert.deepEqual(extractProjectResourceIds("Use @resource/spec-image and @resource/spec-image again."), [
-    "spec-image"
-  ]);
-});
-
-test("project resource parsing normalizes textbook and unknown types to note", () => {
-  const textbook = parseProjectResourceRecord(
-    "textbook-resource",
-    JSON.stringify({
-      title: "Textbook",
-      type: "textbook"
-    })
-  );
-  const unknown = parseProjectResourceRecord(
-    "unknown-resource",
-    JSON.stringify({
-      title: "Unknown",
-      type: "other"
-    })
-  );
-
-  assert.equal(textbook.type, "note");
-  assert.equal(unknown.type, "note");
-});
-
 test("isProjectTaskCompletedStatus matches done and completed", () => {
   assert.equal(isProjectTaskCompletedStatus("done"), true);
   assert.equal(isProjectTaskCompletedStatus("completed"), true);
@@ -431,15 +403,15 @@ test("applyMarkdownBlockRules throws when markers close out of order", () => {
 
 test("normalizeAdminHomeConfig keeps widget order unique", () => {
   const config = normalizeAdminHomeConfig({
-    widgetOrder: ["todo-list", "todo-list", "notes"],
+    widgetOrder: ["widget-a", "widget-a", "widget-b"],
     widgets: {
-      "todo-list": {
+      "widget-a": {
         items: []
       }
     }
   });
 
-  assert.deepEqual(config.widgetOrder, ["todo-list", "notes"]);
+  assert.deepEqual(config.widgetOrder, ["widget-a", "widget-b"]);
 });
 
 test("normalizeThemeGroupConfig keeps group mode and css color mode", () => {

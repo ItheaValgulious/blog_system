@@ -9,7 +9,6 @@ import { markdownOutlinePlugin } from "./plugins/markdown-outline-plugin";
 import { projectPlugin } from "./plugins/project-plugin";
 import { snippetActionsPlugin } from "./plugins/snippet-actions-plugin";
 import { themePlugin } from "./plugins/theme-plugin";
-import { todoHomePlugin } from "./plugins/todo-home-plugin";
 import { topFrontmatterPlugin } from "./plugins/top-frontmatter-plugin";
 
 export const builtInPlugins: PluginDefinition[] = [
@@ -22,7 +21,6 @@ export const builtInPlugins: PluginDefinition[] = [
   markdownOutlinePlugin,
   projectPlugin,
   topFrontmatterPlugin,
-  todoHomePlugin,
   mediaLibraryPlugin,
   gitPlugin
 ];

@@ -45,11 +45,8 @@ import {
   createProject,
   deleteProject,
   createProjectLog,
-  createProjectResource,
   createProjectTask,
-  deleteProjectResource,
   listProjectLogs,
-  listProjectResources,
   listProjects,
   listProjectTasks,
   readProject,
@@ -549,83 +546,6 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
     }
   });
 
-  app.get("/api/project/resources", async (req, res, next) => {
-    try {
-      const projectId = String(req.query.projectId ?? "");
-
-      if (!projectId) {
-        res.status(400).json({ error: "projectId is required." });
-        return;
-      }
-
-      res.json(await listProjectResources(settings.projectsRoot, projectId));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/project/resource/create", async (req, res, next) => {
-    try {
-      const { description, file, projectId, source, title, type } = req.body as {
-        description?: string;
-        file?: { base64Data?: string; fileName?: string };
-        projectId?: string;
-        source?: string;
-        title?: string;
-        type?: "file" | "note" | "webpage";
-      };
-
-      if (!projectId || (type !== "file" && type !== "note" && type !== "webpage")) {
-        res.status(400).json({ error: "projectId and a valid type are required." });
-        return;
-      }
-
-      if (
-        file &&
-        (typeof file.base64Data !== "string" ||
-          file.base64Data.length === 0 ||
-          typeof file.fileName !== "string" ||
-          file.fileName.length === 0)
-      ) {
-        res.status(400).json({ error: "Uploaded files must include fileName and base64Data." });
-        return;
-      }
-
-      res.json(
-        await createProjectResource(settings.projectsRoot, projectId, {
-          description,
-          file:
-            file && typeof file.base64Data === "string" && typeof file.fileName === "string"
-              ? {
-                  base64Data: file.base64Data,
-                  fileName: file.fileName
-                }
-              : undefined,
-          source,
-          title,
-          type
-        })
-      );
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/project/resource/delete", async (req, res, next) => {
-    try {
-      const { projectId, resourceId } = req.body as { projectId?: string; resourceId?: string };
-
-      if (!projectId || !resourceId) {
-        res.status(400).json({ error: "projectId and resourceId are required." });
-        return;
-      }
-
-      res.json(await deleteProjectResource(settings.projectsRoot, projectId, resourceId));
-    } catch (error) {
-      next(error);
-    }
-  });
-
   app.get("/api/theme-groups", async (_req, res, next) => {
     try {
       res.json(await listThemeGroups(settings.configRoot));
@@ -1077,7 +997,6 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.use("/content-files", express.static(settings.contentRoot));
   app.use("/media", express.static(settings.assetsRoot));
-  app.use("/project-files", express.static(settings.projectsRoot));
   app.use("/theme-files", express.static(getThemeGroupsRoot(settings.configRoot)));
 
   app.get("/admin/*splat", async (_req, res, next) => {

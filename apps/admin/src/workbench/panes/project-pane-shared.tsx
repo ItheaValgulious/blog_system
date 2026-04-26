@@ -8,7 +8,7 @@ import {
   resolveSelectedProjectId,
   storeProjectId
 } from "../project-utils";
-import type { PaneComponentProps, WorkbenchDocument } from "../types";
+import type { PaneComponentProps, WorkbenchApi, WorkbenchDocument } from "../types";
 
 export function getProjectIdFromDocument(document: WorkbenchDocument | null) {
   if (!document) {
@@ -99,15 +99,46 @@ export function useProjectSelection(
   };
 }
 
+async function requestProjectTextInput(
+  workbenchApi: WorkbenchApi,
+  options: {
+    confirmLabel: string;
+    defaultValue?: string;
+    description?: string;
+    label: string;
+    overline: string;
+    placeholder?: string;
+    title: string;
+  }
+) {
+  const value = await workbenchApi.requestTextInput({
+    confirmLabel: options.confirmLabel,
+    defaultValue: options.defaultValue,
+    description: options.description,
+    label: options.label,
+    overline: options.overline,
+    placeholder: options.placeholder,
+    title: options.title
+  });
+
+  return value?.trim() || null;
+}
+
 export async function promptCreateProject(workbenchApi: PaneComponentProps["api"]) {
-  const title = window.prompt("Project title");
-  if (!title?.trim()) {
+  const title = await requestProjectTextInput(workbenchApi, {
+    confirmLabel: "Create Project",
+    label: "Project Title",
+    overline: "Project",
+    placeholder: "Project Alpha",
+    title: "New Project"
+  });
+  if (!title) {
     return null;
   }
 
-  workbenchApi.setBusy(`Creating ${title.trim()}...`);
+  workbenchApi.setBusy(`Creating ${title}...`);
   try {
-    const payload = await api.createProject({ title: title.trim() });
+    const payload = await api.createProject({ title });
     storeProjectId(payload.value.id);
     workbenchApi.showError(null);
     return payload;
@@ -117,4 +148,25 @@ export async function promptCreateProject(workbenchApi: PaneComponentProps["api"
   } finally {
     workbenchApi.setBusy(null);
   }
+}
+
+export async function promptCreateProjectTaskTitle(workbenchApi: PaneComponentProps["api"]) {
+  return requestProjectTextInput(workbenchApi, {
+    confirmLabel: "Create Task",
+    label: "Task Title",
+    overline: "Project Task",
+    placeholder: "Ship the first draft",
+    title: "New Task"
+  });
+}
+
+export async function promptCreateProjectLogType(workbenchApi: PaneComponentProps["api"]) {
+  return requestProjectTextInput(workbenchApi, {
+    confirmLabel: "Create Event",
+    defaultValue: "note",
+    label: "Event Type",
+    overline: "Project Log",
+    placeholder: "note",
+    title: "New Event"
+  });
 }

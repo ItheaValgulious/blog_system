@@ -341,7 +341,7 @@ test("site config rejects legacy about payloads", async () => {
   assert.match(response.body.error, /siteConfig must NOT have additional properties/);
 });
 
-test("project endpoints create resources and index task and log references", async () => {
+test("project endpoints create tasks, logs, and derived stats", async () => {
   const { agent, projectsRoot } = await setupTempApp();
 
   const createdProject = await agent
@@ -369,23 +369,6 @@ test("project endpoints create resources and index task and log references", asy
 
   assert.equal(savedProject.body.value.status, "active");
 
-  const createdResource = await agent
-    .post("/api/project/resource/create")
-    .send({
-      projectId: "demo-project",
-      title: "Spec Image",
-      type: "file",
-      file: {
-        base64Data: Buffer.from("fakepngbytes").toString("base64"),
-        fileName: "spec.png"
-      }
-    })
-    .expect(200);
-
-  const resourceId = createdResource.body.value.id as string;
-  const resourceRef = `@resource/${resourceId}`;
-  await fs.access(path.join(projectsRoot, "demo-project", createdResource.body.value.filePath));
-
   const createdTask = await agent
     .post("/api/project/task/create")
     .send({
@@ -399,12 +382,11 @@ test("project endpoints create resources and index task and log references", asy
     .send({
       projectId: "demo-project",
       taskId: createdTask.body.value.id,
-      raw: `${(createdTask.body.raw as string).replace("status: todo", "status: blocked")}\nUses ${resourceRef}\n`
+      raw: `${(createdTask.body.raw as string).replace("status: todo", "status: blocked")}\nUpdated task body.\n`
     })
     .expect(200);
 
   assert.equal(savedTask.body.value.status, "todo");
-  assert.deepEqual(savedTask.body.value.resourceIds, [resourceId]);
 
   const createdLog = await agent
     .post("/api/project/log/create")
@@ -419,36 +401,15 @@ test("project endpoints create resources and index task and log references", asy
     .send({
       projectId: "demo-project",
       logId: createdLog.body.value.id,
-      raw: `${createdLog.body.raw}\nCaptured ${resourceRef}\n`
+      raw: `${createdLog.body.raw}\nCaptured progress update.\n`
     })
     .expect(200);
-
-  assert.deepEqual(savedLog.body.value.resourceIds, [resourceId]);
+  assert.equal(savedLog.body.value.type, "progress");
 
   const listedProjects = await agent.get("/api/projects").expect(200);
   assert.equal(listedProjects.body.projects[0].taskCount, 1);
   assert.equal(listedProjects.body.projects[0].completedTaskCount, 0);
   assert.equal(listedProjects.body.projects[0].recentActivityCount, 1);
-});
-
-test("project resource endpoint rejects textbook type", async () => {
-  const { agent } = await setupTempApp();
-
-  await agent
-    .post("/api/project/create")
-    .send({
-      title: "Resource Validation"
-    })
-    .expect(200);
-
-  await agent
-    .post("/api/project/resource/create")
-    .send({
-      projectId: "resource-validation",
-      title: "Legacy Textbook",
-      type: "textbook"
-    })
-    .expect(400);
 });
 
 test("project delete endpoint removes the project directory and listings", async () => {
@@ -474,19 +435,6 @@ test("project delete endpoint removes the project directory and listings", async
     .send({
       projectId: "delete-me",
       type: "note"
-    })
-    .expect(200);
-
-  await agent
-    .post("/api/project/resource/create")
-    .send({
-      projectId: "delete-me",
-      title: "Temporary File",
-      type: "file",
-      file: {
-        base64Data: Buffer.from("temporary-bytes").toString("base64"),
-        fileName: "temp.txt"
-      }
     })
     .expect(200);
 

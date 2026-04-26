@@ -73,7 +73,6 @@ import type {
 import {
   getProjectDocumentPath,
   getProjectLogDocumentPath,
-  getProjectResourceReference,
   getProjectTaskDocumentPath,
   PROJECT_MODULE_ID,
   PROJECT_OVERVIEW_PANE_ID
@@ -1128,7 +1127,6 @@ function LoginView({
         <div>
           <p className="title-overline">Knowledge Base Admin</p>
           <h1>Admin Workbench</h1>
-          <p className="body-muted">Edit Markdown, manage files, configure snippets, and publish the site from one workbench.</p>
         </div>
         <form
           className="login-form"
@@ -1307,6 +1305,17 @@ export function App() {
       metadata: Record<string, string>;
     };
   } | null>(null);
+  const [textInputDialog, setTextInputDialog] = useState<{
+    confirmLabel: string;
+    description?: string;
+    emptyValueMessage: string;
+    error: string | null;
+    label: string;
+    overline: string;
+    placeholder?: string;
+    title: string;
+    value: string;
+  } | null>(null);
   const [previewSourceText, setPreviewSourceText] = useState("");
   const [editorReadyVersion, setEditorReadyVersion] = useState(0);
   const [previewReadyVersion, setPreviewReadyVersion] = useState(0);
@@ -1326,6 +1335,8 @@ export function App() {
   const adminHomeSaveTimerRef = useRef<number | null>(null);
   const articleCursorPersistTimerRef = useRef<number | null>(null);
   const articleCursorStatesRef = useRef<Record<string, StoredArticleCursorState>>(initialArticleCursorStates);
+  const textInputDialogResolveRef = useRef<((value: string | null) => void) | null>(null);
+  const textInputDialogInputRef = useRef<HTMLInputElement | null>(null);
   const draftValuesRef = useRef<Record<string, string>>({});
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
   const treeRootRef = useRef<HTMLDivElement | null>(null);
@@ -1651,6 +1662,34 @@ export function App() {
 
     const codes = ["KeyW", "PageUp", "PageDown", ...Array.from({ length: 9 }, (_, index) => `Digit${index + 1}`)];
     void keyboardApi.lock(codes).catch(() => undefined);
+  }, []);
+
+  const closeTextInputDialog = useCallback((value: string | null) => {
+    textInputDialogResolveRef.current?.(value);
+    textInputDialogResolveRef.current = null;
+    setTextInputDialog(null);
+  }, []);
+
+  useEffect(() => {
+    if (!textInputDialog) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      textInputDialogInputRef.current?.focus();
+      textInputDialogInputRef.current?.select();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [Boolean(textInputDialog)]);
+
+  useEffect(() => {
+    return () => {
+      textInputDialogResolveRef.current?.(null);
+      textInputDialogResolveRef.current = null;
+    };
   }, []);
 
   const syncEditorValuePreservingView = useCallback((nextValue: string) => {
@@ -2790,6 +2829,27 @@ export function App() {
     },
     toggleSidebar: () => setSidebarVisible((current) => !current),
     togglePreview: () => setPreviewVisible((current) => !current),
+    requestTextInput: (options) => {
+      if (textInputDialogResolveRef.current) {
+        textInputDialogResolveRef.current(null);
+        textInputDialogResolveRef.current = null;
+      }
+
+      return new Promise((resolve) => {
+        textInputDialogResolveRef.current = resolve;
+        setTextInputDialog({
+          confirmLabel: options.confirmLabel ?? "Confirm",
+          description: options.description,
+          emptyValueMessage: options.emptyValueMessage ?? "This field is required.",
+          error: null,
+          label: options.label,
+          overline: options.overline ?? "Workbench",
+          placeholder: options.placeholder,
+          title: options.title,
+          value: options.defaultValue ?? ""
+        });
+      });
+    },
     setBusy: setBusyMessage,
     showError: setPageError,
     refreshWorkspaceData,
@@ -3735,28 +3795,8 @@ export function App() {
               return response.assets;
             }
 
-            const uploadedResources = await Promise.all(
-              images.map(async (image) => {
-                const payload = await api.createProjectResource({
-                  file: {
-                    base64Data: image.base64Data,
-                    fileName: image.fileName ?? "pasted-image.png"
-                  },
-                  projectId: target.projectId,
-                  title: image.fileName ?? "Pasted image",
-                  type: "file"
-                });
-
-                return {
-                  fileName: payload.value.fileName || image.fileName || "pasted-image.png",
-                  markdownPath: getProjectResourceReference(payload.value.id),
-                  relativePath: payload.value.filePath
-                };
-              })
-            );
-
-            await loadProjects();
-            return uploadedResources;
+            const response = await api.uploadMediaAssets(images);
+            return response.assets;
           }
         });
         if (handled) {
@@ -4297,6 +4337,78 @@ export function App() {
                 type="button"
               >
                 Continue Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {textInputDialog ? (
+        <div className="dialog-backdrop" onClick={() => closeTextInputDialog(null)} role="presentation">
+          <div className="dialog-card text-input-dialog" onClick={(event) => event.stopPropagation()}>
+            <p className="title-overline">{textInputDialog.overline}</p>
+            <h2>{textInputDialog.title}</h2>
+            {textInputDialog.description ? <p className="body-muted">{textInputDialog.description}</p> : null}
+            <label>
+              <span>{textInputDialog.label}</span>
+              <input
+                placeholder={textInputDialog.placeholder}
+                ref={textInputDialogInputRef}
+                value={textInputDialog.value}
+                onChange={(event) =>
+                  setTextInputDialog({
+                    ...textInputDialog,
+                    error: null,
+                    value: event.target.value
+                  })
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeTextInputDialog(null);
+                    return;
+                  }
+
+                  if (event.key !== "Enter") {
+                    return;
+                  }
+
+                  event.preventDefault();
+                  const nextValue = textInputDialog.value.trim();
+                  if (!nextValue) {
+                    setTextInputDialog({
+                      ...textInputDialog,
+                      error: textInputDialog.emptyValueMessage
+                    });
+                    return;
+                  }
+
+                  closeTextInputDialog(nextValue);
+                }}
+              />
+            </label>
+            {textInputDialog.error ? <p className="body-muted">{textInputDialog.error}</p> : null}
+            <div className="dialog-actions">
+              <button className="action-button ghost" onClick={() => closeTextInputDialog(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className="action-button primary"
+                onClick={() => {
+                  const nextValue = textInputDialog.value.trim();
+                  if (!nextValue) {
+                    setTextInputDialog({
+                      ...textInputDialog,
+                      error: textInputDialog.emptyValueMessage
+                    });
+                    return;
+                  }
+
+                  closeTextInputDialog(nextValue);
+                }}
+                type="button"
+              >
+                {textInputDialog.confirmLabel}
               </button>
             </div>
           </div>

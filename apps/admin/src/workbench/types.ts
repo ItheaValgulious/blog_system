@@ -237,7 +237,7 @@ export interface ClipboardImageResult {
 
 export type ClipboardImageUploadTarget =
   | { kind: "article"; articlePath: string }
-  | { kind: "project"; projectId: string };
+  | { kind: "media" };
 
 export type WorkbenchResourceTarget =
   | { kind: "article"; articlePath: string; preferredEditorId?: WorkbenchEditorId }
@@ -249,6 +249,17 @@ export type WorkbenchResourceTarget =
   | { kind: "themeAsset"; fileName: string; groupId: string; preferredEditorId?: WorkbenchEditorId }
   | { kind: "themeGroupConfig"; groupId: string; preferredEditorId?: WorkbenchEditorId };
 
+export interface WorkbenchTextInputOptions {
+  confirmLabel?: string;
+  defaultValue?: string;
+  description?: string;
+  emptyValueMessage?: string;
+  label: string;
+  overline?: string;
+  placeholder?: string;
+  title: string;
+}
+
 export interface WorkbenchApi {
   closeProjectDocuments: (projectId: string) => void;
   hideCommandPalette: () => void;
@@ -256,6 +267,7 @@ export interface WorkbenchApi {
   openHome: () => void;
   openResource: (target: WorkbenchResourceTarget) => Promise<void>;
   publishStaticSite: () => Promise<void>;
+  requestTextInput: (options: WorkbenchTextInputOptions) => Promise<string | null>;
   refreshWorkspaceData: (
     target: WorkbenchRefreshTarget | WorkbenchRefreshTarget[]
   ) => Promise<void>;

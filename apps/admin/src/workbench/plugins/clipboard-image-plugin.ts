@@ -74,14 +74,11 @@ export const clipboardImagePlugin: PluginDefinition = {
         const uploadTarget =
           activeDocument.kind === "article"
             ? { kind: "article" as const, articlePath: activeDocument.articlePath }
-            : { kind: "project" as const, projectId: activeDocument.projectId };
+            : { kind: "media" as const };
         const uploadedAssets = await uploadClipboardImages(uploadTarget, images);
-        const imageMarkdown =
-          activeDocument.kind === "article"
-            ? uploadedAssets
-                .map((asset, index) => `![pasted-image-${index + 1}](${asset.markdownPath})`)
-                .join("\n")
-            : uploadedAssets.map((asset) => asset.markdownPath).join("\n");
+        const imageMarkdown = uploadedAssets
+          .map((asset, index) => `![pasted-image-${index + 1}](${asset.markdownPath})`)
+          .join("\n");
         const combinedText = [textPayload.trim(), imageMarkdown].filter(Boolean).join("\n\n");
         const selection = editor.getSelection();
         const position = editor.getPosition();

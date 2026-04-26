@@ -6,7 +6,11 @@ import { api } from "../../api";
 
 import { formatProjectDate, formatProjectDateTime } from "../project-utils";
 import type { PaneComponentProps } from "../types";
-import { promptCreateProject, useProjectSelection } from "./project-pane-shared";
+import {
+  promptCreateProject,
+  promptCreateProjectTaskTitle,
+  useProjectSelection
+} from "./project-pane-shared";
 
 export function ProjectTasksPane({
   activeDocument,
@@ -77,14 +81,14 @@ export function ProjectTasksPane({
                   await refresh();
                 }
 
-                const title = window.prompt("Task title");
-                if (!title?.trim() || !targetProjectId) {
+                const title = await promptCreateProjectTaskTitle(workbenchApi);
+                if (!title || !targetProjectId) {
                   return;
                 }
 
-                workbenchApi.setBusy(`Creating ${title.trim()}...`);
+                workbenchApi.setBusy(`Creating ${title}...`);
                 try {
-                  const payload = await api.createProjectTask(targetProjectId, title.trim());
+                  const payload = await api.createProjectTask(targetProjectId, title);
                   await refresh();
                   await workbenchApi.openResource({
                     kind: "projectTask",

@@ -1,12 +1,15 @@
-import type { ProjectResourceRecord, ProjectSummary } from "@blog-system/content-core";
+import type { AdminHomeConfig, ProjectSummary } from "@blog-system/content-core";
 
 export const PROJECT_MODULE_ID = "project";
 export const PROJECT_OVERVIEW_PANE_ID = "project-overview";
-export const PROJECT_TASKS_PANE_ID = "project-tasks";
-export const PROJECT_LOG_PANE_ID = "project-log";
-export const PROJECT_RESOURCES_PANE_ID = "project-resources";
-export const PROJECT_STATS_PANE_ID = "project-stats";
+const PROJECT_HOME_WIDGETS_CHANGED_EVENT = "admin-project-home-widgets-changed";
+const PROJECT_HOME_WIDGET_PREFIX = "project-home:";
 const SELECTED_PROJECT_STORAGE_KEY = "admin-project-plugin:selected-project-id";
+
+export interface ProjectHomeWidgetState {
+  kind: "project-home";
+  projectId: string;
+}
 
 export function getProjectDocumentPath(projectId: string) {
   return `projects/${projectId}/project.json`;
@@ -20,16 +23,78 @@ export function getProjectLogDocumentPath(projectId: string, logId: string) {
   return `projects/${projectId}/logs/${logId}.md`;
 }
 
-export function getProjectResourceReference(resourceId: string) {
-  return `@resource/${resourceId}`;
+export function getProjectHomeWidgetId(projectId: string) {
+  return `${PROJECT_HOME_WIDGET_PREFIX}${projectId}`;
 }
 
-export function getProjectResourceFileUrl(projectId: string, resource: ProjectResourceRecord) {
-  if (!resource.filePath) {
+export function isProjectHomeWidgetId(widgetId: string) {
+  return widgetId.startsWith(PROJECT_HOME_WIDGET_PREFIX);
+}
+
+export function createProjectHomeWidgetState(projectId: string): ProjectHomeWidgetState {
+  return {
+    kind: "project-home",
+    projectId
+  };
+}
+
+export function getProjectHomeWidgetProjectId(widgetId: string, value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const projectId = (value as { projectId?: unknown }).projectId;
+    if (typeof projectId === "string" && projectId.trim()) {
+      return projectId.trim();
+    }
+  }
+
+  if (!isProjectHomeWidgetId(widgetId)) {
     return null;
   }
 
-  return `/project-files/${projectId}/${resource.filePath}`.replace(/\\/g, "/");
+  return widgetId.slice(PROJECT_HOME_WIDGET_PREFIX.length) || null;
+}
+
+export function isProjectPinnedToHome(config: AdminHomeConfig, projectId: string) {
+  return config.widgetOrder.includes(getProjectHomeWidgetId(projectId));
+}
+
+export function addProjectHomeWidget(config: AdminHomeConfig, projectId: string): AdminHomeConfig {
+  const widgetId = getProjectHomeWidgetId(projectId);
+  return {
+    ...config,
+    widgetOrder: [...config.widgetOrder.filter((entry) => entry !== widgetId), widgetId],
+    widgets: {
+      ...config.widgets,
+      [widgetId]: createProjectHomeWidgetState(projectId)
+    }
+  };
+}
+
+export function removeProjectHomeWidget(config: AdminHomeConfig, projectId: string): AdminHomeConfig {
+  const widgetId = getProjectHomeWidgetId(projectId);
+  const { [widgetId]: _removed, ...remainingWidgets } = config.widgets;
+
+  return {
+    ...config,
+    widgetOrder: config.widgetOrder.filter((entry) => entry !== widgetId),
+    widgets: remainingWidgets
+  };
+}
+
+export function notifyProjectHomeWidgetsChanged(config?: AdminHomeConfig) {
+  window.dispatchEvent(new CustomEvent<AdminHomeConfig | undefined>(PROJECT_HOME_WIDGETS_CHANGED_EVENT, {
+    detail: config
+  }));
+}
+
+export function subscribeProjectHomeWidgetsChanged(listener: (config?: AdminHomeConfig) => void) {
+  const handleEvent = (event: Event) => {
+    listener((event as CustomEvent<AdminHomeConfig | undefined>).detail);
+  };
+  window.addEventListener(PROJECT_HOME_WIDGETS_CHANGED_EVENT, handleEvent);
+
+  return () => {
+    window.removeEventListener(PROJECT_HOME_WIDGETS_CHANGED_EVENT, handleEvent);
+  };
 }
 
 export function loadStoredProjectId() {

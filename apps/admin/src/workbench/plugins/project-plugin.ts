@@ -53,7 +53,7 @@ export const projectPlugin: PluginDefinition = {
     context.registerCommand({
       id: "project.openModule",
       title: "Project: Open Module",
-      keywords: ["project", "tasks", "logs", "resources"],
+      keywords: ["project", "tasks", "logs"],
       handler(api) {
         api.showSidebarModule(PROJECT_MODULE_ID, PROJECT_OVERVIEW_PANE_ID);
       }

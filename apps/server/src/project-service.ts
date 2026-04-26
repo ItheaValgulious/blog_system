@@ -4,21 +4,16 @@ import path from "node:path";
 
 import {
   PROJECT_RECENT_ACTIVITY_WINDOW_DAYS,
-  extractProjectResourceIds,
   isProjectTaskCompletedStatus,
   normalizeProjectId,
   parseProjectLogRecord,
   parseProjectRecord,
-  parseProjectResourceRecord,
   parseProjectTaskRecord,
   serializeProjectLogRecord,
   serializeProjectRecord,
-  serializeProjectResourceRecord,
   serializeProjectTaskRecord,
   type ProjectLogRecord,
   type ProjectRecord,
-  type ProjectResourceRecord,
-  type ProjectResourceType,
   type ProjectStats,
   type ProjectSummary,
   type ProjectTaskRecord
@@ -28,8 +23,6 @@ interface ProjectPaths {
   directory: string;
   logsDirectory: string;
   projectFile: string;
-  resourcesDirectory: string;
-  resourcesFilesDirectory: string;
   tasksDirectory: string;
 }
 
@@ -50,24 +43,8 @@ export interface ProjectLogPayload {
   value: ProjectLogRecord;
 }
 
-export interface ProjectResourcePayload {
-  projectId: string;
-  value: ProjectResourceRecord;
-}
-
 export interface DeleteProjectPayload {
   projectId: string;
-}
-
-export interface CreateProjectResourceInput {
-  description?: string;
-  file?: {
-    base64Data: string;
-    fileName: string;
-  };
-  source?: string;
-  title?: string;
-  type: ProjectResourceType;
 }
 
 function resolveProjectsPath(projectsRoot: string, ...segments: string[]) {
@@ -89,8 +66,6 @@ function getProjectPaths(projectsRoot: string, projectId: string): ProjectPaths 
     directory,
     logsDirectory: path.join(directory, "logs"),
     projectFile: path.join(directory, "project.json"),
-    resourcesDirectory: path.join(directory, "resources"),
-    resourcesFilesDirectory: path.join(directory, "resources", "files"),
     tasksDirectory: path.join(directory, "tasks")
   };
 }
@@ -102,12 +77,6 @@ function createTimestampId(prefix: string) {
 
 function getTodayDate() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function sanitizeFileName(value: string) {
-  const trimmed = value.trim().replace(/[\\/]+/g, "-");
-  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-");
-  return sanitized.replace(/^-+|-+$/g, "") || "file";
 }
 
 function compareIsoDateDesc(left: string, right: string) {
@@ -149,8 +118,6 @@ async function ensureProjectStructure(projectsRoot: string, projectId: string) {
   await fs.mkdir(paths.directory, { recursive: true });
   await fs.mkdir(paths.tasksDirectory, { recursive: true });
   await fs.mkdir(paths.logsDirectory, { recursive: true });
-  await fs.mkdir(paths.resourcesDirectory, { recursive: true });
-  await fs.mkdir(paths.resourcesFilesDirectory, { recursive: true });
   return paths;
 }
 
@@ -229,26 +196,6 @@ async function readProjectLogs(projectsRoot: string, projectId: string) {
   });
 }
 
-async function readProjectResources(projectsRoot: string, projectId: string) {
-  const paths = getProjectPaths(projectsRoot, projectId);
-  const files = await readDirectoryFiles(paths.resourcesDirectory, ".json");
-  const resources = await Promise.all(
-    files.map(async (fileName) => {
-      const resourceId = fileName.replace(/\.json$/i, "");
-      const raw = await readRawFile(path.join(paths.resourcesDirectory, fileName));
-      return parseProjectResourceRecord(resourceId, raw);
-    })
-  );
-
-  return resources.sort((left, right) => {
-    if (left.updatedAt !== right.updatedAt) {
-      return compareIsoDateDesc(left.updatedAt, right.updatedAt);
-    }
-
-    return left.title.localeCompare(right.title);
-  });
-}
-
 async function createUniqueProjectId(projectsRoot: string, baseValue: string) {
   const baseId = normalizeProjectId(baseValue);
   let nextId = baseId;
@@ -293,7 +240,6 @@ function buildProjectTaskTemplate(taskId: string, title: string, order: number) 
     dueDate: "",
     createdAt: now,
     updatedAt: now,
-    resourceIds: [],
     body: `# ${title}\n`,
     rawContent: "",
     excerpt: ""
@@ -309,7 +255,6 @@ function buildProjectLogTemplate(logId: string, type: string) {
     occurredAt: now,
     createdAt: now,
     updatedAt: now,
-    resourceIds: [],
     body: "",
     rawContent: "",
     excerpt: "",
@@ -497,7 +442,6 @@ export async function saveProjectTask(
     id: normalizedTaskId,
     createdAt: existing?.value.createdAt || now,
     updatedAt: now,
-    resourceIds: extractProjectResourceIds(parsed.body),
     order: parsed.order || existing?.value.order || 1
   };
   const paths = await ensureProjectStructure(projectsRoot, projectId);
@@ -569,8 +513,7 @@ export async function saveProjectLog(
     id: normalizedLogId,
     createdAt: existing?.value.createdAt || now,
     updatedAt: now,
-    occurredAt: parsed.occurredAt || existing?.value.occurredAt || now,
-    resourceIds: extractProjectResourceIds(parsed.body)
+    occurredAt: parsed.occurredAt || existing?.value.occurredAt || now
   };
   const paths = await ensureProjectStructure(projectsRoot, projectId);
   await fs.writeFile(
@@ -579,83 +522,4 @@ export async function saveProjectLog(
     "utf8"
   );
   return readProjectLog(projectsRoot, projectId, normalizedLogId);
-}
-
-export async function listProjectResources(projectsRoot: string, projectId: string) {
-  await ensureProjectStructure(projectsRoot, projectId);
-  return {
-    projectId: normalizeProjectId(projectId),
-    resources: await readProjectResources(projectsRoot, projectId)
-  };
-}
-
-export async function createProjectResource(
-  projectsRoot: string,
-  projectId: string,
-  input: CreateProjectResourceInput
-): Promise<ProjectResourcePayload> {
-  const paths = await ensureProjectStructure(projectsRoot, projectId);
-  const baseName = input.title?.trim() || input.file?.fileName?.trim() || createTimestampId("resource");
-  const resourceId = await createUniqueEntryId(paths.resourcesDirectory, baseName, ".json");
-  const now = new Date().toISOString();
-  let fileName = "";
-  let filePath = "";
-
-  if (input.file) {
-    fileName = input.file.fileName.trim() || "file";
-    const storedFileName = `${resourceId}-${sanitizeFileName(fileName)}`;
-    filePath = `resources/files/${storedFileName}`;
-    await fs.writeFile(
-      resolveProjectsPath(projectsRoot, projectId, filePath),
-      Buffer.from(input.file.base64Data, "base64")
-    );
-  }
-
-  const record: ProjectResourceRecord = {
-    id: resourceId,
-    type: input.type,
-    title: input.title?.trim() || fileName || resourceId,
-    source: input.source?.trim() ?? "",
-    description: input.description?.trim() ?? "",
-    fileName,
-    filePath,
-    createdAt: now,
-    updatedAt: now
-  };
-
-  await fs.writeFile(
-    path.join(paths.resourcesDirectory, `${resourceId}.json`),
-    serializeProjectResourceRecord(record),
-    "utf8"
-  );
-
-  return {
-    projectId: normalizeProjectId(projectId),
-    value: record
-  };
-}
-
-export async function deleteProjectResource(projectsRoot: string, projectId: string, resourceId: string) {
-  const paths = getProjectPaths(projectsRoot, projectId);
-  const normalizedResourceId = normalizeProjectId(resourceId);
-  const metadataPath = path.join(paths.resourcesDirectory, `${normalizedResourceId}.json`);
-  const raw = await readRawFile(metadataPath);
-  const record = parseProjectResourceRecord(normalizedResourceId, raw);
-
-  if (record.filePath) {
-    await fs.rm(resolveProjectsPath(projectsRoot, projectId, record.filePath), {
-      force: true,
-      recursive: false
-    });
-  }
-
-  await fs.rm(metadataPath, {
-    force: false,
-    recursive: false
-  });
-
-  return {
-    projectId: normalizeProjectId(projectId),
-    resourceId: normalizedResourceId
-  };
 }

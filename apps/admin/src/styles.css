@@ -835,6 +835,24 @@ a {
   gap: 14px;
 }
 
+.dialog-card h2,
+.login-card h1 {
+  margin: 0;
+}
+
+.text-input-dialog {
+  gap: 10px;
+  padding: 20px 22px;
+}
+
+.text-input-dialog .title-overline {
+  margin-bottom: 2px;
+}
+
+.text-input-dialog label {
+  gap: 6px;
+}
+
 .dialog-card label,
 .login-form label,
 .sidebar-section label {
@@ -1452,56 +1470,51 @@ a {
   user-select: none;
 }
 
-.todo-widget,
-.todo-widget__list {
+.home-project-widget,
+.home-project-widget__tasks {
   display: grid;
   gap: 12px;
   position: relative;
   z-index: 1;
 }
 
-.todo-widget__composer {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
+.home-project-widget__tasks {
+  align-content: start;
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
-.todo-widget__composer input,
-.todo-widget__text {
-  width: 100%;
-  min-width: 0;
+.home-project-widget__task {
+  align-items: flex-start;
   border: 1px solid var(--wb-border);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--wb-bg-elevated) 82%, white 18%);
-  color: inherit;
-  padding: 10px 12px;
-  font: inherit;
-}
-
-.todo-widget__item {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  padding: 12px;
   border-radius: 14px;
-  border: 1px solid color-mix(in srgb, var(--wb-border) 82%, transparent);
-  background: color-mix(in srgb, var(--wb-bg-panel) 86%, white 14%);
+  background: color-mix(in srgb, var(--wb-bg-panel) 88%, white 12%);
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  text-align: left;
+  font: inherit;
+  transition:
+    border-color 120ms ease,
+    transform 120ms ease,
+    background 120ms ease;
 }
 
-.todo-widget__item.is-complete .todo-widget__text {
+.home-project-widget__task:hover {
+  border-color: color-mix(in srgb, var(--wb-accent) 30%, var(--wb-border));
+  transform: translateY(-1px);
+}
+
+.home-project-widget__task strong,
+.home-project-widget__task span {
+  margin: 0;
+}
+
+.home-project-widget__task span {
   color: var(--wb-foreground-muted);
-  text-decoration: line-through;
-}
-
-.todo-widget__text {
-  border: none;
-  background: transparent;
-  padding-inline: 0;
-}
-
-.todo-widget__text:focus {
-  outline: none;
 }
 
 @media (max-width: 1280px) {
@@ -1517,10 +1530,5 @@ a {
 @media (max-width: 760px) {
   .home-dashboard {
     padding: 14px;
-  }
-
-  .todo-widget__composer,
-  .todo-widget__item {
-    grid-template-columns: 1fr;
   }
 }

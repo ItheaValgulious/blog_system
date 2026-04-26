@@ -6,12 +6,10 @@ export const PROJECT_RECENT_ACTIVITY_WINDOW_DAYS = 7;
 
 export const PROJECT_STATUS_VALUES = ["active", "archived", "completed"] as const;
 export const PROJECT_TASK_STATUS_VALUES = ["todo", "completed", "failed"] as const;
-export const PROJECT_RESOURCE_TYPE_VALUES = ["file", "note", "webpage"] as const;
 
 export type ProjectStatus = (typeof PROJECT_STATUS_VALUES)[number];
 export type ProjectTaskStatus = (typeof PROJECT_TASK_STATUS_VALUES)[number];
 export type ProjectLogType = string;
-export type ProjectResourceType = (typeof PROJECT_RESOURCE_TYPE_VALUES)[number];
 
 export interface ProjectRecord {
   id: string;
@@ -33,7 +31,6 @@ export interface ProjectTaskRecord {
   dueDate: string;
   createdAt: string;
   updatedAt: string;
-  resourceIds: string[];
   body: string;
   rawContent: string;
   excerpt: string;
@@ -46,23 +43,10 @@ export interface ProjectLogRecord {
   occurredAt: string;
   createdAt: string;
   updatedAt: string;
-  resourceIds: string[];
   body: string;
   rawContent: string;
   excerpt: string;
   title: string;
-}
-
-export interface ProjectResourceRecord {
-  id: string;
-  type: ProjectResourceType;
-  title: string;
-  source: string;
-  description: string;
-  fileName: string;
-  filePath: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface ProjectStats {
@@ -221,17 +205,6 @@ export function normalizeProjectTaskStatus(value: unknown): ProjectTaskStatus {
   }
 }
 
-export function normalizeProjectResourceType(value: unknown): ProjectResourceType {
-  switch (normalizeString(value).toLowerCase()) {
-    case "file":
-      return "file";
-    case "webpage":
-      return "webpage";
-    default:
-      return "note";
-  }
-}
-
 function normalizeProjectLogTitle(id: string, body: string, type: string) {
   const normalizedBody = normalizeLineEndings(body);
   const headingMatch = normalizedBody.match(/^#{1,6}\s+(.+)$/m);
@@ -259,11 +232,6 @@ export function normalizeProjectId(value: string) {
     .replace(/^-+|-+$/g, "");
 
   return normalized || "project";
-}
-
-export function extractProjectResourceIds(body: string) {
-  const matches = normalizeLineEndings(body).matchAll(/@resource\/([a-z0-9][a-z0-9_-]*)/gi);
-  return uniqueStrings(Array.from(matches, (match) => match[1].toLowerCase()));
 }
 
 export function isProjectTaskCompletedStatus(status: string) {
@@ -316,7 +284,6 @@ export function parseProjectTaskRecord(taskId: string, rawContent: string): Proj
     dueDate: normalizeString(frontmatter.dueDate),
     createdAt: normalizeString(frontmatter.createdAt),
     updatedAt: normalizeString(frontmatter.updatedAt),
-    resourceIds: uniqueStrings(normalizeStringArray(frontmatter.resourceIds)),
     body,
     rawContent: normalizeLineEndings(rawContent),
     excerpt: summarizeBody(body)
@@ -335,10 +302,6 @@ export function serializeProjectTaskRecord(record: ProjectTaskRecord) {
     updatedAt: record.updatedAt
   };
 
-  if (record.resourceIds.length > 0) {
-    frontmatter.resourceIds = record.resourceIds;
-  }
-
   return serializeMarkdownRecord(frontmatter, record.body);
 }
 
@@ -355,7 +318,6 @@ export function parseProjectLogRecord(logId: string, rawContent: string): Projec
     occurredAt: normalizeString(frontmatter.occurredAt),
     createdAt: normalizeString(frontmatter.createdAt),
     updatedAt: normalizeString(frontmatter.updatedAt),
-    resourceIds: uniqueStrings(normalizeStringArray(frontmatter.resourceIds)),
     body,
     rawContent: normalizeLineEndings(rawContent),
     excerpt: summarizeBody(body),
@@ -373,43 +335,5 @@ export function serializeProjectLogRecord(record: ProjectLogRecord) {
     updatedAt: record.updatedAt
   };
 
-  if (record.resourceIds.length > 0) {
-    frontmatter.resourceIds = record.resourceIds;
-  }
-
   return serializeMarkdownRecord(frontmatter, record.body);
-}
-
-export function parseProjectResourceRecord(resourceId: string, raw: string): ProjectResourceRecord {
-  const parsed = parseJsonObject(raw);
-
-  return {
-    id: normalizeProjectId(normalizeString(parsed.id) || resourceId),
-    type: normalizeProjectResourceType(parsed.type),
-    title: normalizeProjectTitle(parsed.title, resourceId),
-    source: normalizeString(parsed.source),
-    description: normalizeString(parsed.description),
-    fileName: normalizeString(parsed.fileName),
-    filePath: normalizeString(parsed.filePath),
-    createdAt: normalizeString(parsed.createdAt),
-    updatedAt: normalizeString(parsed.updatedAt)
-  };
-}
-
-export function serializeProjectResourceRecord(record: ProjectResourceRecord) {
-  return `${JSON.stringify(
-    {
-      id: record.id,
-      type: record.type,
-      title: record.title,
-      source: record.source,
-      description: record.description,
-      fileName: record.fileName,
-      filePath: record.filePath,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt
-    },
-    null,
-    2
-  )}\n`;
 }

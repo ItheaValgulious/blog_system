@@ -6,7 +6,11 @@ import { api } from "../../api";
 
 import { formatProjectDateTime } from "../project-utils";
 import type { PaneComponentProps } from "../types";
-import { promptCreateProject, useProjectSelection } from "./project-pane-shared";
+import {
+  promptCreateProject,
+  promptCreateProjectLogType,
+  useProjectSelection
+} from "./project-pane-shared";
 
 export function ProjectLogPane({
   activeDocument,
@@ -77,7 +81,10 @@ export function ProjectLogPane({
                   await refresh();
                 }
 
-                const type = window.prompt("Log type", "note")?.trim() || "note";
+                const type = await promptCreateProjectLogType(workbenchApi);
+                if (!type) {
+                  return;
+                }
 
                 workbenchApi.setBusy(`Creating ${type} event...`);
                 try {

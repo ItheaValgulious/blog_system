@@ -1,22 +1,77 @@
-import type { AdminHomeConfig } from "@blog-system/content-core";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { HomeWidgetContributionDefinition } from "./workbench/types";
+import type { AdminHomeConfig, ProjectSummary, ProjectTaskRecord } from "@blog-system/content-core";
+
+import { api } from "./api";
+import {
+  formatProjectDate,
+  getProjectHomeWidgetProjectId,
+  notifyProjectHomeWidgetsChanged,
+  removeProjectHomeWidget
+} from "./workbench/project-utils";
+
+import type { HomeWidgetContributionDefinition, WorkbenchApi } from "./workbench/types";
 
 interface HomeDashboardProps {
+  workbenchApi: WorkbenchApi;
   value: AdminHomeConfig;
   widgets: HomeWidgetContributionDefinition[];
   onChange: (nextValue: AdminHomeConfig) => void;
 }
 
-function resolveOrderedWidgetIds(
-  widgetOrder: string[],
+interface ProjectHomeWidgetData {
+  error: string | null;
+  loading: boolean;
+  project: ProjectSummary | null;
+  tasks: ProjectTaskRecord[];
+}
+
+type ResolvedHomeWidget =
+  | { kind: "plugin"; widget: HomeWidgetContributionDefinition }
+  | { kind: "project"; projectId: string; widgetId: string };
+
+function resolveOrderedWidgets(
+  value: AdminHomeConfig,
   widgets: HomeWidgetContributionDefinition[]
-) {
-  const availableIds = widgets.map((widget) => widget.widgetId);
-  return [
-    ...widgetOrder.filter((widgetId) => availableIds.includes(widgetId)),
-    ...availableIds.filter((widgetId) => !widgetOrder.includes(widgetId))
+): ResolvedHomeWidget[] {
+  const availableWidgets = new Map(widgets.map((widget) => [widget.widgetId, widget]));
+  const availableIds = new Set(availableWidgets.keys());
+  const orderedIds = [
+    ...value.widgetOrder.filter((widgetId, index, entries) => {
+      if (entries.indexOf(widgetId) !== index) {
+        return false;
+      }
+
+      return (
+        availableIds.has(widgetId) ||
+        getProjectHomeWidgetProjectId(widgetId, value.widgets[widgetId]) !== null
+      );
+    }),
+    ...widgets.map((widget) => widget.widgetId).filter((widgetId) => !value.widgetOrder.includes(widgetId))
   ];
+
+  return orderedIds
+    .map((widgetId) => {
+      const pluginWidget = availableWidgets.get(widgetId);
+      if (pluginWidget) {
+        return {
+          kind: "plugin" as const,
+          widget: pluginWidget
+        };
+      }
+
+      const projectId = getProjectHomeWidgetProjectId(widgetId, value.widgets[widgetId]);
+      if (!projectId) {
+        return null;
+      }
+
+      return {
+        kind: "project" as const,
+        projectId,
+        widgetId
+      };
+    })
+    .filter((widget): widget is ResolvedHomeWidget => Boolean(widget));
 }
 
 function reorderWidgetIds(widgetIds: string[], sourceId: string, targetId: string) {
@@ -37,11 +92,71 @@ function reorderWidgetIds(widgetIds: string[], sourceId: string, targetId: strin
   return nextIds;
 }
 
-export function HomeDashboard({ value, widgets, onChange }: HomeDashboardProps) {
-  const orderedWidgetIds = resolveOrderedWidgetIds(value.widgetOrder, widgets);
-  const orderedWidgets = orderedWidgetIds
-    .map((widgetId) => widgets.find((widget) => widget.widgetId === widgetId) ?? null)
-    .filter((widget): widget is HomeWidgetContributionDefinition => Boolean(widget));
+export function HomeDashboard({ onChange, value, widgets, workbenchApi }: HomeDashboardProps) {
+  const orderedWidgets = useMemo(() => resolveOrderedWidgets(value, widgets), [value, widgets]);
+  const projectWidgets = useMemo(
+    () => orderedWidgets.filter((widget): widget is Extract<ResolvedHomeWidget, { kind: "project" }> => widget.kind === "project"),
+    [orderedWidgets]
+  );
+  const [projectWidgetData, setProjectWidgetData] = useState<Record<string, ProjectHomeWidgetData>>({});
+
+  const loadProjectWidgets = useCallback(async () => {
+    const projectIds = Array.from(new Set(projectWidgets.map((widget) => widget.projectId)));
+    if (projectIds.length === 0) {
+      setProjectWidgetData({});
+      return;
+    }
+
+    setProjectWidgetData((current) =>
+      Object.fromEntries(
+        projectIds.map((projectId) => [
+          projectId,
+          {
+            error: null,
+            loading: true,
+            project: current[projectId]?.project ?? null,
+            tasks: current[projectId]?.tasks ?? []
+          }
+        ])
+      )
+    );
+
+    const entries = await Promise.all(
+      projectIds.map(async (projectId) => {
+        try {
+          const [projectPayload, taskPayload] = await Promise.all([
+            api.getProject(projectId),
+            api.listProjectTasks(projectId)
+          ]);
+          return [
+            projectId,
+            {
+              error: null,
+              loading: false,
+              project: projectPayload.value,
+              tasks: taskPayload.tasks.filter((task) => task.status === "todo")
+            }
+          ] satisfies [string, ProjectHomeWidgetData];
+        } catch (error) {
+          return [
+            projectId,
+            {
+              error: (error as Error).message,
+              loading: false,
+              project: null,
+              tasks: []
+            }
+          ] satisfies [string, ProjectHomeWidgetData];
+        }
+      })
+    );
+
+    setProjectWidgetData(Object.fromEntries(entries));
+  }, [projectWidgets]);
+
+  useEffect(() => {
+    void loadProjectWidgets();
+  }, [loadProjectWidgets]);
 
   if (orderedWidgets.length === 0) {
     return (
@@ -49,7 +164,7 @@ export function HomeDashboard({ value, widgets, onChange }: HomeDashboardProps) 
         <section className="home-intro-card">
           <p className="title-overline">Admin Home</p>
           <h1>No home widgets are enabled.</h1>
-          <p className="body-muted">Enable a plugin that contributes a dashboard widget to populate this view.</p>
+          <p className="body-muted">Add a project from its overview to pin a live task pane here.</p>
         </section>
       </div>
     );
@@ -60,20 +175,26 @@ export function HomeDashboard({ value, widgets, onChange }: HomeDashboardProps) 
       <section className="home-intro-card">
         <p className="title-overline">Admin Home</p>
         <h1>Workbench dashboard</h1>
-        <p className="body-muted">Drag cards to reorder your home layout. Widgets inherit the active theme through shared CSS variables.</p>
+        <p className="body-muted">Drag cards to reorder your home layout. Pinned project panes show live tasks with `todo` status.</p>
+        <div className="render-style-actions">
+          <button className="action-button ghost" onClick={() => void loadProjectWidgets()} type="button">
+            Refresh Projects
+          </button>
+        </div>
       </section>
       <div className="home-widget-grid">
         {orderedWidgets.map((widget) => {
-          const WidgetComponent = widget.component;
+          const widgetId = widget.kind === "plugin" ? widget.widget.widgetId : widget.widgetId;
+          const PluginWidgetComponent = widget.kind === "plugin" ? widget.widget.component : null;
           return (
             <article
               className="home-widget-card"
               draggable
-              key={widget.widgetId}
+              key={widgetId}
               onDragOver={(event) => event.preventDefault()}
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", widget.widgetId);
+                event.dataTransfer.setData("text/plain", widgetId);
               }}
               onDrop={(event) => {
                 event.preventDefault();
@@ -84,32 +205,124 @@ export function HomeDashboard({ value, widgets, onChange }: HomeDashboardProps) 
 
                 onChange({
                   ...value,
-                  widgetOrder: reorderWidgetIds(orderedWidgetIds, sourceId, widget.widgetId)
+                  widgetOrder: reorderWidgetIds(
+                    orderedWidgets.map((entry) => (entry.kind === "plugin" ? entry.widget.widgetId : entry.widgetId)),
+                    sourceId,
+                    widgetId
+                  )
                 });
               }}
             >
-              <div className="home-widget-card__header">
-                <div>
-                  <p className="home-widget-card__eyebrow">Plugin widget</p>
-                  <h2>{widget.label}</h2>
-                </div>
-                <span className="home-widget-card__drag" aria-hidden="true">
-                  ::
-                </span>
-              </div>
-              <WidgetComponent
-                setState={(nextState) =>
-                  onChange({
-                    ...value,
-                    widgets: {
-                      ...value.widgets,
-                      [widget.widgetId]: nextState
-                    }
-                  })
-                }
-                state={value.widgets[widget.widgetId]}
-                widgetId={widget.widgetId}
-              />
+              {widget.kind === "plugin" ? (
+                <>
+                  <div className="home-widget-card__header">
+                    <div>
+                      <p className="home-widget-card__eyebrow">Plugin widget</p>
+                      <h2>{widget.widget.label}</h2>
+                    </div>
+                    <span className="home-widget-card__drag" aria-hidden="true">
+                      ::
+                    </span>
+                  </div>
+                  {PluginWidgetComponent ? (
+                    <PluginWidgetComponent
+                      setState={(nextState) =>
+                        onChange({
+                          ...value,
+                          widgets: {
+                            ...value.widgets,
+                            [widget.widget.widgetId]: nextState
+                          }
+                        })
+                      }
+                      state={value.widgets[widget.widget.widgetId]}
+                      widgetId={widget.widget.widgetId}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                (() => {
+                  const widgetData = projectWidgetData[widget.projectId];
+                  const project = widgetData?.project;
+                  const tasks = widgetData?.tasks ?? [];
+                  const isLoading = widgetData?.loading ?? true;
+                  const errorMessage = widgetData?.error;
+
+                  return (
+                    <>
+                      <div className="home-widget-card__header">
+                        <div>
+                          <p className="home-widget-card__eyebrow">Pinned project</p>
+                          <h2>{project?.title ?? widget.projectId}</h2>
+                        </div>
+                        <span className="home-widget-card__drag" aria-hidden="true">
+                          ::
+                        </span>
+                      </div>
+                      <div className="home-project-widget">
+                        <div className="project-list-item__row">
+                          <span className="body-muted">Project overview</span>
+                          {project ? <span className="status-pill info">{project.status}</span> : null}
+                        </div>
+                        {isLoading ? (
+                          <p className="body-muted">Loading tasks...</p>
+                        ) : errorMessage ? (
+                          <p className="body-muted">{errorMessage}</p>
+                        ) : tasks.length === 0 ? (
+                          <p className="body-muted">No todo tasks.</p>
+                        ) : (
+                          <div className="home-project-widget__tasks">
+                            {tasks.map((task) => (
+                              <button
+                                className="home-project-widget__task"
+                                key={task.id}
+                                onClick={() =>
+                                  void workbenchApi.openResource({
+                                    kind: "projectTask",
+                                    projectId: widget.projectId,
+                                    taskId: task.id
+                                  })
+                                }
+                                type="button"
+                              >
+                                <strong>{task.title}</strong>
+                                <span>
+                                  {task.dueDate ? `Due ${formatProjectDate(task.dueDate)}` : task.excerpt || "Open task"}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="render-style-actions">
+                          <button
+                            className="action-button ghost"
+                            onClick={() =>
+                              void workbenchApi.openResource({
+                                kind: "project",
+                                projectId: widget.projectId
+                              })
+                            }
+                            type="button"
+                          >
+                            Open Project
+                          </button>
+                          <button
+                            className="action-button ghost"
+                            onClick={() => {
+                              const nextValue = removeProjectHomeWidget(value, widget.projectId);
+                              onChange(nextValue);
+                              notifyProjectHomeWidgetsChanged(nextValue);
+                            }}
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()
+              )}
             </article>
           );
         })}

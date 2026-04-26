@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import Editor from "@monaco-editor/react";
 import {
   PROJECT_RECENT_ACTIVITY_WINDOW_DAYS,
-  PROJECT_RESOURCE_TYPE_VALUES,
   PROJECT_STATUS_VALUES,
   PROJECT_TASK_STATUS_VALUES,
   isProjectTaskCompletedStatus,
@@ -13,22 +12,32 @@ import {
   serializeProjectRecord,
   serializeProjectTaskRecord,
   type ProjectLogRecord,
-  type ProjectResourceRecord,
-  type ProjectResourceType,
   type ProjectTaskRecord
 } from "@blog-system/content-core";
 
 import { api } from "../../api";
 
-import { formatProjectDate, formatProjectDateTime, getProjectResourceFileUrl, getProjectResourceReference } from "../project-utils";
+import {
+  addProjectHomeWidget,
+  formatProjectDate,
+  formatProjectDateTime,
+  isProjectPinnedToHome,
+  notifyProjectHomeWidgetsChanged,
+  removeProjectHomeWidget
+} from "../project-utils";
+import { subscribeProjectHomeWidgetsChanged } from "../project-utils";
 import type { WorkbenchEditorComponentProps } from "../types";
 import type {
   ProjectLogWorkbenchDocument,
   ProjectTaskWorkbenchDocument,
   ProjectWorkbenchDocument
 } from "../types";
+import {
+  promptCreateProjectLogType,
+  promptCreateProjectTaskTitle
+} from "../panes/project-pane-shared";
 
-type ProjectOverviewTab = "overview" | "tasks" | "logs" | "resources" | "stats";
+type ProjectOverviewTab = "overview" | "tasks" | "logs" | "stats";
 
 function renderMarkdownBodyEditor(
   editorKey: string,
@@ -119,21 +128,6 @@ function buildProjectStats(tasks: ProjectTaskRecord[], logs: ProjectLogRecord[])
   };
 }
 
-async function fileToBase64(file: File) {
-  return new Promise<{ base64Data: string; fileName: string }>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      resolve({
-        base64Data: result.split(",")[1] ?? "",
-        fileName: file.name
-      });
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file."));
-    reader.readAsDataURL(file);
-  });
-}
-
 function ProjectOverviewSection({
   children,
   title,
@@ -169,37 +163,30 @@ export function ProjectOverviewEditor({
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [tasks, setTasks] = useState<ProjectTaskRecord[]>([]);
   const [logs, setLogs] = useState<ProjectLogRecord[]>([]);
-  const [resources, setResources] = useState<ProjectResourceRecord[]>([]);
-  const [resourceType, setResourceType] = useState<ProjectResourceType>("webpage");
-  const [resourceTitle, setResourceTitle] = useState("");
-  const [resourceSource, setResourceSource] = useState("");
-  const [resourceDescription, setResourceDescription] = useState("");
-  const [resourceFile, setResourceFile] = useState<File | null>(null);
-  const [resourceFileInputKey, setResourceFileInputKey] = useState(0);
+  const [isPinnedToHome, setIsPinnedToHome] = useState(false);
+  const [updatingHome, setUpdatingHome] = useState(false);
   const showWorkbenchError = workbenchApi.showError;
 
   const stats = useMemo(() => buildProjectStats(tasks, logs), [logs, tasks]);
 
-  const resetResourceDraft = useCallback(() => {
-    setResourceType("webpage");
-    setResourceTitle("");
-    setResourceSource("");
-    setResourceDescription("");
-    setResourceFile(null);
-    setResourceFileInputKey((current) => current + 1);
-  }, []);
+  const loadHomePinState = useCallback(async () => {
+    try {
+      const payload = await api.getAdminHomeConfig();
+      setIsPinnedToHome(isProjectPinnedToHome(payload.value, projectId));
+    } catch {
+      setIsPinnedToHome(false);
+    }
+  }, [projectId]);
 
   const loadProjectWorkspace = useCallback(async () => {
     setLoadingWorkspace(true);
     try {
-      const [taskPayload, logPayload, resourcePayload] = await Promise.all([
+      const [taskPayload, logPayload] = await Promise.all([
         api.listProjectTasks(projectId),
-        api.listProjectLogs(projectId),
-        api.listProjectResources(projectId)
+        api.listProjectLogs(projectId)
       ]);
       setTasks(taskPayload.tasks);
       setLogs(logPayload.logs);
-      setResources(resourcePayload.resources);
       showWorkbenchError(null);
     } catch (error) {
       showWorkbenchError((error as Error).message);
@@ -210,16 +197,29 @@ export function ProjectOverviewEditor({
 
   useEffect(() => {
     setActiveTab("overview");
-    resetResourceDraft();
     void loadProjectWorkspace();
-  }, [loadProjectWorkspace, projectId, resetResourceDraft]);
+    void loadHomePinState();
+  }, [loadHomePinState, loadProjectWorkspace, projectId]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeProjectHomeWidgetsChanged((config) => {
+      if (config) {
+        setIsPinnedToHome(isProjectPinnedToHome(config, projectId));
+        return;
+      }
+
+      void loadHomePinState();
+    });
+
+    return unsubscribe;
+  }, [loadHomePinState, projectId]);
 
   const refreshProjectWorkspace = async () => {
     await Promise.all([loadProjectWorkspace(), workbenchApi.refreshWorkspaceData("projects")]);
   };
 
   const handleDeleteProject = async () => {
-    if (!window.confirm(`Delete project "${parsed.title}"? This will remove its tasks, logs, and resources.`)) {
+    if (!window.confirm(`Delete project "${parsed.title}"? This will remove its tasks and logs.`)) {
       return;
     }
 
@@ -240,7 +240,6 @@ export function ProjectOverviewEditor({
     { id: "overview", label: "Overview" },
     { id: "tasks", label: "Tasks" },
     { id: "logs", label: "Logs" },
-    { id: "resources", label: "Resources" },
     { id: "stats", label: "Stats" }
   ];
 
@@ -368,10 +367,44 @@ export function ProjectOverviewEditor({
               </div>
             </ProjectOverviewSection>
 
+            <ProjectOverviewSection
+              title="Home"
+              toolbar={
+                <button
+                  className="action-button ghost"
+                  onClick={async () => {
+                    setUpdatingHome(true);
+                    try {
+                      const payload = await api.getAdminHomeConfig();
+                      const nextValue = isPinnedToHome
+                        ? removeProjectHomeWidget(payload.value, projectId)
+                        : addProjectHomeWidget(payload.value, projectId);
+                      await api.saveAdminHomeConfig(`${JSON.stringify(nextValue, null, 2)}\n`);
+                      await workbenchApi.refreshWorkspaceData("adminHome");
+                      notifyProjectHomeWidgetsChanged(nextValue);
+                      setIsPinnedToHome(!isPinnedToHome);
+                      workbenchApi.showError(null);
+                    } catch (error) {
+                      workbenchApi.showError((error as Error).message);
+                    } finally {
+                      setUpdatingHome(false);
+                    }
+                  }}
+                  type="button"
+                >
+                  {updatingHome ? "Saving..." : isPinnedToHome ? "Remove from Home" : "Add to Home"}
+                </button>
+              }
+            >
+              <p className="body-muted">
+                Pin this project to the admin home dashboard to keep its current `todo` tasks visible at a glance.
+              </p>
+            </ProjectOverviewSection>
+
             <ProjectOverviewSection title="Danger Zone">
               <div className="project-editor__danger-zone">
                 <p className="body-muted">
-                  Delete this project and all of its tasks, logs, and resources.
+                  Delete this project and all of its task and log files.
                 </p>
                 <button className="action-button danger" onClick={() => void handleDeleteProject()} type="button">
                   Delete Project
@@ -390,14 +423,14 @@ export function ProjectOverviewEditor({
                   <button
                     className="action-button primary"
                     onClick={async () => {
-                      const title = window.prompt("Task title");
-                      if (!title?.trim()) {
+                      const title = await promptCreateProjectTaskTitle(workbenchApi);
+                      if (!title) {
                         return;
                       }
 
-                      workbenchApi.setBusy(`Creating ${title.trim()}...`);
+                      workbenchApi.setBusy(`Creating ${title}...`);
                       try {
-                        const payload = await api.createProjectTask(projectId, title.trim());
+                        const payload = await api.createProjectTask(projectId, title);
                         await refreshProjectWorkspace();
                         await workbenchApi.openResource({
                           kind: "projectTask",
@@ -467,7 +500,10 @@ export function ProjectOverviewEditor({
                   <button
                     className="action-button primary"
                     onClick={async () => {
-                      const type = window.prompt("Log type", "note")?.trim() || "note";
+                      const type = await promptCreateProjectLogType(workbenchApi);
+                      if (!type) {
+                        return;
+                      }
 
                       workbenchApi.setBusy(`Creating ${type} event...`);
                       try {
@@ -523,190 +559,6 @@ export function ProjectOverviewEditor({
                       <span>{entry.excerpt || "Open to add event details."}</span>
                     </button>
                   ))}
-                </div>
-              )}
-            </ProjectOverviewSection>
-          </div>
-        ) : null}
-
-        {activeTab === "resources" ? (
-          <div className="project-overview-stack">
-            <ProjectOverviewSection title="New Resource">
-              <div className="project-editor__resource-form">
-                <div className="project-editor__form-rows">
-                  <div className="project-editor__field-row">
-                    <label className="project-editor__field">
-                      <span>Type</span>
-                      <select
-                        className="project-editor__control"
-                        value={resourceType}
-                        onChange={(event) => setResourceType(event.target.value as ProjectResourceType)}
-                      >
-                        {PROJECT_RESOURCE_TYPE_VALUES.map((type) => (
-                          <option key={type} value={type}>
-                            {type}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="project-editor__field">
-                      <span>Title</span>
-                      <input
-                        className="project-editor__control"
-                        value={resourceTitle}
-                        onChange={(event) => setResourceTitle(event.target.value)}
-                      />
-                    </label>
-                  </div>
-                  <div className="project-editor__field-row">
-                    <label className="project-editor__field">
-                      <span>Source</span>
-                      <input
-                        className="project-editor__control"
-                        placeholder="URL, citation, or note"
-                        value={resourceSource}
-                        onChange={(event) => setResourceSource(event.target.value)}
-                      />
-                    </label>
-                    <label className="project-editor__field">
-                      <span>Description</span>
-                      <input
-                        className="project-editor__control"
-                        value={resourceDescription}
-                        onChange={(event) => setResourceDescription(event.target.value)}
-                      />
-                    </label>
-                  </div>
-                  <div className="project-editor__field-row">
-                    <label className="project-editor__field project-editor__file-field">
-                      <span>Upload File</span>
-                      <input
-                        className="project-editor__control project-editor__control--file"
-                        key={resourceFileInputKey}
-                        onChange={(event) => setResourceFile(event.target.files?.[0] ?? null)}
-                        type="file"
-                      />
-                    </label>
-                  </div>
-                </div>
-                <div className="render-style-actions">
-                  <button
-                    className="action-button primary"
-                    onClick={async () => {
-                      if (!resourceTitle.trim() && !resourceFile) {
-                        workbenchApi.showError("A resource title or uploaded file is required.");
-                        return;
-                      }
-
-                      workbenchApi.setBusy("Creating resource...");
-                      try {
-                        const payload = await api.createProjectResource({
-                          description: resourceDescription.trim() || undefined,
-                          file: resourceFile ? await fileToBase64(resourceFile) : undefined,
-                          projectId,
-                          source: resourceSource.trim() || undefined,
-                          title: resourceTitle.trim() || undefined,
-                          type: resourceType
-                        });
-                        await refreshProjectWorkspace();
-                        await navigator.clipboard.writeText(getProjectResourceReference(payload.value.id));
-                        resetResourceDraft();
-                        workbenchApi.showError(null);
-                      } catch (error) {
-                        workbenchApi.showError((error as Error).message);
-                      } finally {
-                        workbenchApi.setBusy(null);
-                      }
-                    }}
-                    type="button"
-                  >
-                    Create Resource
-                  </button>
-                  <button className="action-button ghost" onClick={resetResourceDraft} type="button">
-                    Clear
-                  </button>
-                </div>
-              </div>
-            </ProjectOverviewSection>
-
-            <ProjectOverviewSection
-              title="Resources"
-              toolbar={
-                <button className="action-button ghost" onClick={() => void refreshProjectWorkspace()} type="button">
-                  Refresh
-                </button>
-              }
-            >
-              {loadingWorkspace ? (
-                <div className="empty-state">Loading resources...</div>
-              ) : resources.length === 0 ? (
-                <div className="empty-state">No resources yet.</div>
-              ) : (
-                <div className="project-editor__list">
-                  {resources.map((resource) => {
-                    const fileUrl = getProjectResourceFileUrl(projectId, resource);
-
-                    return (
-                      <div className="project-resource-card" key={resource.id}>
-                        <div className="project-list-item__row">
-                          <strong>{resource.title}</strong>
-                          <span className="tag-chip">{resource.type}</span>
-                        </div>
-                        <span>{resource.source || "No source provided."}</span>
-                        {resource.description ? <span>{resource.description}</span> : null}
-                        <span>
-                          Ref: <code>{getProjectResourceReference(resource.id)}</code>
-                        </span>
-                        <span>Updated {formatProjectDateTime(resource.updatedAt)}</span>
-                        <div className="render-style-actions">
-                          <button
-                            className="action-button ghost"
-                            onClick={() => void navigator.clipboard.writeText(getProjectResourceReference(resource.id))}
-                            type="button"
-                          >
-                            Copy Ref
-                          </button>
-                          {fileUrl ? (
-                            <a className="action-button ghost project-resource-link" href={fileUrl} target="_blank">
-                              Open File
-                            </a>
-                          ) : null}
-                          {resource.source ? (
-                            <a
-                              className="action-button ghost project-resource-link"
-                              href={resource.source}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Open Source
-                            </a>
-                          ) : null}
-                          <button
-                            className="action-button danger"
-                            onClick={async () => {
-                              if (!window.confirm(`Delete "${resource.title}"?`)) {
-                                return;
-                              }
-
-                              workbenchApi.setBusy(`Deleting ${resource.title}...`);
-                              try {
-                                await api.deleteProjectResource(projectId, resource.id);
-                                await refreshProjectWorkspace();
-                                workbenchApi.showError(null);
-                              } catch (error) {
-                                workbenchApi.showError((error as Error).message);
-                              } finally {
-                                workbenchApi.setBusy(null);
-                              }
-                            }}
-                            type="button"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
                 </div>
               )}
             </ProjectOverviewSection>
@@ -842,7 +694,7 @@ export function ProjectTaskEditor({
           <span>Task Id: {parsed.id}</span>
           <span>Created: {parsed.createdAt || "Not set"}</span>
           <span>Updated: {parsed.updatedAt || "Not set"}</span>
-          <span>Resource refs are indexed from `@resource/...` links in the body.</span>
+          <span>Pasted images are stored in the shared media library as `@media/...` links.</span>
         </div>
       </div>
       <div className="project-editor__body">
@@ -922,7 +774,7 @@ export function ProjectLogEditor({
           <span>Log Id: {parsed.id}</span>
           <span>Created: {parsed.createdAt || "Not set"}</span>
           <span>Updated: {parsed.updatedAt || "Not set"}</span>
-          <span>Resource refs are indexed from `@resource/...` links in the body.</span>
+          <span>Pasted images are stored in the shared media library as `@media/...` links.</span>
         </div>
       </div>
       <div className="project-editor__body">
