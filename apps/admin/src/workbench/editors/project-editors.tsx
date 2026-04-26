@@ -248,10 +248,7 @@ export function ProjectOverviewEditor({
     <div className="project-editor project-editor--overview">
       <div className="project-editor__header">
         <div className="project-editor__header-row">
-          <div>
-            <strong>{parsed.title}</strong>
-            <p className="body-muted">{parsed.id}</p>
-          </div>
+          <strong>{parsed.title}</strong>
           <span className="status-pill info">{parsed.status}</span>
         </div>
         <div className="project-editor__tabs" role="tablist" aria-label="Project overview sections">
@@ -274,67 +271,75 @@ export function ProjectOverviewEditor({
         {activeTab === "overview" ? (
           <div className="project-overview-stack">
             <ProjectOverviewSection title="Project Details">
-              <div className="project-editor__field-grid">
-                <label>
-                  <span>Title</span>
-                  <input
-                    value={parsed.title}
-                    onChange={(event) =>
-                      onChange(
-                        updateProjectDocument(projectDocument, value, {
-                          title: event.target.value
-                        })
-                      )
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Status</span>
-                  <select
-                    value={parsed.status}
-                    onChange={(event) =>
-                      onChange(
-                        updateProjectDocument(projectDocument, value, {
-                          status: event.target.value as (typeof PROJECT_STATUS_VALUES)[number]
-                        })
-                      )
-                    }
-                  >
-                    {PROJECT_STATUS_VALUES.map((status) => (
-                      <option key={status} value={status}>
-                        {status}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>Start Date</span>
-                  <input
-                    type="date"
-                    value={parsed.startDate}
-                    onChange={(event) =>
-                      onChange(
-                        updateProjectDocument(projectDocument, value, {
-                          startDate: event.target.value
-                        })
-                      )
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Target Date</span>
-                  <input
-                    type="date"
-                    value={parsed.targetDate}
-                    onChange={(event) =>
-                      onChange(
-                        updateProjectDocument(projectDocument, value, {
-                          targetDate: event.target.value
-                        })
-                      )
-                    }
-                  />
-                </label>
+              <div className="project-editor__form-rows">
+                <div className="project-editor__field-row">
+                  <label className="project-editor__field">
+                    <span>Title</span>
+                    <input
+                      className="project-editor__control"
+                      value={parsed.title}
+                      onChange={(event) =>
+                        onChange(
+                          updateProjectDocument(projectDocument, value, {
+                            title: event.target.value
+                          })
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="project-editor__field">
+                    <span>Status</span>
+                    <select
+                      className="project-editor__control"
+                      value={parsed.status}
+                      onChange={(event) =>
+                        onChange(
+                          updateProjectDocument(projectDocument, value, {
+                            status: event.target.value as (typeof PROJECT_STATUS_VALUES)[number]
+                          })
+                        )
+                      }
+                    >
+                      {PROJECT_STATUS_VALUES.map((status) => (
+                        <option key={status} value={status}>
+                          {status}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="project-editor__field-row">
+                  <label className="project-editor__field">
+                    <span>Start Date</span>
+                    <input
+                      className="project-editor__control"
+                      type="date"
+                      value={parsed.startDate}
+                      onChange={(event) =>
+                        onChange(
+                          updateProjectDocument(projectDocument, value, {
+                            startDate: event.target.value
+                          })
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="project-editor__field">
+                    <span>Target Date</span>
+                    <input
+                      className="project-editor__control"
+                      type="date"
+                      value={parsed.targetDate}
+                      onChange={(event) =>
+                        onChange(
+                          updateProjectDocument(projectDocument, value, {
+                            targetDate: event.target.value
+                          })
+                        )
+                      }
+                    />
+                  </label>
+                </div>
               </div>
             </ProjectOverviewSection>
 
@@ -528,47 +533,61 @@ export function ProjectOverviewEditor({
           <div className="project-overview-stack">
             <ProjectOverviewSection title="New Resource">
               <div className="project-editor__resource-form">
-                <div className="project-editor__field-grid">
-                  <label>
-                    <span>Type</span>
-                    <select
-                      value={resourceType}
-                      onChange={(event) => setResourceType(event.target.value as ProjectResourceType)}
-                    >
-                      {PROJECT_RESOURCE_TYPE_VALUES.map((type) => (
-                        <option key={type} value={type}>
-                          {type}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Title</span>
-                    <input value={resourceTitle} onChange={(event) => setResourceTitle(event.target.value)} />
-                  </label>
-                  <label>
-                    <span>Source</span>
-                    <input
-                      placeholder="URL, citation, or note"
-                      value={resourceSource}
-                      onChange={(event) => setResourceSource(event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Description</span>
-                    <input
-                      value={resourceDescription}
-                      onChange={(event) => setResourceDescription(event.target.value)}
-                    />
-                  </label>
-                  <label className="project-editor__file-field">
-                    <span>Upload File</span>
-                    <input
-                      key={resourceFileInputKey}
-                      onChange={(event) => setResourceFile(event.target.files?.[0] ?? null)}
-                      type="file"
-                    />
-                  </label>
+                <div className="project-editor__form-rows">
+                  <div className="project-editor__field-row">
+                    <label className="project-editor__field">
+                      <span>Type</span>
+                      <select
+                        className="project-editor__control"
+                        value={resourceType}
+                        onChange={(event) => setResourceType(event.target.value as ProjectResourceType)}
+                      >
+                        {PROJECT_RESOURCE_TYPE_VALUES.map((type) => (
+                          <option key={type} value={type}>
+                            {type}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="project-editor__field">
+                      <span>Title</span>
+                      <input
+                        className="project-editor__control"
+                        value={resourceTitle}
+                        onChange={(event) => setResourceTitle(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="project-editor__field-row">
+                    <label className="project-editor__field">
+                      <span>Source</span>
+                      <input
+                        className="project-editor__control"
+                        placeholder="URL, citation, or note"
+                        value={resourceSource}
+                        onChange={(event) => setResourceSource(event.target.value)}
+                      />
+                    </label>
+                    <label className="project-editor__field">
+                      <span>Description</span>
+                      <input
+                        className="project-editor__control"
+                        value={resourceDescription}
+                        onChange={(event) => setResourceDescription(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="project-editor__field-row">
+                    <label className="project-editor__field project-editor__file-field">
+                      <span>Upload File</span>
+                      <input
+                        className="project-editor__control project-editor__control--file"
+                        key={resourceFileInputKey}
+                        onChange={(event) => setResourceFile(event.target.files?.[0] ?? null)}
+                        type="file"
+                      />
+                    </label>
+                  </div>
                 </div>
                 <div className="render-style-actions">
                   <button

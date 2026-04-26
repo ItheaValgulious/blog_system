@@ -41,6 +41,7 @@ import {
 } from "./api";
 import { jsonSchemas } from "./editor-config-schema";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
+import { installMarkdownMathTokenization } from "./markdown-math-tokenization";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
@@ -79,6 +80,7 @@ import {
 } from "./workbench/project-utils";
 
 loader.config({ monaco: monacoEditor });
+void installMarkdownMathTokenization(monacoEditor);
 
 const PREVIEW_UPDATE_DEBOUNCE_MS = 180;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";

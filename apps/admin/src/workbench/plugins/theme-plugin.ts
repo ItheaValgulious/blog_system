@@ -2,7 +2,6 @@ import type { PluginDefinition } from "../types";
 import { ThemePane } from "../panes/theme-pane";
 import { atelierLightTheme } from "../theme/atelier-light";
 import { evaDarkTheme } from "../theme/eva-dark";
-import { harborNightTheme } from "../theme/harbor-night";
 
 export const themePlugin: PluginDefinition = {
   id: "theme-system",
@@ -11,7 +10,6 @@ export const themePlugin: PluginDefinition = {
   activate(context) {
     context.registerTheme(evaDarkTheme);
     context.registerTheme(atelierLightTheme);
-    context.registerTheme(harborNightTheme);
     context.registerCommand({
       id: "preferences.changeTheme",
       title: "Preferences: Change Theme",

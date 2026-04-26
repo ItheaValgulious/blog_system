@@ -74,10 +74,7 @@ export function ProjectOverviewPane({
         ) : (
           <div className="project-summary-card">
             <div className="project-summary-card__header">
-              <div>
-                <strong>{selectedProject.title}</strong>
-                <p className="body-muted">{selectedProject.id}</p>
-              </div>
+              <strong>{selectedProject.title}</strong>
               <span className="status-pill info">{selectedProject.status || "active"}</span>
             </div>
             <div className="project-summary-card__meta">
