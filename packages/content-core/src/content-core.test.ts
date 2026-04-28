@@ -153,6 +153,7 @@ test("project task parsing infers title from the body heading", () => {
     `---
 status: todo
 order: 2
+parentTaskId: Demo Parent
 ---
 
 # Draft Task
@@ -163,6 +164,7 @@ Body`
   assert.equal(record.id, "draft-task");
   assert.equal(record.title, "Draft Task");
   assert.equal(record.order, 2);
+  assert.equal(record.parentTaskId, "demo-parent");
 });
 
 test("project parsing normalizes unknown status to active", () => {
@@ -209,7 +211,7 @@ test("project log parsing builds a title from the first heading", () => {
     `---
 type: progress
 taskIds:
-  - task-a
+  - Task A
 ---
 
 ## Finished the integration

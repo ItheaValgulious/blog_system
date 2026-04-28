@@ -9,6 +9,7 @@ import {
   notifyProjectHomeWidgetsChanged,
   removeProjectHomeWidget
 } from "./workbench/project-utils";
+import { buildProjectTaskRows } from "./workbench/project-task-utils";
 
 import type { HomeWidgetContributionDefinition, WorkbenchApi } from "./workbench/types";
 
@@ -134,7 +135,7 @@ export function HomeDashboard({ onChange, value, widgets, workbenchApi }: HomeDa
               error: null,
               loading: false,
               project: projectPayload.value,
-              tasks: taskPayload.tasks.filter((task) => task.status === "todo")
+              tasks: taskPayload.tasks
             }
           ] satisfies [string, ProjectHomeWidgetData];
         } catch (error) {
@@ -245,6 +246,10 @@ export function HomeDashboard({ onChange, value, widgets, workbenchApi }: HomeDa
                   const widgetData = projectWidgetData[widget.projectId];
                   const project = widgetData?.project;
                   const tasks = widgetData?.tasks ?? [];
+                  const taskRows = buildProjectTaskRows(tasks, {
+                    include: (task) => task.status === "todo",
+                    promoteHiddenParents: true
+                  });
                   const isLoading = widgetData?.loading ?? true;
                   const errorMessage = widgetData?.error;
 
@@ -268,26 +273,29 @@ export function HomeDashboard({ onChange, value, widgets, workbenchApi }: HomeDa
                           <p className="body-muted">Loading tasks...</p>
                         ) : errorMessage ? (
                           <p className="body-muted">{errorMessage}</p>
-                        ) : tasks.length === 0 ? (
+                        ) : taskRows.length === 0 ? (
                           <p className="body-muted">No todo tasks.</p>
                         ) : (
                           <div className="home-project-widget__tasks">
-                            {tasks.map((task) => (
+                            {taskRows.map((row) => (
                               <button
                                 className="home-project-widget__task"
-                                key={task.id}
+                                key={row.task.id}
                                 onClick={() =>
                                   void workbenchApi.openResource({
                                     kind: "projectTask",
                                     projectId: widget.projectId,
-                                    taskId: task.id
+                                    taskId: row.task.id
                                   })
                                 }
+                                style={{ paddingLeft: `${12 + row.depth * 16}px` }}
                                 type="button"
                               >
-                                <strong>{task.title}</strong>
+                                <strong>{row.task.title}</strong>
                                 <span>
-                                  {task.dueDate ? `Due ${formatProjectDate(task.dueDate)}` : task.excerpt || "Open task"}
+                                  {row.task.dueDate
+                                    ? `Due ${formatProjectDate(row.task.dueDate)}`
+                                    : row.task.excerpt || "Open task"}
                                 </span>
                               </button>
                             ))}

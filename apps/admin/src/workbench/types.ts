@@ -4,6 +4,7 @@ import type * as monacoEditor from "monaco-editor";
 import type {
   AdminHomeConfig,
   ArticleRecord,
+  ArticleSummary,
   EditorKeybinding,
   EditorSnippet,
   ProjectLogRecord,
@@ -189,6 +190,7 @@ export interface HomeWidgetContributionDefinition extends WorkbenchContributionD
 export interface WorkbenchEditorComponentProps {
   api: WorkbenchApi;
   adminHomeValue: AdminHomeConfig | null;
+  articleSummaries: ArticleSummary[];
   document: WorkbenchDocument;
   homeWidgets: HomeWidgetContributionDefinition[];
   onChange: (nextValue: string) => void;

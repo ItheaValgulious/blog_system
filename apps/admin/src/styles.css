@@ -772,6 +772,7 @@ a {
 
 .command-palette-input,
 .dialog-card input,
+.dialog-card select,
 .sidebar-section input,
 .sidebar-section select,
 .login-form input {
@@ -788,6 +789,7 @@ a {
 
 .command-palette-input:focus-visible,
 .dialog-card input:focus-visible,
+.dialog-card select:focus-visible,
 .sidebar-section input:focus-visible,
 .sidebar-section select:focus-visible,
 .login-form input:focus-visible,
@@ -1283,6 +1285,26 @@ a {
 
 .project-list-item {
   gap: 6px;
+}
+
+.project-list-item__content {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.project-task-label {
+  display: inline-block;
+  min-width: 0;
+}
+
+.project-editor__linked-resources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--wb-foreground-muted);
+  font-size: 0.76rem;
 }
 
 .project-stat-grid {

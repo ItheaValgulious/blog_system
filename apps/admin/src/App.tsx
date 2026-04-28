@@ -77,6 +77,10 @@ import {
   PROJECT_MODULE_ID,
   PROJECT_OVERVIEW_PANE_ID
 } from "./workbench/project-utils";
+import {
+  getProjectTaskNoteQuery,
+  getProjectTaskNoteSuggestions
+} from "./workbench/project-task-utils";
 
 loader.config({ monaco: monacoEditor });
 void installMarkdownMathTokenization(monacoEditor);
@@ -703,6 +707,10 @@ function isProjectTaskDocument(document: WorkbenchDocument | null): document is 
 
 function isProjectLogDocument(document: WorkbenchDocument | null): document is ProjectLogWorkbenchDocument {
   return Boolean(document && document.kind === "projectLog");
+}
+
+function isMarkdownCompletionDocument(document: WorkbenchDocument | null) {
+  return isArticleDocument(document) || isProjectTaskDocument(document);
 }
 
 function buildNormalizedEditorConfig(configPayload: EditorConfigPayload | null): NormalizedEditorConfig {
@@ -3525,7 +3533,39 @@ export function App() {
     const markdownSymbolTriggerCharacters = getSymbolTriggerCharacters(normalizedConfig.markdownSnippets);
     const latexSymbolTriggerCharacters = getSymbolTriggerCharacters(normalizedConfig.latexSnippets);
     const completionProvider = monaco.languages.registerCompletionItemProvider("markdown", {
+      triggerCharacters: ["@"],
       provideCompletionItems(model, position) {
+        const linePrefix = model.getValueInRange(new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column));
+
+        if (isProjectTaskDocument(activeDocument)) {
+          const noteQuery = getProjectTaskNoteQuery(linePrefix);
+          if (!noteQuery) {
+            return { suggestions: [] };
+          }
+
+          const suggestions = getProjectTaskNoteSuggestions(noteQuery.query, treePayload?.articles ?? []).map(
+            (article, index) => ({
+              detail: article.path,
+              filterText: `${article.title} ${article.path} @note`.trim(),
+              insertText: `@note/${article.title} `,
+              kind: monaco.languages.CompletionItemKind.Reference,
+              label: {
+                description: article.path,
+                label: article.title
+              },
+              range: new monaco.Range(
+                position.lineNumber,
+                Math.max(1, position.column - noteQuery.replacementText.length),
+                position.lineNumber,
+                position.column
+              ),
+              sortText: `0-${String(index).padStart(4, "0")}`
+            })
+          );
+
+          return { suggestions };
+        }
+
         if (!isArticleDocument(activeDocument)) {
           return { suggestions: [] };
         }
@@ -3534,7 +3574,6 @@ export function App() {
           snippetLanguage === "latex" ? normalizedConfig.latexSnippets : normalizedConfig.markdownSnippets,
           snippetLanguage
         );
-        const linePrefix = model.getValueInRange(new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column));
         const trailingWord = /[A-Za-z0-9_-]+$/.exec(linePrefix)?.[0] ?? "";
         const symbolSuffix = getSymbolSuffix(linePrefix);
         const suggestions: monacoEditor.languages.CompletionItem[] = [];
@@ -3595,7 +3634,7 @@ export function App() {
         textInputFocus: editorHasTextFocus,
         inputFocus: editorHasTextFocus,
         editorReadonly: editor.getOption(monaco.editor.EditorOption.readOnly),
-        editorHasCompletionItemProvider: isArticleDocument(activeDocument),
+        editorHasCompletionItemProvider: isMarkdownCompletionDocument(activeDocument),
         suggestWidgetVisible: Boolean(domNode?.querySelector(".suggest-widget.visible")),
         editorHasMultipleSelections: (editor.getSelections()?.length ?? 0) > 1,
         editorHasSelection: hasSelection,
@@ -3733,7 +3772,26 @@ export function App() {
       }
     };
     const typeDisposable = editor.onDidType((text) => {
-      if (!isArticleDocument(activeDocument) || text.length !== 1) {
+      if (text.length !== 1) {
+        return;
+      }
+
+      if (isProjectTaskDocument(activeDocument)) {
+        if (text !== "@") {
+          return;
+        }
+
+        queueMicrotask(() => {
+          if (!editor.hasTextFocus()) {
+            return;
+          }
+
+          editor.trigger("keyboard", "editor.action.triggerSuggest", {});
+        });
+        return;
+      }
+
+      if (!isArticleDocument(activeDocument)) {
         return;
       }
 
@@ -3816,7 +3874,7 @@ export function App() {
       textarea?.removeEventListener("paste", pasteListener, true);
       window.removeEventListener("paste", pasteListener, true);
     };
-  }, [activeDocument, editorReadyVersion, normalizedConfig, pluginRuntime]);
+  }, [activeDocument, editorReadyVersion, normalizedConfig, pluginRuntime, treePayload?.articles]);
 
   const renderFileNode = (node: FileSystemNode): JSX.Element | null => {
     if (!filterFileTreeNode(node, deferredSearchQuery, tagFilter, statusFilter)) {
@@ -4664,6 +4722,7 @@ export function App() {
                   <ActiveEditorComponent
                     api={workbenchApi}
                     adminHomeValue={adminHomePayload?.value ?? null}
+                    articleSummaries={treePayload?.articles ?? []}
                     document={activeDocument}
                     homeWidgets={homeWidgetContributions}
                     onChange={handleDocumentValueChange}

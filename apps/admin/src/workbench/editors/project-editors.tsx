@@ -26,6 +26,13 @@ import {
   removeProjectHomeWidget
 } from "../project-utils";
 import { subscribeProjectHomeWidgetsChanged } from "../project-utils";
+import {
+  buildProjectTaskRows,
+  findProjectTaskDescendantIds,
+  formatProjectTaskOptionLabel,
+  formatProjectTaskReferences,
+  resolveProjectTaskNoteLinks
+} from "../project-task-utils";
 import type { WorkbenchEditorComponentProps } from "../types";
 import type {
   ProjectLogWorkbenchDocument,
@@ -33,8 +40,9 @@ import type {
   ProjectWorkbenchDocument
 } from "../types";
 import {
-  promptCreateProjectLogType,
-  promptCreateProjectTaskTitle
+  ProjectLogCreateDialog,
+  promptCreateProjectTaskTitle,
+  useProjectTasks
 } from "../panes/project-pane-shared";
 
 type ProjectOverviewTab = "overview" | "tasks" | "logs" | "stats";
@@ -108,13 +116,6 @@ function updateLogDocument(
   });
 }
 
-function splitCommaSeparated(value: string) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function buildProjectStats(tasks: ProjectTaskRecord[], logs: ProjectLogRecord[]) {
   const cutoff = Date.now() - PROJECT_RECENT_ACTIVITY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
@@ -165,9 +166,12 @@ export function ProjectOverviewEditor({
   const [logs, setLogs] = useState<ProjectLogRecord[]>([]);
   const [isPinnedToHome, setIsPinnedToHome] = useState(false);
   const [updatingHome, setUpdatingHome] = useState(false);
+  const [createLogDialogOpen, setCreateLogDialogOpen] = useState(false);
   const showWorkbenchError = workbenchApi.showError;
 
   const stats = useMemo(() => buildProjectStats(tasks, logs), [logs, tasks]);
+  const taskRows = useMemo(() => buildProjectTaskRows(tasks), [tasks]);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   const loadHomePinState = useCallback(async () => {
     try {
@@ -460,29 +464,31 @@ export function ProjectOverviewEditor({
                 <div className="empty-state">No tasks yet.</div>
               ) : (
                 <div className="project-editor__list">
-                  {tasks.map((task) => (
+                  {taskRows.map((row) => (
                     <button
                       className="search-result project-list-item"
-                      key={task.id}
+                      key={row.task.id}
                       onClick={() =>
                         void workbenchApi.openResource({
                           kind: "projectTask",
                           projectId,
-                          taskId: task.id
+                          taskId: row.task.id
                         })
                       }
                       type="button"
                     >
-                      <div className="project-list-item__row">
-                        <strong>{task.title}</strong>
-                        <span className="status-pill info">{task.status}</span>
+                      <div className="project-list-item__content" style={{ paddingLeft: `${row.depth * 18}px` }}>
+                        <div className="project-list-item__row">
+                          <strong className="project-task-label">{row.task.title}</strong>
+                          <span className="status-pill info">{row.task.status}</span>
+                        </div>
+                        <span>
+                          Order {row.task.order} | Start {formatProjectDate(row.task.startDate)} | Due{" "}
+                          {formatProjectDate(row.task.dueDate)}
+                        </span>
+                        <span>{row.task.excerpt || "Open to add details."}</span>
+                        <span>Updated {formatProjectDateTime(row.task.updatedAt)}</span>
                       </div>
-                      <span>
-                        Order {task.order} | Start {formatProjectDate(task.startDate)} | Due{" "}
-                        {formatProjectDate(task.dueDate)}
-                      </span>
-                      <span>{task.excerpt || "Open to add details."}</span>
-                      <span>Updated {formatProjectDateTime(task.updatedAt)}</span>
                     </button>
                   ))}
                 </div>
@@ -500,26 +506,12 @@ export function ProjectOverviewEditor({
                   <button
                     className="action-button primary"
                     onClick={async () => {
-                      const type = await promptCreateProjectLogType(workbenchApi);
-                      if (!type) {
+                      if (tasks.filter((task) => task.status === "todo").length === 0) {
+                        workbenchApi.showError("Create a todo task before adding a project log.");
                         return;
                       }
 
-                      workbenchApi.setBusy(`Creating ${type} event...`);
-                      try {
-                        const payload = await api.createProjectLog(projectId, type);
-                        await refreshProjectWorkspace();
-                        await workbenchApi.openResource({
-                          kind: "projectLog",
-                          logId: payload.value.id,
-                          projectId: payload.projectId
-                        });
-                        workbenchApi.showError(null);
-                      } catch (error) {
-                        workbenchApi.showError((error as Error).message);
-                      } finally {
-                        workbenchApi.setBusy(null);
-                      }
+                      setCreateLogDialogOpen(true);
                     }}
                     type="button"
                   >
@@ -555,7 +547,7 @@ export function ProjectOverviewEditor({
                         <span className="tag-chip">{entry.type || "note"}</span>
                       </div>
                       <span>Occurred {formatProjectDateTime(entry.occurredAt)}</span>
-                      {entry.taskIds.length > 0 ? <span>Tasks: {entry.taskIds.join(", ")}</span> : null}
+                      {entry.taskIds.length > 0 ? <span>Tasks: {formatProjectTaskReferences(entry.taskIds, taskById)}</span> : null}
                       <span>{entry.excerpt || "Open to add event details."}</span>
                     </button>
                   ))}
@@ -597,11 +589,39 @@ export function ProjectOverviewEditor({
           </div>
         ) : null}
       </div>
+      <ProjectLogCreateDialog
+        open={createLogDialogOpen}
+        tasks={tasks}
+        onCancel={() => setCreateLogDialogOpen(false)}
+        onConfirm={({ taskId, type }) => {
+          workbenchApi.setBusy(`Creating ${type} event...`);
+          void api
+            .createProjectLog(projectId, { taskId, type })
+            .then(async (payload) => {
+              await refreshProjectWorkspace();
+              await workbenchApi.openResource({
+                kind: "projectLog",
+                logId: payload.value.id,
+                projectId: payload.projectId
+              });
+              workbenchApi.showError(null);
+              setCreateLogDialogOpen(false);
+            })
+            .catch((error) => {
+              workbenchApi.showError((error as Error).message);
+            })
+            .finally(() => {
+              workbenchApi.setBusy(null);
+            });
+        }}
+      />
     </div>
   );
 }
 
 export function ProjectTaskEditor({
+  api: workbenchApi,
+  articleSummaries,
   document,
   onChange,
   onMount,
@@ -610,6 +630,19 @@ export function ProjectTaskEditor({
 }: WorkbenchEditorComponentProps) {
   const taskDocument = document as ProjectTaskWorkbenchDocument;
   const parsed = parseProjectTaskRecord(taskDocument.taskId, value);
+  const { tasks } = useProjectTasks(taskDocument.projectId, workbenchApi);
+  const descendantTaskIds = useMemo(() => findProjectTaskDescendantIds(tasks, parsed.id), [parsed.id, tasks]);
+  const parentTaskRows = useMemo(
+    () =>
+      buildProjectTaskRows(tasks, {
+        include: (task) => task.id !== parsed.id && !descendantTaskIds.has(task.id)
+      }),
+    [descendantTaskIds, parsed.id, tasks]
+  );
+  const linkedNotes = useMemo(
+    () => resolveProjectTaskNoteLinks(parsed.body, articleSummaries),
+    [articleSummaries, parsed.body]
+  );
 
   return (
     <div className="project-editor project-editor--with-body">
@@ -662,6 +695,26 @@ export function ProjectTaskEditor({
             />
           </label>
           <label>
+            <span>Parent Task</span>
+            <select
+              value={parsed.parentTaskId}
+              onChange={(event) =>
+                onChange(
+                  updateTaskDocument(taskDocument, value, {
+                    parentTaskId: event.target.value
+                  })
+                )
+              }
+            >
+              <option value="">No parent task</option>
+              {parentTaskRows.map((row) => (
+                <option key={row.task.id} value={row.task.id}>
+                  {formatProjectTaskOptionLabel(row.task, row.depth)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             <span>Start Date</span>
             <input
               type="date"
@@ -694,8 +747,31 @@ export function ProjectTaskEditor({
           <span>Task Id: {parsed.id}</span>
           <span>Created: {parsed.createdAt || "Not set"}</span>
           <span>Updated: {parsed.updatedAt || "Not set"}</span>
+          <span>Type `@` to link notes as `@note/Note Title`.</span>
           <span>Pasted images are stored in the shared media library as `@media/...` links.</span>
         </div>
+        {linkedNotes.length > 0 ? (
+          <div className="project-editor__linked-resources">
+            <span>Linked Notes</span>
+            <div className="render-style-actions">
+              {linkedNotes.map((entry) => (
+                <button
+                  className="action-button ghost"
+                  key={entry.article.path}
+                  onClick={() =>
+                    void workbenchApi.openResource({
+                      articlePath: entry.article.path,
+                      kind: "article"
+                    })
+                  }
+                  type="button"
+                >
+                  {entry.article.title}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
       <div className="project-editor__body">
         {renderMarkdownBodyEditor(
@@ -716,6 +792,7 @@ export function ProjectTaskEditor({
 }
 
 export function ProjectLogEditor({
+  api: workbenchApi,
   document,
   onChange,
   onMount,
@@ -724,6 +801,16 @@ export function ProjectLogEditor({
 }: WorkbenchEditorComponentProps) {
   const logDocument = document as ProjectLogWorkbenchDocument;
   const parsed = parseProjectLogRecord(logDocument.logId, value);
+  const { tasks } = useProjectTasks(logDocument.projectId, workbenchApi);
+  const selectedTaskId = parsed.taskIds[0] ?? "";
+  const taskRows = useMemo(
+    () =>
+      buildProjectTaskRows(tasks, {
+        include: (task) => task.status === "todo" || task.id === selectedTaskId,
+        promoteHiddenParents: true
+      }),
+    [selectedTaskId, tasks]
+  );
 
   return (
     <div className="project-editor project-editor--with-body">
@@ -757,17 +844,24 @@ export function ProjectLogEditor({
             />
           </label>
           <label>
-            <span>Task Ids</span>
-            <input
-              value={parsed.taskIds.join(", ")}
+            <span>Task</span>
+            <select
+              value={selectedTaskId}
               onChange={(event) =>
                 onChange(
                   updateLogDocument(logDocument, value, {
-                    taskIds: splitCommaSeparated(event.target.value)
+                    taskIds: event.target.value ? [event.target.value] : []
                   })
                 )
               }
-            />
+            >
+              <option value="">{taskRows.length === 0 ? "No todo tasks available" : "Select a todo task"}</option>
+              {taskRows.map((row) => (
+                <option key={row.task.id} value={row.task.id}>
+                  {formatProjectTaskOptionLabel(row.task, row.depth)}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
         <div className="project-editor__meta">

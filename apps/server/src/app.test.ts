@@ -377,6 +377,14 @@ test("project endpoints create tasks, logs, and derived stats", async () => {
     })
     .expect(200);
 
+  const createdChildTask = await agent
+    .post("/api/project/task/create")
+    .send({
+      projectId: "demo-project",
+      title: "Write tests"
+    })
+    .expect(200);
+
   const savedTask = await agent
     .put("/api/project/task")
     .send({
@@ -388,13 +396,27 @@ test("project endpoints create tasks, logs, and derived stats", async () => {
 
   assert.equal(savedTask.body.value.status, "todo");
 
+  const savedChildTask = await agent
+    .put("/api/project/task")
+    .send({
+      projectId: "demo-project",
+      taskId: createdChildTask.body.value.id,
+      raw: (createdChildTask.body.raw as string).replace("parentTaskId: ''", `parentTaskId: ${createdTask.body.value.id}`)
+    })
+    .expect(200);
+
+  assert.equal(savedChildTask.body.value.parentTaskId, createdTask.body.value.id);
+
   const createdLog = await agent
     .post("/api/project/log/create")
     .send({
       projectId: "demo-project",
+      taskId: createdTask.body.value.id,
       type: "progress"
     })
     .expect(200);
+
+  assert.deepEqual(createdLog.body.value.taskIds, [createdTask.body.value.id]);
 
   const savedLog = await agent
     .put("/api/project/log")
@@ -407,7 +429,7 @@ test("project endpoints create tasks, logs, and derived stats", async () => {
   assert.equal(savedLog.body.value.type, "progress");
 
   const listedProjects = await agent.get("/api/projects").expect(200);
-  assert.equal(listedProjects.body.projects[0].taskCount, 1);
+  assert.equal(listedProjects.body.projects[0].taskCount, 2);
   assert.equal(listedProjects.body.projects[0].completedTaskCount, 0);
   assert.equal(listedProjects.body.projects[0].recentActivityCount, 1);
 });

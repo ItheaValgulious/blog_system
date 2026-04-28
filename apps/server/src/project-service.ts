@@ -222,6 +222,38 @@ async function createUniqueEntryId(directory: string, baseValue: string, extensi
   return nextId;
 }
 
+function filterExistingTaskIds(taskIds: string[], tasks: ProjectTaskRecord[]) {
+  const validTaskIds = new Set(tasks.map((task) => task.id));
+  return taskIds.filter((taskId, index) => validTaskIds.has(taskId) && taskIds.indexOf(taskId) === index);
+}
+
+function resolveParentTaskId(taskId: string, candidateParentTaskId: string, tasks: ProjectTaskRecord[]) {
+  if (!candidateParentTaskId || candidateParentTaskId === taskId) {
+    return "";
+  }
+
+  const taskIds = new Set(tasks.map((task) => task.id));
+  if (!taskIds.has(candidateParentTaskId)) {
+    return "";
+  }
+
+  const parentByTaskId = new Map(tasks.map((task) => [task.id, task.parentTaskId]));
+  parentByTaskId.set(taskId, candidateParentTaskId);
+  const visited = new Set<string>([taskId]);
+  let cursor = candidateParentTaskId;
+
+  while (cursor) {
+    if (visited.has(cursor)) {
+      return "";
+    }
+
+    visited.add(cursor);
+    cursor = parentByTaskId.get(cursor) || "";
+  }
+
+  return candidateParentTaskId;
+}
+
 function buildProjectSummary(record: ProjectRecord, stats: ProjectStats): ProjectSummary {
   return {
     ...record,
@@ -236,6 +268,7 @@ function buildProjectTaskTemplate(taskId: string, title: string, order: number) 
     title,
     status: "todo",
     order,
+    parentTaskId: "",
     startDate: getTodayDate(),
     dueDate: "",
     createdAt: now,
@@ -246,12 +279,12 @@ function buildProjectTaskTemplate(taskId: string, title: string, order: number) 
   });
 }
 
-function buildProjectLogTemplate(logId: string, type: string) {
+function buildProjectLogTemplate(logId: string, type: string, taskIds: string[]) {
   const now = new Date().toISOString();
   return serializeProjectLogRecord({
     id: logId,
     type,
-    taskIds: [],
+    taskIds,
     occurredAt: now,
     createdAt: now,
     updatedAt: now,
@@ -436,13 +469,15 @@ export async function saveProjectTask(
     }
   );
   const parsed = parseProjectTaskRecord(normalizedTaskId, raw);
+  const existingTasks = await readProjectTasks(projectsRoot, projectId);
   const now = new Date().toISOString();
   const nextRecord: ProjectTaskRecord = {
     ...parsed,
     id: normalizedTaskId,
     createdAt: existing?.value.createdAt || now,
     updatedAt: now,
-    order: parsed.order || existing?.value.order || 1
+    order: parsed.order || existing?.value.order || 1,
+    parentTaskId: resolveParentTaskId(normalizedTaskId, parsed.parentTaskId, existingTasks)
   };
   const paths = await ensureProjectStructure(projectsRoot, projectId);
   await fs.writeFile(
@@ -464,12 +499,17 @@ export async function listProjectLogs(projectsRoot: string, projectId: string) {
 export async function createProjectLog(
   projectsRoot: string,
   projectId: string,
-  input?: { type?: string }
+  input?: { taskId?: string; taskIds?: string[]; type?: string }
 ) {
   const paths = await ensureProjectStructure(projectsRoot, projectId);
   const type = input?.type?.trim() || "note";
+  const tasks = await readProjectTasks(projectsRoot, projectId);
+  const taskIds = filterExistingTaskIds(
+    input?.taskIds?.length ? input.taskIds : input?.taskId ? [input.taskId] : [],
+    tasks
+  );
   const logId = createTimestampId("event");
-  const raw = buildProjectLogTemplate(logId, type);
+  const raw = buildProjectLogTemplate(logId, type, taskIds);
   await fs.writeFile(path.join(paths.logsDirectory, `${logId}.md`), raw, "utf8");
   return readProjectLog(projectsRoot, projectId, logId);
 }
@@ -507,10 +547,12 @@ export async function saveProjectLog(
     }
   );
   const parsed = parseProjectLogRecord(normalizedLogId, raw);
+  const tasks = await readProjectTasks(projectsRoot, projectId);
   const now = new Date().toISOString();
   const nextRecord: ProjectLogRecord = {
     ...parsed,
     id: normalizedLogId,
+    taskIds: filterExistingTaskIds(parsed.taskIds, tasks),
     createdAt: existing?.value.createdAt || now,
     updatedAt: now,
     occurredAt: parsed.occurredAt || existing?.value.occurredAt || now

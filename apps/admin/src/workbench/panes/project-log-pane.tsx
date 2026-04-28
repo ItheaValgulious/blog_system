@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { ProjectLogRecord } from "@blog-system/content-core";
 
 import { api } from "../../api";
 
 import { formatProjectDateTime } from "../project-utils";
+import { formatProjectTaskReferences } from "../project-task-utils";
 import type { PaneComponentProps } from "../types";
 import {
+  ProjectLogCreateDialog,
   promptCreateProject,
-  promptCreateProjectLogType,
-  useProjectSelection
+  useProjectSelection,
+  useProjectTasks
 } from "./project-pane-shared";
 
 export function ProjectLogPane({
@@ -25,8 +27,11 @@ export function ProjectLogPane({
     selectedProjectId,
     setSelectedProjectId
   } = useProjectSelection(activeDocument, workbenchApi, availableProjects);
+  const { loadTasks, loadingTasks, tasks } = useProjectTasks(selectedProjectId, workbenchApi);
   const [logs, setLogs] = useState<ProjectLogRecord[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   const loadLogs = useCallback(async () => {
     if (!selectedProjectId) {
@@ -56,6 +61,7 @@ export function ProjectLogPane({
     await Promise.all([
       loadProjects(),
       loadLogs(),
+      loadTasks(),
       workbenchApi.refreshWorkspaceData("projects")
     ]);
   };
@@ -81,26 +87,15 @@ export function ProjectLogPane({
                   await refresh();
                 }
 
-                const type = await promptCreateProjectLogType(workbenchApi);
-                if (!type) {
+                const todoTaskCount = (targetProjectId === selectedProjectId ? tasks : await loadTasks()).filter(
+                  (task) => task.status === "todo"
+                ).length;
+                if (todoTaskCount === 0) {
+                  workbenchApi.showError("Create a todo task before adding a project log.");
                   return;
                 }
 
-                workbenchApi.setBusy(`Creating ${type} event...`);
-                try {
-                  const payload = await api.createProjectLog(targetProjectId, type);
-                  await refresh();
-                  await workbenchApi.openResource({
-                    kind: "projectLog",
-                    logId: payload.value.id,
-                    projectId: payload.projectId
-                  });
-                  workbenchApi.showError(null);
-                } catch (error) {
-                  workbenchApi.showError((error as Error).message);
-                } finally {
-                  workbenchApi.setBusy(null);
-                }
+                setCreateDialogOpen(true);
               }}
               type="button"
             >
@@ -127,7 +122,7 @@ export function ProjectLogPane({
         </label>
       </div>
       <div className="sidebar-section search-results">
-        {loadingProjects || loadingLogs ? (
+        {loadingProjects || loadingLogs || loadingTasks ? (
           <div className="empty-state">Loading event log...</div>
         ) : !selectedProject ? (
           <div className="empty-state">Choose a project to see its event stream.</div>
@@ -152,12 +147,42 @@ export function ProjectLogPane({
                 <span className="tag-chip">{entry.type || "note"}</span>
               </div>
               <span>Occurred {formatProjectDateTime(entry.occurredAt)}</span>
-              {entry.taskIds.length > 0 ? <span>Tasks: {entry.taskIds.join(", ")}</span> : null}
+              {entry.taskIds.length > 0 ? <span>Tasks: {formatProjectTaskReferences(entry.taskIds, taskById)}</span> : null}
               <span>{entry.excerpt || "Open to add event details."}</span>
             </button>
           ))
         )}
       </div>
+      <ProjectLogCreateDialog
+        open={createDialogOpen}
+        tasks={tasks}
+        onCancel={() => setCreateDialogOpen(false)}
+        onConfirm={({ taskId, type }) => {
+          if (!selectedProjectId) {
+            return;
+          }
+
+          workbenchApi.setBusy(`Creating ${type} event...`);
+          void api
+            .createProjectLog(selectedProjectId, { taskId, type })
+            .then(async (payload) => {
+              await refresh();
+              await workbenchApi.openResource({
+                kind: "projectLog",
+                logId: payload.value.id,
+                projectId: payload.projectId
+              });
+              workbenchApi.showError(null);
+              setCreateDialogOpen(false);
+            })
+            .catch((error) => {
+              workbenchApi.showError((error as Error).message);
+            })
+            .finally(() => {
+              workbenchApi.setBusy(null);
+            });
+        }}
+      />
     </div>
   );
 }

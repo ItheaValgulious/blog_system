@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ProjectSummary } from "@blog-system/content-core";
+import type { ProjectSummary, ProjectTaskRecord } from "@blog-system/content-core";
 
 import { api } from "../../api";
 
@@ -9,6 +9,7 @@ import {
   storeProjectId
 } from "../project-utils";
 import type { PaneComponentProps, WorkbenchApi, WorkbenchDocument } from "../types";
+import { buildProjectTaskRows, formatProjectTaskOptionLabel } from "../project-task-utils";
 
 export function getProjectIdFromDocument(document: WorkbenchDocument | null) {
   if (!document) {
@@ -99,6 +100,42 @@ export function useProjectSelection(
   };
 }
 
+export function useProjectTasks(projectId: string | null, workbenchApi: WorkbenchApi) {
+  const [tasks, setTasks] = useState<ProjectTaskRecord[]>([]);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const showError = workbenchApi.showError;
+
+  const loadTasks = useCallback(async () => {
+    if (!projectId) {
+      setTasks([]);
+      return [];
+    }
+
+    setLoadingTasks(true);
+    try {
+      const payload = await api.listProjectTasks(projectId);
+      setTasks(payload.tasks);
+      showError(null);
+      return payload.tasks;
+    } catch (error) {
+      showError((error as Error).message);
+      return [];
+    } finally {
+      setLoadingTasks(false);
+    }
+  }, [projectId, showError]);
+
+  useEffect(() => {
+    void loadTasks();
+  }, [loadTasks]);
+
+  return {
+    loadTasks,
+    loadingTasks,
+    tasks
+  };
+}
+
 async function requestProjectTextInput(
   workbenchApi: WorkbenchApi,
   options: {
@@ -169,4 +206,82 @@ export async function promptCreateProjectLogType(workbenchApi: PaneComponentProp
     placeholder: "note",
     title: "New Event"
   });
+}
+
+export function ProjectLogCreateDialog({
+  onCancel,
+  onConfirm,
+  open,
+  tasks
+}: {
+  onCancel: () => void;
+  onConfirm: (value: { taskId: string; type: string }) => void;
+  open: boolean;
+  tasks: ProjectTaskRecord[];
+}) {
+  const taskRows = useMemo(
+    () =>
+      buildProjectTaskRows(tasks, {
+        include: (task) => task.status === "todo",
+        promoteHiddenParents: true
+      }),
+    [tasks]
+  );
+  const [taskId, setTaskId] = useState("");
+  const [type, setType] = useState("note");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    setTaskId(taskRows[0]?.task.id ?? "");
+    setType("note");
+  }, [open, taskRows]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="dialog-backdrop" onClick={onCancel} role="presentation">
+      <div className="dialog-card text-input-dialog" onClick={(event) => event.stopPropagation()}>
+        <p className="title-overline">Project Log</p>
+        <h2>New Event</h2>
+        <p className="body-muted">Create the log entry with a task selected from the current todo list.</p>
+        <label>
+          <span>Event Type</span>
+          <input value={type} onChange={(event) => setType(event.target.value)} />
+        </label>
+        <label>
+          <span>Task</span>
+          <select value={taskId} onChange={(event) => setTaskId(event.target.value)}>
+            {taskRows.map((row) => (
+              <option key={row.task.id} value={row.task.id}>
+                {formatProjectTaskOptionLabel(row.task, row.depth)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="dialog-actions">
+          <button className="action-button ghost" onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button
+            className="action-button primary"
+            disabled={!taskId || !type.trim()}
+            onClick={() =>
+              onConfirm({
+                taskId,
+                type: type.trim()
+              })
+            }
+            type="button"
+          >
+            Create Event
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

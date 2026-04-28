@@ -27,6 +27,7 @@ export interface ProjectTaskRecord {
   title: string;
   status: ProjectTaskStatus;
   order: number;
+  parentTaskId: string;
   startDate: string;
   dueDate: string;
   createdAt: string;
@@ -86,6 +87,19 @@ function normalizeStringArray(value: unknown) {
 
 function uniqueStrings(values: string[]) {
   return values.filter((value, index) => values.indexOf(value) === index);
+}
+
+function normalizeOptionalProjectReferenceId(value: unknown) {
+  const normalized = normalizeString(value);
+  return normalized ? normalizeProjectId(normalized) : "";
+}
+
+function normalizeProjectReferenceIdList(value: unknown) {
+  return uniqueStrings(
+    normalizeStringArray(value)
+      .map((item) => normalizeOptionalProjectReferenceId(item))
+      .filter(Boolean)
+  );
 }
 
 function normalizeNumber(value: unknown) {
@@ -280,6 +294,7 @@ export function parseProjectTaskRecord(taskId: string, rawContent: string): Proj
     title: normalizeProjectTaskTitle(taskId, frontmatter.title, body),
     status: normalizeProjectTaskStatus(frontmatter.status),
     order: normalizeNumber(frontmatter.order),
+    parentTaskId: normalizeOptionalProjectReferenceId(frontmatter.parentTaskId),
     startDate: normalizeString(frontmatter.startDate),
     dueDate: normalizeString(frontmatter.dueDate),
     createdAt: normalizeString(frontmatter.createdAt),
@@ -296,6 +311,7 @@ export function serializeProjectTaskRecord(record: ProjectTaskRecord) {
     title: record.title,
     status: record.status,
     order: record.order,
+    parentTaskId: record.parentTaskId,
     startDate: record.startDate,
     dueDate: record.dueDate,
     createdAt: record.createdAt,
@@ -314,7 +330,7 @@ export function parseProjectLogRecord(logId: string, rawContent: string): Projec
   return {
     id: normalizeProjectId(normalizeString(frontmatter.id) || logId),
     type,
-    taskIds: uniqueStrings(normalizeStringArray(frontmatter.taskIds)),
+    taskIds: normalizeProjectReferenceIdList(frontmatter.taskIds),
     occurredAt: normalizeString(frontmatter.occurredAt),
     createdAt: normalizeString(frontmatter.createdAt),
     updatedAt: normalizeString(frontmatter.updatedAt),

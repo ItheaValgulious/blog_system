@@ -309,10 +309,15 @@ export const api = {
   listProjectLogs(projectId: string) {
     return request<ProjectLogsPayload>(`/api/project/logs?projectId=${encodeURIComponent(projectId)}`);
   },
-  createProjectLog(projectId: string, type?: string) {
+  createProjectLog(projectId: string, input?: { taskId?: string; taskIds?: string[]; type?: string }) {
     return request<ProjectLogPayload>("/api/project/log/create", {
       method: "POST",
-      body: JSON.stringify({ projectId, type })
+      body: JSON.stringify({
+        projectId,
+        taskId: input?.taskId,
+        taskIds: input?.taskIds,
+        type: input?.type
+      })
     });
   },
   getProjectLog(projectId: string, logId: string) {

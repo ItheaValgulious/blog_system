@@ -498,14 +498,19 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
 
   app.post("/api/project/log/create", async (req, res, next) => {
     try {
-      const { projectId, type } = req.body as { projectId?: string; type?: string };
+      const { projectId, taskId, taskIds, type } = req.body as {
+        projectId?: string;
+        taskId?: string;
+        taskIds?: string[];
+        type?: string;
+      };
 
       if (!projectId) {
         res.status(400).json({ error: "projectId is required." });
         return;
       }
 
-      res.json(await createProjectLog(settings.projectsRoot, projectId, { type }));
+      res.json(await createProjectLog(settings.projectsRoot, projectId, { taskId, taskIds, type }));
     } catch (error) {
       next(error);
     }

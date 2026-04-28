@@ -1,15 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-
-import type { ProjectTaskRecord } from "@blog-system/content-core";
-
-import { api } from "../../api";
-
 import { formatProjectDate, formatProjectDateTime } from "../project-utils";
+import { buildProjectTaskRows } from "../project-task-utils";
 import type { PaneComponentProps } from "../types";
 import {
   promptCreateProject,
   promptCreateProjectTaskTitle,
-  useProjectSelection
+  useProjectSelection,
+  useProjectTasks
 } from "./project-pane-shared";
 
 export function ProjectTasksPane({
@@ -25,32 +21,8 @@ export function ProjectTasksPane({
     selectedProjectId,
     setSelectedProjectId
   } = useProjectSelection(activeDocument, workbenchApi, availableProjects);
-  const [tasks, setTasks] = useState<ProjectTaskRecord[]>([]);
-  const [loadingTasks, setLoadingTasks] = useState(false);
-
-  const loadTasks = useCallback(async () => {
-    if (!selectedProjectId) {
-      setTasks([]);
-      return [];
-    }
-
-    setLoadingTasks(true);
-    try {
-      const payload = await api.listProjectTasks(selectedProjectId);
-      setTasks(payload.tasks);
-      workbenchApi.showError(null);
-      return payload.tasks;
-    } catch (error) {
-      workbenchApi.showError((error as Error).message);
-      return [];
-    } finally {
-      setLoadingTasks(false);
-    }
-  }, [selectedProjectId, workbenchApi]);
-
-  useEffect(() => {
-    void loadTasks();
-  }, [loadTasks]);
+  const { loadTasks, loadingTasks, tasks } = useProjectTasks(selectedProjectId, workbenchApi);
+  const taskRows = buildProjectTaskRows(tasks);
 
   const refresh = async () => {
     await Promise.all([
@@ -134,29 +106,31 @@ export function ProjectTasksPane({
         ) : tasks.length === 0 ? (
           <div className="empty-state">No tasks yet.</div>
         ) : (
-          tasks.map((task) => (
+          taskRows.map((row) => (
             <button
               className="search-result project-list-item"
-              key={task.id}
+              key={row.task.id}
               onClick={() =>
                 void workbenchApi.openResource({
                   kind: "projectTask",
                   projectId: selectedProject.id,
-                  taskId: task.id
+                  taskId: row.task.id
                 })
               }
               type="button"
             >
-              <div className="project-list-item__row">
-                <strong>{task.title}</strong>
-                <span className="status-pill info">{task.status || "todo"}</span>
+              <div className="project-list-item__content" style={{ paddingLeft: `${row.depth * 18}px` }}>
+                <div className="project-list-item__row">
+                  <strong className="project-task-label">{row.task.title}</strong>
+                  <span className="status-pill info">{row.task.status || "todo"}</span>
+                </div>
+                <span>
+                  Order {row.task.order} | Start {formatProjectDate(row.task.startDate)} | Due{" "}
+                  {formatProjectDate(row.task.dueDate)}
+                </span>
+                <span>{row.task.excerpt || "Open to add details."}</span>
+                <span>Updated {formatProjectDateTime(row.task.updatedAt)}</span>
               </div>
-              <span>
-                Order {task.order} | Start {formatProjectDate(task.startDate)} | Due{" "}
-                {formatProjectDate(task.dueDate)}
-              </span>
-              <span>{task.excerpt || "Open to add details."}</span>
-              <span>Updated {formatProjectDateTime(task.updatedAt)}</span>
             </button>
           ))
         )}
