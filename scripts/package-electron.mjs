@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const projectRoot = process.cwd();
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(scriptDirectory, "..");
 const outputRoot = path.join(projectRoot, "dist-electron");
 const rootPackagePath = path.join(projectRoot, "package.json");
 const electronBinaryPath = require("electron");
@@ -15,6 +17,16 @@ function readOption(name) {
   const prefix = `--${name}=`;
   const arg = process.argv.find((item) => item.startsWith(prefix));
   return arg ? arg.slice(prefix.length).trim() : undefined;
+}
+
+function resolvePackageMode(rawValue) {
+  const normalizedValue = rawValue?.trim().toLowerCase() ?? "both";
+
+  if (normalizedValue === "local" || normalizedValue === "remote" || normalizedValue === "both") {
+    return normalizedValue;
+  }
+
+  throw new Error(`Unsupported package mode "${rawValue}". Expected "local", "remote", or "both".`);
 }
 
 async function copyIntoStage(stageDir, relativePath) {
@@ -73,12 +85,13 @@ async function packageVariant(stageDir, variant) {
   return appPath;
 }
 
+const packageMode = resolvePackageMode(readOption("mode"));
 const remoteServerBaseUrl =
   process.env.BLOG_SYSTEM_REMOTE_SERVER_URL?.trim() ?? readOption("remote-url");
 
-if (!remoteServerBaseUrl) {
+if ((packageMode === "remote" || packageMode === "both") && !remoteServerBaseUrl) {
   throw new Error(
-    "BLOG_SYSTEM_REMOTE_SERVER_URL is required. Example: npm run package:electron:win -- --remote-url=https://example.com/blog-system"
+    "BLOG_SYSTEM_REMOTE_SERVER_URL is required for remote packaging. Example: npm run package:electron:win:remote -- --remote-url=https://example.com/blog-system"
   );
 }
 
@@ -89,8 +102,10 @@ const rootPackage = JSON.parse(await fs.readFile(rootPackagePath, "utf8"));
 const stageDir = await prepareStageDirectory();
 
 try {
-  const variants = [
-    {
+  const variants = [];
+
+  if (packageMode === "local" || packageMode === "both") {
+    variants.push({
       appName: "Blog System Local",
       executableName: "Blog System Local",
       runtimeConfig: {
@@ -99,8 +114,11 @@ try {
         serverPort: 8787
       },
       version: rootPackage.version
-    },
-    {
+    });
+  }
+
+  if (packageMode === "remote" || packageMode === "both") {
+    variants.push({
       appName: "Blog System Remote",
       executableName: "Blog System Remote",
       runtimeConfig: {
@@ -109,8 +127,8 @@ try {
         serverBaseUrl: remoteServerBaseUrl
       },
       version: rootPackage.version
-    }
-  ];
+    });
+  }
 
   for (const variant of variants) {
     console.log(`Packaging ${variant.appName}...`);
