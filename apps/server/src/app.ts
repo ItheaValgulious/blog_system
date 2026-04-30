@@ -40,6 +40,12 @@ import {
 } from "./git-service.js";
 import { publishSite } from "./publish-service.js";
 import { loadMarkdownBlockConfig, saveMarkdownBlockConfig } from "./markdown-block-config-service.js";
+import {
+  MarkdownSearchError,
+  previewMarkdownSearch,
+  replaceAllMarkdownSearch,
+  replaceNextMarkdownSearch
+} from "./markdown-search-service.js";
 import { loadSiteConfig, saveSiteConfig } from "./site-config-service.js";
 import {
   createProject,
@@ -206,6 +212,77 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
     try {
       const payload = await getTreePayload(settings.contentRoot);
       res.json(payload.tags);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/search/markdown/preview", async (req, res, next) => {
+    try {
+      const { flags, pattern, replace, scope } = req.body as {
+        flags?: string;
+        pattern?: string;
+        replace?: string;
+        scope?: "body" | "wholeFile";
+      };
+
+      res.json(
+        await previewMarkdownSearch(settings.contentRoot, {
+          flags,
+          pattern: pattern ?? "",
+          replace: replace ?? "",
+          scope: scope ?? "body"
+        })
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/search/markdown/replace-next", async (req, res, next) => {
+    try {
+      const { flags, matchKey, pattern, replace, scope } = req.body as {
+        flags?: string;
+        matchKey?: string;
+        pattern?: string;
+        replace?: string;
+        scope?: "body" | "wholeFile";
+      };
+
+      res.json(
+        await replaceNextMarkdownSearch(
+          settings.contentRoot,
+          {
+            flags,
+            pattern: pattern ?? "",
+            replace: replace ?? "",
+            scope: scope ?? "body"
+          },
+          matchKey ?? ""
+        )
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/search/markdown/replace-all", async (req, res, next) => {
+    try {
+      const { flags, pattern, replace, scope } = req.body as {
+        flags?: string;
+        pattern?: string;
+        replace?: string;
+        scope?: "body" | "wholeFile";
+      };
+
+      res.json(
+        await replaceAllMarkdownSearch(settings.contentRoot, {
+          flags,
+          pattern: pattern ?? "",
+          replace: replace ?? "",
+          scope: scope ?? "body"
+        })
+      );
     } catch (error) {
       next(error);
     }
@@ -1019,6 +1096,14 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       res.status(409).json({
         code: error.code,
         conflicts: error.conflicts,
+        error: error.message
+      });
+      return;
+    }
+
+    if (error instanceof MarkdownSearchError) {
+      res.status(error.status).json({
+        code: error.code,
         error: error.message
       });
       return;

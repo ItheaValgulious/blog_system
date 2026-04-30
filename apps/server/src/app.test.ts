@@ -511,3 +511,114 @@ test("theme group endpoints seed atlas and allow group asset creation", async ()
   assert.equal(createdAsset.body.colorMode, "light");
   await fs.access(path.join(tempRoot, "config", "theme", "chalk", "notes.light.css"));
 });
+
+test("markdown search preview returns all regex matches across files", async () => {
+  const { agent, contentRoot } = await setupTempApp();
+
+  await fs.writeFile(
+    path.join(contentRoot, "notes", "second.md"),
+    `---
+title: Second Note
+status: draft
+---
+
+Alpha one
+Alpha two
+Alpha three
+`,
+    "utf8"
+  );
+
+  const response = await agent
+    .post("/api/search/markdown/preview")
+    .send({
+      pattern: "Alpha",
+      replace: "Beta",
+      scope: "body"
+    })
+    .expect(200);
+
+  assert.equal(response.body.summary.filesMatched, 1);
+  assert.equal(response.body.summary.matchesFound, 3);
+  assert.equal(response.body.results[0].matches.length, 3);
+  assert.equal(response.body.results[0].matches[2].lineNumber, 8);
+});
+
+test("markdown search replace-next applies one match at a time and returns next selection", async () => {
+  const { agent, contentRoot } = await setupTempApp();
+
+  await fs.writeFile(
+    path.join(contentRoot, "notes", "replace-next.md"),
+    `---
+title: Replace Next
+status: draft
+---
+
+foo
+foo
+foo
+`,
+    "utf8"
+  );
+
+  const preview = await agent
+    .post("/api/search/markdown/preview")
+    .send({
+      pattern: "foo",
+      replace: "bar",
+      scope: "body"
+    })
+    .expect(200);
+
+  const firstMatchKey = preview.body.results[0].matches[0].key as string;
+  const replaced = await agent
+    .post("/api/search/markdown/replace-next")
+    .send({
+      pattern: "foo",
+      replace: "bar",
+      scope: "body",
+      matchKey: firstMatchKey
+    })
+    .expect(200);
+
+  assert.equal(replaced.body.applied.replacementsMade, 1);
+  assert.equal(replaced.body.summary.matchesFound, 2);
+  assert.ok(replaced.body.applied.nextSelectionKey);
+
+  const saved = await fs.readFile(path.join(contentRoot, "notes", "replace-next.md"), "utf8");
+  assert.match(saved, /bar/);
+  assert.match(saved, /foo\nfoo/);
+});
+
+test("markdown search supports capture group replacements with $1 syntax", async () => {
+  const { agent, contentRoot } = await setupTempApp();
+
+  await fs.writeFile(
+    path.join(contentRoot, "notes", "capture.md"),
+    `---
+title: Capture
+status: draft
+---
+
+Hello Alice
+Hello Bob
+`,
+    "utf8"
+  );
+
+  const response = await agent
+    .post("/api/search/markdown/replace-all")
+    .send({
+      flags: "m",
+      pattern: "Hello\\s+(\\w+)",
+      replace: "Hi, $1!",
+      scope: "body"
+    })
+    .expect(200);
+
+  assert.equal(response.body.applied.replacementsMade, 2);
+
+  const saved = await fs.readFile(path.join(contentRoot, "notes", "capture.md"), "utf8");
+  assert.match(saved, /Hi, Alice!/);
+  assert.match(saved, /Hi, Bob!/);
+});

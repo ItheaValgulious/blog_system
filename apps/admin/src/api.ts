@@ -71,6 +71,63 @@ export interface TreePayload {
   tags: TagInfo[];
 }
 
+export type GlobalMarkdownSearchScope = "body" | "wholeFile";
+
+export interface GlobalMarkdownSearchRequest {
+  flags?: string;
+  pattern: string;
+  replace: string;
+  scope: GlobalMarkdownSearchScope;
+}
+
+export interface GlobalMarkdownSearchReplaceNextRequest extends GlobalMarkdownSearchRequest {
+  matchKey: string;
+}
+
+export interface GlobalMarkdownSearchMatch {
+  column: number;
+  endOffset: number;
+  excerpt: string;
+  key: string;
+  lineNumber: number;
+  matchIndex: number;
+  matchedText: string;
+  path: string;
+  replacementPreview: string;
+  startOffset: number;
+}
+
+export interface GlobalMarkdownSearchFileResult {
+  matchCount: number;
+  matches: GlobalMarkdownSearchMatch[];
+  path: string;
+}
+
+export interface GlobalMarkdownSearchSkippedFile {
+  path: string;
+  reason: string;
+}
+
+export interface GlobalMarkdownSearchSummary {
+  filesMatched: number;
+  filesScanned: number;
+  matchesFound: number;
+  skippedCount: number;
+}
+
+export interface GlobalMarkdownSearchApplied {
+  changedPaths: string[];
+  nextSelectionKey: string | null;
+  replacementsMade: number;
+}
+
+export interface GlobalMarkdownSearchResponse {
+  applied?: GlobalMarkdownSearchApplied;
+  results: GlobalMarkdownSearchFileResult[];
+  skipped: GlobalMarkdownSearchSkippedFile[];
+  summary: GlobalMarkdownSearchSummary;
+}
+
 export interface EditorConfigPayload {
   editorAssociations: Record<string, string>;
   editorAssociationsRaw: string;
@@ -194,6 +251,24 @@ export const api = {
   },
   getTree() {
     return request<TreePayload>("/api/tree");
+  },
+  previewGlobalMarkdownSearch(input: GlobalMarkdownSearchRequest) {
+    return request<GlobalMarkdownSearchResponse>("/api/search/markdown/preview", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  replaceNextGlobalMarkdownMatch(input: GlobalMarkdownSearchReplaceNextRequest) {
+    return request<GlobalMarkdownSearchResponse>("/api/search/markdown/replace-next", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+  replaceAllGlobalMarkdownMatches(input: GlobalMarkdownSearchRequest) {
+    return request<GlobalMarkdownSearchResponse>("/api/search/markdown/replace-all", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
   },
   getArticle(articlePath: string) {
     return request<ArticleRecord>(`/api/article?path=${encodeURIComponent(articlePath)}`);

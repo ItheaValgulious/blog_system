@@ -29,6 +29,8 @@ import {
   ApiRequestError,
   type AdminHomeConfigPayload,
   type EditorConfigPayload,
+  type GlobalMarkdownSearchReplaceNextRequest,
+  type GlobalMarkdownSearchRequest,
   type MarkdownBlockConfigPayload,
   type ProjectLogPayload,
   type ProjectPayload,
@@ -61,6 +63,7 @@ import type {
   NormalizedSnippet,
   PaneContributionDefinition,
   PaneGroupId,
+  RevealLineOptions,
   ProjectLogWorkbenchDocument,
   ProjectTaskWorkbenchDocument,
   ProjectWorkbenchDocument,
@@ -117,6 +120,14 @@ interface StoredArticleCursorState {
   column: number;
   scrollLeft: number;
   scrollTop: number;
+}
+
+interface PendingArticleReveal {
+  articlePath: string;
+  column?: number;
+  focus?: boolean;
+  lineNumber: number;
+  moveCursor?: boolean;
 }
 
 interface SidebarPaneItem {
@@ -1338,6 +1349,7 @@ export function App() {
   const previewBlockIdRef = useRef(0);
   const previewCursorSyncRafRef = useRef<number | null>(null);
   const schedulePreviewCursorSyncRef = useRef<(() => void) | null>(null);
+  const suppressPreviewFollowFromEditorScrollRef = useRef(false);
   const previewUpdateTimerRef = useRef<number | null>(null);
   const previewRenderRequestRef = useRef(0);
   const adminHomeSaveTimerRef = useRef<number | null>(null);
@@ -1348,6 +1360,7 @@ export function App() {
   const draftValuesRef = useRef<Record<string, string>>({});
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
   const treeRootRef = useRef<HTMLDivElement | null>(null);
+  const pendingArticleRevealRef = useRef<PendingArticleReveal | null>(null);
 
   const enabledPlugins = useMemo(() => builtInPlugins.filter((plugin) => !disabledPluginIds.includes(plugin.id)), [disabledPluginIds]);
   const pluginRuntime = useMemo(() => {
@@ -1472,6 +1485,10 @@ export function App() {
   }, [activeDocument, availableEditors, pluginRuntime]);
   const activeDocumentSupportsPreview = Boolean(
     activeDocument && isArticleDocument(activeDocument) && activeEditorContribution?.supportsPreview
+  );
+  const hasDirtyArticleDocument = useCallback(
+    () => documents.some((document) => document.kind === "article" && document.dirty),
+    [documents]
   );
   const activeTheme = pluginRuntime.getTheme(themeId) ?? availableThemes[0] ?? null;
   const enabledThemeGroups = useMemo(
@@ -1860,7 +1877,7 @@ export function App() {
   );
 
   const jumpToActiveArticleLine = useCallback(
-    (lineNumber: number) => {
+    (lineNumber: number, options?: RevealLineOptions) => {
       if (!isArticleDocument(activeDocument)) {
         return;
       }
@@ -1872,27 +1889,43 @@ export function App() {
       }
 
       const nextLineNumber = Math.max(1, Math.min(lineNumber, model.getLineCount()));
+      const currentPosition = editor.getPosition();
       const firstContentColumn = model.getLineFirstNonWhitespaceColumn(nextLineNumber);
-      const nextColumn = Math.min(
+      const defaultColumn = Math.min(
         Math.max(1, firstContentColumn > 0 ? firstContentColumn : 1),
         model.getLineMaxColumn(nextLineNumber)
       );
-      const selection = new monacoEditor.Selection(
-        nextLineNumber,
-        nextColumn,
-        nextLineNumber,
-        nextColumn
+      const nextColumn = Math.max(
+        1,
+        Math.min(options?.column ?? defaultColumn, model.getLineMaxColumn(nextLineNumber))
       );
+      const shouldMoveCursor = options?.moveCursor ?? true;
+      const shouldFocus = options?.focus ?? true;
 
-      editor.setSelection(selection);
-      editor.setPosition({ lineNumber: nextLineNumber, column: nextColumn });
+      if (shouldMoveCursor) {
+        const selection = new monacoEditor.Selection(
+          nextLineNumber,
+          nextColumn,
+          nextLineNumber,
+          nextColumn
+        );
+
+        editor.setSelection(selection);
+        editor.setPosition({ lineNumber: nextLineNumber, column: nextColumn });
+      } else {
+        suppressPreviewFollowFromEditorScrollRef.current = true;
+      }
       editor.revealLineInCenter(nextLineNumber);
-      editor.focus();
-      setActiveArticleLineNumber(nextLineNumber);
+      if (shouldFocus) {
+        editor.focus();
+      }
+      setActiveArticleLineNumber(shouldMoveCursor ? nextLineNumber : currentPosition?.lineNumber ?? nextLineNumber);
 
       window.requestAnimationFrame(() => {
-        storeArticleCursorState(activeDocument.articlePath);
-        schedulePreviewCursorSyncRef.current?.();
+        if (shouldMoveCursor) {
+          storeArticleCursorState(activeDocument.articlePath);
+          schedulePreviewCursorSyncRef.current?.();
+        }
       });
     },
     [activeDocument, storeArticleCursorState]
@@ -2090,6 +2123,57 @@ export function App() {
     setActiveDocumentId(articleDocument.id);
     setSelectedTreePath(articlePath);
   };
+
+  const refreshOpenArticleDocuments = useCallback(
+    async (changedPaths: string[]) => {
+      const normalizedPaths = Array.from(new Set(changedPaths));
+      if (normalizedPaths.length === 0) {
+        return;
+      }
+
+      const openCleanArticles = documents.filter(
+        (document): document is ArticleWorkbenchDocument =>
+          document.kind === "article" &&
+          !document.dirty &&
+          normalizedPaths.includes(document.articlePath)
+      );
+      if (openCleanArticles.length === 0) {
+        return;
+      }
+
+      const refreshedEntries = await Promise.all(
+        openCleanArticles.map(async (document) => ({
+          documentId: document.id,
+          editorId: document.editorId,
+          payload: await api.getArticle(document.articlePath)
+        }))
+      );
+
+      const refreshedById = new Map(
+        refreshedEntries.map(({ documentId, editorId, payload }) => [
+          documentId,
+          withResolvedEditor(buildArticleDocument(payload), editorId)
+        ])
+      );
+
+      for (const nextDocument of refreshedById.values()) {
+        draftValuesRef.current[nextDocument.id] = nextDocument.value;
+      }
+
+      setDocuments((current) =>
+        current.map((document) => refreshedById.get(document.id) ?? document)
+      );
+
+      if (activeDocument && activeDocument.kind === "article") {
+        const refreshedActiveDocument = refreshedById.get(activeDocument.id);
+        if (refreshedActiveDocument) {
+          syncEditorValuePreservingView(refreshedActiveDocument.value);
+          schedulePreviewSourceUpdate(refreshedActiveDocument.value, { immediate: true });
+        }
+      }
+    },
+    [activeDocument, documents, schedulePreviewSourceUpdate, syncEditorValuePreservingView, withResolvedEditor]
+  );
 
   const applySavedThemeGroupsPayload = (savedPayload: ThemeGroupsPayload) => {
     setThemeGroupsPayload(savedPayload);
@@ -2717,18 +2801,29 @@ export function App() {
     },
     []
   );
-  const revealLine = useCallback((lineNumber: number) => {
+  const revealLine = useCallback((lineNumber: number, options?: RevealLineOptions) => {
     const editor = editorRef.current;
     if (!editor) {
       return;
     }
 
     editor.revealLineInCenter(lineNumber);
-    editor.setPosition({
-      lineNumber,
-      column: 1
-    });
-    editor.focus();
+    if (options?.moveCursor ?? true) {
+      const selection = new monacoEditor.Selection(
+        lineNumber,
+        options?.column ?? 1,
+        lineNumber,
+        options?.column ?? 1
+      );
+      editor.setSelection(selection);
+      editor.setPosition({
+        lineNumber,
+        column: options?.column ?? 1
+      });
+    }
+    if (options?.focus ?? true) {
+      editor.focus();
+    }
   }, []);
   const reopenActiveDocumentWithEditor = useCallback((editorId: WorkbenchEditorId) => {
     if (!activeDocument) {
@@ -2762,7 +2857,24 @@ export function App() {
           setActiveDocumentId(HOME_DOCUMENT_ID);
           return;
         case "article":
+          pendingArticleRevealRef.current =
+            typeof target.lineNumber === "number"
+              ? {
+                  articlePath: target.articlePath,
+                  column: target.column,
+                  lineNumber: target.lineNumber
+                }
+              : null;
           await openArticleDocument(target.articlePath, target.preferredEditorId);
+          if (
+            typeof target.lineNumber === "number" &&
+            activeDocument &&
+            activeDocument.kind === "article" &&
+            activeDocument.articlePath === target.articlePath
+          ) {
+            pendingArticleRevealRef.current = null;
+            jumpToActiveArticleLine(target.lineNumber, { column: target.column });
+          }
           return;
         case "config":
           await openConfigDocument(target.configKind, target.preferredEditorId);
@@ -2787,11 +2899,13 @@ export function App() {
     [
       openArticleDocument,
       openConfigDocument,
+      jumpToActiveArticleLine,
       openProjectDocument,
       openProjectLogDocument,
       openProjectTaskDocument,
       openThemeAssetDocument,
-      openThemeGroupConfigDocument
+      openThemeGroupConfigDocument,
+      activeDocument
     ]
   );
   const renderSidebarStatusPills = () => (
@@ -2803,6 +2917,7 @@ export function App() {
 
   const workbenchApi: WorkbenchApi = {
     closeProjectDocuments: closeProjectWorkbenchDocuments,
+    hasDirtyArticleDocument,
     openHome: () => {
       setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
       setActiveDocumentId(HOME_DOCUMENT_ID);
@@ -2862,6 +2977,19 @@ export function App() {
     showError: setPageError,
     refreshWorkspaceData,
     revealLine,
+    previewGlobalMarkdownSearch: (input) => api.previewGlobalMarkdownSearch(input),
+    replaceNextGlobalMarkdownMatch: async (input: GlobalMarkdownSearchReplaceNextRequest) => {
+      const response = await api.replaceNextGlobalMarkdownMatch(input);
+      await loadTree();
+      await refreshOpenArticleDocuments(response.applied?.changedPaths ?? []);
+      return response;
+    },
+    replaceAllGlobalMarkdownMatches: async (input: GlobalMarkdownSearchRequest) => {
+      const response = await api.replaceAllGlobalMarkdownMatches(input);
+      await loadTree();
+      await refreshOpenArticleDocuments(response.applied?.changedPaths ?? []);
+      return response;
+    },
     reopenActiveDocumentWithEditor,
     saveActiveDocument,
     openConfigDocument,
@@ -3177,6 +3305,12 @@ export function App() {
       return;
     }
 
+    const isPreviewFollowSuppressed = () => suppressPreviewFollowFromEditorScrollRef.current;
+    const clearPreviewFollowSuppression = () => {
+      suppressPreviewFollowFromEditorScrollRef.current = false;
+    };
+    const editorDomNode = editor.getDomNode();
+
     const runCursorSync = () => {
       previewCursorSyncRafRef.current = null;
 
@@ -3228,13 +3362,24 @@ export function App() {
     schedulePreviewCursorSyncRef.current = scheduleCursorSync;
 
     const cursorDisposable = editor.onDidChangeCursorPosition(() => {
+      if (isPreviewFollowSuppressed()) {
+        return;
+      }
       scheduleCursorSync();
     });
     const scrollDisposable = editor.onDidScrollChange((event) => {
       if (event.scrollTopChanged) {
+        if (isPreviewFollowSuppressed()) {
+          return;
+        }
         scheduleCursorSync();
       }
     });
+
+    editorDomNode?.addEventListener("pointerdown", clearPreviewFollowSuppression, true);
+    editorDomNode?.addEventListener("wheel", clearPreviewFollowSuppression, true);
+    editorDomNode?.addEventListener("keydown", clearPreviewFollowSuppression, true);
+    editorDomNode?.addEventListener("touchstart", clearPreviewFollowSuppression, true);
 
     scheduleCursorSync();
 
@@ -3242,6 +3387,10 @@ export function App() {
       schedulePreviewCursorSyncRef.current = null;
       cursorDisposable.dispose();
       scrollDisposable.dispose();
+      editorDomNode?.removeEventListener("pointerdown", clearPreviewFollowSuppression, true);
+      editorDomNode?.removeEventListener("wheel", clearPreviewFollowSuppression, true);
+      editorDomNode?.removeEventListener("keydown", clearPreviewFollowSuppression, true);
+      editorDomNode?.removeEventListener("touchstart", clearPreviewFollowSuppression, true);
 
       if (previewCursorSyncRafRef.current !== null) {
         window.cancelAnimationFrame(previewCursorSyncRafRef.current);
@@ -3249,6 +3398,48 @@ export function App() {
       }
     };
   }, [activeDocument?.id, activeDocumentSupportsPreview, editorReadyVersion, previewReadyVersion]);
+
+  useEffect(() => {
+    const previewRoot = previewProseRef.current;
+
+    if (!previewRoot || !activeDocumentSupportsPreview || !isArticleDocument(activeDocument)) {
+      return;
+    }
+
+    const handleDoubleClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      const blockElement = target.closest(".preview-block");
+      if (!(blockElement instanceof HTMLElement)) {
+        return;
+      }
+
+      const startLine = Number(blockElement.dataset.startLine);
+      const endLine = Number(blockElement.dataset.endLine);
+      if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) {
+        return;
+      }
+
+      const bounds = blockElement.getBoundingClientRect();
+      const offsetY = Math.min(Math.max(event.clientY - bounds.top, 0), Math.max(bounds.height, 1));
+      const ratio = bounds.height <= 0 ? 0 : offsetY / bounds.height;
+      const lineSpan = Math.max(0, endLine - startLine);
+      const targetLine = Math.max(
+        startLine,
+        Math.min(endLine, startLine + Math.round(lineSpan * ratio))
+      );
+
+      jumpToActiveArticleLine(targetLine, { focus: false, moveCursor: false });
+    };
+
+    previewRoot.addEventListener("dblclick", handleDoubleClick);
+    return () => {
+      previewRoot.removeEventListener("dblclick", handleDoubleClick);
+    };
+  }, [activeDocument, activeDocumentSupportsPreview, jumpToActiveArticleLine, previewReadyVersion]);
 
   useEffect(() => {
     return () => {
@@ -3273,6 +3464,7 @@ export function App() {
         previewCursorSyncRafRef.current = null;
       }
 
+      suppressPreviewFollowFromEditorScrollRef.current = false;
       previewBlocksRef.current = [];
       schedulePreviewCursorSyncRef.current = null;
       previewProseRef.current?.replaceChildren();
@@ -3496,6 +3688,36 @@ export function App() {
       window.cancelAnimationFrame(frame);
     };
   }, [activeDocument?.id, editorReadyVersion]);
+
+  useEffect(() => {
+    const pendingReveal = pendingArticleRevealRef.current;
+    if (
+      !pendingReveal ||
+      !activeDocument ||
+      activeDocument.kind !== "article" ||
+      activeDocument.articlePath !== pendingReveal.articlePath
+    ) {
+      return;
+    }
+
+    const editor = editorRef.current;
+    if (!editor?.getModel()) {
+      return;
+    }
+
+    pendingArticleRevealRef.current = null;
+    const frame = window.requestAnimationFrame(() => {
+      jumpToActiveArticleLine(pendingReveal.lineNumber, {
+        column: pendingReveal.column,
+        focus: pendingReveal.focus,
+        moveCursor: pendingReveal.moveCursor
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activeDocument?.id, editorReadyVersion, jumpToActiveArticleLine]);
 
   useEffect(() => {
     const editor = editorRef.current;

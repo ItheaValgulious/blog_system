@@ -11,6 +11,11 @@ import type {
   ProjectSummary,
   ProjectTaskRecord
 } from "@blog-system/content-core";
+import type {
+  GlobalMarkdownSearchReplaceNextRequest,
+  GlobalMarkdownSearchRequest,
+  GlobalMarkdownSearchResponse
+} from "../api";
 
 export type PaneGroupId = string;
 export type ConfigDocumentKind =
@@ -157,6 +162,12 @@ export interface PaneComponentProps {
   projects: ProjectSummary[];
 }
 
+export interface RevealLineOptions {
+  column?: number;
+  focus?: boolean;
+  moveCursor?: boolean;
+}
+
 export interface PaneContributionDefinition extends WorkbenchContributionDefinition {
   component: ComponentType<PaneComponentProps>;
   defaultGroupId: PaneGroupId;
@@ -242,7 +253,13 @@ export type ClipboardImageUploadTarget =
   | { kind: "media" };
 
 export type WorkbenchResourceTarget =
-  | { kind: "article"; articlePath: string; preferredEditorId?: WorkbenchEditorId }
+  | {
+      kind: "article";
+      articlePath: string;
+      column?: number;
+      lineNumber?: number;
+      preferredEditorId?: WorkbenchEditorId;
+    }
   | { kind: "config"; configKind: ConfigDocumentKind; preferredEditorId?: WorkbenchEditorId }
   | { kind: "home" }
   | { kind: "project"; projectId: string; preferredEditorId?: WorkbenchEditorId }
@@ -264,16 +281,22 @@ export interface WorkbenchTextInputOptions {
 
 export interface WorkbenchApi {
   closeProjectDocuments: (projectId: string) => void;
+  hasDirtyArticleDocument: () => boolean;
   hideCommandPalette: () => void;
   openConfigDocument: (kind: ConfigDocumentKind) => Promise<void>;
   openHome: () => void;
   openResource: (target: WorkbenchResourceTarget) => Promise<void>;
+  previewGlobalMarkdownSearch: (input: GlobalMarkdownSearchRequest) => Promise<GlobalMarkdownSearchResponse>;
   publishStaticSite: () => Promise<void>;
   requestTextInput: (options: WorkbenchTextInputOptions) => Promise<string | null>;
   refreshWorkspaceData: (
     target: WorkbenchRefreshTarget | WorkbenchRefreshTarget[]
   ) => Promise<void>;
-  revealLine: (lineNumber: number) => void;
+  replaceAllGlobalMarkdownMatches: (input: GlobalMarkdownSearchRequest) => Promise<GlobalMarkdownSearchResponse>;
+  replaceNextGlobalMarkdownMatch: (
+    input: GlobalMarkdownSearchReplaceNextRequest
+  ) => Promise<GlobalMarkdownSearchResponse>;
+  revealLine: (lineNumber: number, options?: RevealLineOptions) => void;
   reopenActiveDocumentWithEditor: (editorId: WorkbenchEditorId) => void;
   saveActiveDocument: () => Promise<void>;
   setBusy: (message: string | null) => void;
