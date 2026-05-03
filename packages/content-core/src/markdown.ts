@@ -14,7 +14,13 @@ import { visit } from "unist-util-visit";
 
 import type { MarkdownBlockConfig, MarkdownBlockRule } from "./markdown-block-config.js";
 import { applyMarkdownBlockRules } from "./markdown-block-config.js";
-import type { ArticleRenderResult, HeadingItem, MarkdownBlock } from "./types.js";
+import type {
+  ArticleRenderResult,
+  HeadingItem,
+  MarkdownBlock,
+  MarkdownFenceRendererDefinition,
+  MarkdownRenderError
+} from "./types.js";
 
 interface HtmlTagBoundary {
   kind: "opening" | "closing";
@@ -183,6 +189,7 @@ export function extractHeadings(markdown: string): HeadingItem[] {
 async function renderMarkdownInternal(
   markdown: string,
   options: {
+    fenceRenderers?: MarkdownFenceRendererDefinition[];
     hydrateMathOnServer: boolean;
     includeHeadings?: boolean;
     markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null;
@@ -190,10 +197,64 @@ async function renderMarkdownInternal(
 ): Promise<ArticleRenderResult> {
   const preparedMarkdown = applyMarkdownBlockRules(markdown, options.markdownBlockConfig);
   const headings = options.includeHeadings === false ? [] : extractHeadings(preparedMarkdown);
+  const errors: MarkdownRenderError[] = [];
+  const renderedCss = new Set<string>();
+
+  const fenceRendererMap = new Map(
+    (options.fenceRenderers ?? []).map((renderer) => [renderer.language, renderer] as const)
+  );
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
     .use(remarkMath)
+    .use(() => (tree: any) => {
+      visit(tree, "code", (node: any, index?: number, parent?: any) => {
+        if (!parent || index === undefined) {
+          return;
+        }
+
+        const language = typeof node.lang === "string" ? node.lang.trim() : "";
+        if (!language) {
+          return;
+        }
+
+        const renderer = fenceRendererMap.get(language);
+        if (!renderer) {
+          return;
+        }
+
+        try {
+          const output = renderer.render({
+            content: typeof node.value === "string" ? node.value : "",
+            language,
+            meta: typeof node.meta === "string" ? node.meta : undefined,
+            position: {
+              endLine: Number(node.position?.end?.line ?? NaN),
+              startLine: Number(node.position?.start?.line ?? NaN)
+            }
+          });
+
+          if (output.cssText?.trim()) {
+            renderedCss.add(output.cssText.trim());
+          }
+
+          parent.children[index] = {
+            type: "html",
+            value: output.html
+          };
+        } catch (error) {
+          const normalizedError = error as Error & { code?: string };
+          errors.push({
+            code: normalizedError.code ?? "fence-render-error",
+            endLine: Number.isFinite(node.position?.end?.line) ? Number(node.position.end.line) : undefined,
+            fenceLanguage: language,
+            message: normalizedError.message,
+            rendererName: renderer.name,
+            startLine: Number.isFinite(node.position?.start?.line) ? Number(node.position.start.line) : undefined
+          });
+        }
+      });
+    })
     .use(options.hydrateMathOnServer ? () => undefined : remarkMathPlaceholders)
     .use(remarkRehype, { allowDangerousHtml: true })
     .use(rehypeRaw)
@@ -209,16 +270,19 @@ async function renderMarkdownInternal(
     .process(preparedMarkdown);
 
   return {
-    html: String(processed),
+    errors,
+    html: `${renderedCss.size > 0 ? `<style data-markdown-fence-renderers>${[...renderedCss].join("\n")}</style>` : ""}${String(processed)}`,
     headings
   };
 }
 
 export async function renderMarkdownWithMathPlaceholders(
   markdown: string,
-  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null,
+  fenceRenderers?: MarkdownFenceRendererDefinition[]
 ): Promise<ArticleRenderResult> {
   return renderMarkdownInternal(markdown, {
+    fenceRenderers,
     hydrateMathOnServer: false,
     includeHeadings: true,
     markdownBlockConfig
@@ -227,9 +291,11 @@ export async function renderMarkdownWithMathPlaceholders(
 
 export async function renderMarkdownWithKatex(
   markdown: string,
-  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null,
+  fenceRenderers?: MarkdownFenceRendererDefinition[]
 ): Promise<ArticleRenderResult> {
   return renderMarkdownInternal(markdown, {
+    fenceRenderers,
     hydrateMathOnServer: true,
     includeHeadings: true,
     markdownBlockConfig
@@ -238,9 +304,11 @@ export async function renderMarkdownWithKatex(
 
 export async function renderMarkdownFragmentWithKatex(
   markdown: string,
-  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null,
+  fenceRenderers?: MarkdownFenceRendererDefinition[]
 ): Promise<string> {
   const rendered = await renderMarkdownInternal(markdown, {
+    fenceRenderers,
     hydrateMathOnServer: true,
     includeHeadings: false,
     markdownBlockConfig
@@ -341,9 +409,10 @@ export function extractMarkdownBlocks(
 
 export async function renderMarkdown(
   markdown: string,
-  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
+  markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null,
+  fenceRenderers?: MarkdownFenceRendererDefinition[]
 ): Promise<ArticleRenderResult> {
-  return renderMarkdownWithMathPlaceholders(markdown, markdownBlockConfig);
+  return renderMarkdownWithMathPlaceholders(markdown, markdownBlockConfig, fenceRenderers);
 }
 
 export function rewriteRelativeAssetUrls(

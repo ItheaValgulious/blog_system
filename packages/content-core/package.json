@@ -21,6 +21,7 @@
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@blog-system/commutative": "*",
     "github-slugger": "^2.0.0",
     "js-yaml": "^4.1.0",
     "jsonc-parser": "^3.3.1",

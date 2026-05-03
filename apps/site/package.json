@@ -11,6 +11,7 @@
     "publish-site": "tsx src/publish.ts"
   },
   "dependencies": {
+    "@blog-system/commutative": "*",
     "@blog-system/content-core": "*",
     "chokidar": "^4.0.3",
     "express": "^5.1.0",

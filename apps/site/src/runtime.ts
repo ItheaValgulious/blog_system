@@ -1,7 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { ArticleRecord, MarkdownBlockConfig, SiteData } from "@blog-system/content-core";
+import type {
+  ArticleRecord,
+  MarkdownBlockConfig,
+  MarkdownFenceRendererDefinition,
+  SiteData
+} from "@blog-system/content-core";
 
 import type { SiteBuildSettings } from "./generator.js";
 import type { SiteConfig } from "./site-config.js";
@@ -38,6 +43,7 @@ export interface SiteBuildContext {
   config: SiteConfig;
   externalScripts: string[];
   externalStylesheets: string[];
+  markdownFenceRenderers: MarkdownFenceRendererDefinition[];
   markdownBlockConfig: MarkdownBlockConfig;
   projectRoot: string;
   publishedArticles: ArticleRecord[];
@@ -64,6 +70,16 @@ export interface SitePagePluginDefinition extends SiteBaseExtensionDefinition {
   run: (context: SiteBuildContext) => Promise<void> | void;
 }
 
+export interface SiteMarkdownPluginDefinition extends SiteBaseExtensionDefinition {
+  kind: "markdown";
+  getFenceRenderers?: (context: SiteBuildContext) => MarkdownFenceRendererDefinition[];
+  getStylesheets?: (context: SiteBuildContext) => Array<{
+    content: string;
+    relativePath: string;
+    urlPath?: string;
+  }>;
+}
+
 export interface SiteThemePluginDefinition extends SiteBaseExtensionDefinition {
   kind: "theme";
   theme: SiteThemeDefinition;
@@ -71,6 +87,7 @@ export interface SiteThemePluginDefinition extends SiteBaseExtensionDefinition {
 
 export type SitePluginDefinition =
   | SiteDataPluginDefinition
+  | SiteMarkdownPluginDefinition
   | SitePagePluginDefinition
   | SiteThemePluginDefinition;
 

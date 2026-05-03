@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import Editor from "@monaco-editor/react";
 import {
   PROJECT_RECENT_ACTIVITY_WINDOW_DAYS,
   PROJECT_STATUS_VALUES,
@@ -35,10 +34,12 @@ import {
 } from "../project-task-utils";
 import type { WorkbenchEditorComponentProps } from "../types";
 import type {
+  EditorContributionDefinition,
   ProjectLogWorkbenchDocument,
   ProjectTaskWorkbenchDocument,
   ProjectWorkbenchDocument
 } from "../types";
+import { MonacoMarkdownEditor } from "./monaco-markdown-editor";
 import {
   ProjectLogCreateDialog,
   promptCreateProjectTaskTitle,
@@ -55,27 +56,12 @@ function renderMarkdownBodyEditor(
   onMount: WorkbenchEditorComponentProps["onMount"]
 ) {
   return (
-    <Editor
-      key={editorKey}
-      defaultLanguage="markdown"
-      defaultValue={value}
-      language="markdown"
+    <MonacoMarkdownEditor
+      editorKey={editorKey}
+      onChange={onChange}
       onMount={onMount}
-      options={{
-        automaticLayout: true,
-        fontFamily: "'Cascadia Code', 'Fira Code', monospace",
-        fontLigatures: true,
-        minimap: { enabled: false },
-        quickSuggestions: { other: true, strings: true, comments: false },
-        smoothScrolling: true,
-        snippetSuggestions: "top",
-        tabCompletion: "on",
-        wordWrap: "on"
-      }}
       path={path}
-      onChange={(nextValue) => {
-        onChange(nextValue ?? "");
-      }}
+      value={value}
     />
   );
 }
@@ -888,3 +874,22 @@ export function ProjectLogEditor({
     </div>
   );
 }
+
+export const projectMarkdownPreviewSource: NonNullable<EditorContributionDefinition["previewSource"]> = (
+  document,
+  value
+) => {
+  if (document.kind === "projectTask") {
+    return parseProjectTaskRecord(document.taskId, value).body;
+  }
+
+  if (document.kind === "projectLog") {
+    return parseProjectLogRecord(document.logId, value).body;
+  }
+
+  if (document.kind === "project") {
+    return parseProjectRecord(document.projectId, value).goal;
+  }
+
+  return null;
+};

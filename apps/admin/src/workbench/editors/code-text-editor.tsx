@@ -1,12 +1,6 @@
-import type * as monacoEditor from "monaco-editor";
-
-import { WorkbenchMonacoEditor } from "./workbench-monaco-editor";
 import type { WorkbenchEditorComponentProps } from "../types";
+import { WorkbenchMonacoEditor } from "./workbench-monaco-editor";
 
-interface CodeTextEditorProps extends WorkbenchEditorComponentProps {
-  beforeMount?: (monaco: typeof monacoEditor) => void;
-}
-
-export function CodeTextEditor(props: CodeTextEditorProps) {
+export function CodeTextEditor(props: WorkbenchEditorComponentProps) {
   return <WorkbenchMonacoEditor {...props} />;
 }

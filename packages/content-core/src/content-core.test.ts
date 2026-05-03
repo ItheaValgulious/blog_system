@@ -22,6 +22,7 @@ import {
   renderMarkdownWithKatex,
   rewriteRelativeAssetUrls,
   toArticleSummary,
+  type MarkdownFenceRendererDefinition,
   type ArticleRecord,
   validateEditorConfigShape
 } from "./index.js";
@@ -324,6 +325,47 @@ test("renderMarkdownFragmentWithKatex renders math html", async () => {
   const html = await renderMarkdownFragmentWithKatex("$$\\n\\frac{1}{2}\\n$$");
 
   assert.match(html, /katex/);
+});
+
+test("renderMarkdownWithKatex applies fence renderers", async () => {
+  const renderer: MarkdownFenceRendererDefinition = {
+    language: "commutative",
+    name: "test-graph",
+    render(context) {
+      return {
+        cssText: ".demo-graph { color: red; }",
+        html: `<div class="demo-graph">${context.content.trim()}</div>`
+      };
+    }
+  };
+  const rendered = await renderMarkdownWithKatex(
+    "```commutative\n{\"demo\":true}\n```",
+    null,
+    [renderer]
+  );
+
+  assert.match(rendered.html, /data-markdown-fence-renderers/);
+  assert.match(rendered.html, /class="demo-graph"/);
+  assert.equal(rendered.errors?.length ?? 0, 0);
+});
+
+test("renderMarkdownWithKatex reports fence renderer errors", async () => {
+  const renderer: MarkdownFenceRendererDefinition = {
+    language: "commutative",
+    name: "broken-graph",
+    render() {
+      throw new Error("bad graph");
+    }
+  };
+  const rendered = await renderMarkdownWithKatex(
+    "```commutative\n{}\n```",
+    null,
+    [renderer]
+  );
+
+  assert.equal(rendered.errors?.length, 1);
+  assert.equal(rendered.errors?.[0]?.rendererName, "broken-graph");
+  assert.match(rendered.html, /<pre><code class="(?:hljs )?language-commutative">/);
 });
 
 test("applyMarkdownBlockRules converts nested custom markers into html tags", () => {

@@ -7,6 +7,7 @@ import type {
   ArticleSummary,
   EditorKeybinding,
   EditorSnippet,
+  MarkdownFenceRendererDefinition,
   ProjectLogRecord,
   ProjectSummary,
   ProjectTaskRecord
@@ -222,12 +223,25 @@ export interface EditorContributionDefinition {
   label: string;
   load?: (document: WorkbenchDocument) => Promise<WorkbenchDocument> | WorkbenchDocument;
   matches?: (document: WorkbenchDocument) => boolean;
+  previewSource?: (document: WorkbenchDocument, value: string) => string | null;
   save?: (
     document: WorkbenchDocument,
     nextValue: string
   ) => Promise<WorkbenchDocument | null | void> | WorkbenchDocument | null | void;
   supportsPreview?: boolean;
 }
+
+export interface MarkdownEditorFeatureDefinition {
+  id: string;
+  matches: (document: WorkbenchDocument) => boolean;
+  onMount?: (
+    editor: monacoEditor.editor.IStandaloneCodeEditor,
+    monaco: typeof monacoEditor,
+    document: WorkbenchDocument
+  ) => void | (() => void);
+}
+
+export type MarkdownFenceRendererFeatureDefinition = MarkdownFenceRendererDefinition;
 
 export interface PluginDefinition {
   id: string;
@@ -332,6 +346,8 @@ export interface PluginSetupContext {
   registerCommand: (command: CommandDefinition) => void;
   registerEditorAction: (action: EditorActionDefinition) => void;
   registerEditorContribution: (contribution: EditorContributionDefinition) => void;
+  registerMarkdownEditorFeature: (feature: MarkdownEditorFeatureDefinition) => void;
+  registerMarkdownFenceRenderer: (renderer: MarkdownFenceRendererFeatureDefinition) => void;
   registerPasteHandler: (handler: PasteHandlerDefinition) => void;
   registerTheme: (theme: ThemeDefinition) => void;
   registerWorkbenchContribution: (contribution: WorkbenchContributionDefinition) => void;

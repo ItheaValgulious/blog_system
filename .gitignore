@@ -7,8 +7,12 @@ runtime-dist
 coverage
 playwright-report
 test-results
+.claude
+.codex-cache
 *.log
 .env
 .DS_Store
 config/site-publish.local.json
 .playwright-mcp
+/admin-*.png
+/commutative-*.png

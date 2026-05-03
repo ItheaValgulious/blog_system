@@ -2,6 +2,8 @@ import type {
   CommandDefinition,
   EditorContributionDefinition,
   EditorActionDefinition,
+  MarkdownEditorFeatureDefinition,
+  MarkdownFenceRendererFeatureDefinition,
   PasteHandlerDefinition,
   PluginDefinition,
   PluginSetupContext,
@@ -13,6 +15,8 @@ export class PluginRuntime {
   private readonly commands = new Map<string, CommandDefinition>();
   private readonly editorContributions = new Map<string, EditorContributionDefinition>();
   private readonly editorActions = new Map<string, EditorActionDefinition>();
+  private readonly markdownEditorFeatures = new Map<string, MarkdownEditorFeatureDefinition>();
+  private readonly markdownFenceRenderers = new Map<string, MarkdownFenceRendererFeatureDefinition>();
   private readonly themes = new Map<string, ThemeDefinition>();
   private readonly pasteHandlers: PasteHandlerDefinition[] = [];
   private readonly workbenchContributions = new Map<string, WorkbenchContributionDefinition>();
@@ -28,6 +32,12 @@ export class PluginRuntime {
       },
       registerEditorContribution: (contribution) => {
         this.editorContributions.set(contribution.editorId, contribution);
+      },
+      registerMarkdownEditorFeature: (feature) => {
+        this.markdownEditorFeatures.set(feature.id, feature);
+      },
+      registerMarkdownFenceRenderer: (renderer) => {
+        this.markdownFenceRenderers.set(renderer.language, renderer);
       },
       registerTheme: (theme) => {
         this.themes.set(theme.id, theme);
@@ -68,6 +78,14 @@ export class PluginRuntime {
 
   getEditorContribution(editorId: string) {
     return this.editorContributions.get(editorId);
+  }
+
+  getMarkdownEditorFeatures() {
+    return [...this.markdownEditorFeatures.values()];
+  }
+
+  getMarkdownFenceRenderers() {
+    return [...this.markdownFenceRenderers.values()];
   }
 
   getThemes() {

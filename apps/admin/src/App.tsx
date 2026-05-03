@@ -98,6 +98,7 @@ interface PreviewSourceParseResult {
   body: string;
   directory: string;
   frontmatterError: string | null;
+  lineOffset: number;
 }
 
 interface ParsedPreviewBlock {
@@ -670,7 +671,8 @@ function parsePreviewSource(articlePath: string, rawContent: string): PreviewSou
     return {
       body: parsed.body,
       directory: parsed.directory,
-      frontmatterError: null
+      frontmatterError: null,
+      lineOffset: computeBodyLineOffset(rawContent)
     };
   } catch (error) {
     const normalizedPath = articlePath.replace(/\\/g, "/");
@@ -687,9 +689,19 @@ function parsePreviewSource(articlePath: string, rawContent: string): PreviewSou
     return {
       body,
       directory,
-      frontmatterError: (error as Error).message
+      frontmatterError: (error as Error).message,
+      lineOffset: computeBodyLineOffset(rawContent)
     };
   }
+}
+
+function parsePlainPreviewSource(rawContent: string, directory: string): PreviewSourceParseResult {
+  return {
+    body: rawContent.replace(/\r\n/g, "\n"),
+    directory,
+    frontmatterError: null,
+    lineOffset: 0
+  };
 }
 
 function isArticleDocument(document: WorkbenchDocument | null): document is ArticleWorkbenchDocument {
@@ -1352,6 +1364,7 @@ export function App() {
   const suppressPreviewFollowFromEditorScrollRef = useRef(false);
   const previewUpdateTimerRef = useRef<number | null>(null);
   const previewRenderRequestRef = useRef(0);
+  const editorFeatureCleanupRef = useRef<(() => void) | null>(null);
   const adminHomeSaveTimerRef = useRef<number | null>(null);
   const articleCursorPersistTimerRef = useRef<number | null>(null);
   const articleCursorStatesRef = useRef<Record<string, StoredArticleCursorState>>(initialArticleCursorStates);
@@ -1375,6 +1388,10 @@ export function App() {
   const contextTargetNode = contextMenuState?.path ? fileTreeMap.get(contextMenuState.path) ?? null : null;
   const availableCommands = useMemo(() => pluginRuntime.getCommands(), [pluginRuntime]);
   const availableEditors = useMemo(() => pluginRuntime.getEditorContributions(), [pluginRuntime]);
+  const availableMarkdownFenceRenderers = useMemo(
+    () => pluginRuntime.getMarkdownFenceRenderers(),
+    [pluginRuntime]
+  );
   const availableThemes = useMemo(() => pluginRuntime.getThemes(), [pluginRuntime]);
   const moduleContributions = useMemo(
     () =>
@@ -1483,8 +1500,40 @@ export function App() {
       null
     );
   }, [activeDocument, availableEditors, pluginRuntime]);
+  const activePreviewSource = useMemo(() => {
+    if (!activeDocument || !activeEditorContribution?.supportsPreview) {
+      return null;
+    }
+
+    const activeValue = draftValuesRef.current[activeDocument.id] ?? activeDocument.savedValue;
+    const source = activeEditorContribution.previewSource?.(
+      activeDocument,
+      activeValue
+    );
+    if (typeof source !== "string") {
+      return null;
+    }
+
+    if (activeDocument.kind === "article") {
+      return parsePreviewSource(activeDocument.articlePath, source);
+    }
+
+    if (activeDocument.kind === "projectTask") {
+      return parsePlainPreviewSource(source, `projects/${activeDocument.projectId}/tasks`);
+    }
+
+    if (activeDocument.kind === "projectLog") {
+      return parsePlainPreviewSource(source, `projects/${activeDocument.projectId}/logs`);
+    }
+
+    if (activeDocument.kind === "project") {
+      return parsePlainPreviewSource(source, `projects/${activeDocument.projectId}`);
+    }
+
+    return null;
+  }, [activeDocument, activeEditorContribution]);
   const activeDocumentSupportsPreview = Boolean(
-    activeDocument && isArticleDocument(activeDocument) && activeEditorContribution?.supportsPreview
+    activeDocument && activeEditorContribution?.supportsPreview && activePreviewSource
   );
   const hasDirtyArticleDocument = useCallback(
     () => documents.some((document) => document.kind === "article" && document.dirty),
@@ -1575,6 +1624,23 @@ export function App() {
       ),
     [enabledThemeGroups]
   );
+  const activePreviewFenceRenderers = useMemo(() => {
+    const enabledSitePluginIds = Array.isArray(siteConfigPayload?.value.enabledPlugins)
+      ? siteConfigPayload?.value.enabledPlugins.filter((entry): entry is string => typeof entry === "string")
+      : [];
+
+    if (enabledSitePluginIds.length === 0) {
+      return [];
+    }
+
+    return availableMarkdownFenceRenderers.filter((renderer) => {
+      if (renderer.language !== "commutative") {
+        return true;
+      }
+
+      return enabledSitePluginIds.includes("commutative");
+    });
+  }, [availableMarkdownFenceRenderers, siteConfigPayload?.value.enabledPlugins]);
   const commandItems = useMemo(() => {
     const query = deferredCommandQuery.trim().toLowerCase();
     const base = availableCommands.map((command) => ({
@@ -1734,7 +1800,18 @@ export function App() {
     }));
     const scrollTop = editor.getScrollTop();
     const scrollLeft = editor.getScrollLeft();
-    editor.setValue(nextValue);
+    const fullRange = model.getFullModelRange();
+
+    editor.pushUndoStop();
+    editor.executeEdits("workbench-sync-value", [
+      {
+        forceMoveMarkers: true,
+        range: fullRange,
+        text: nextValue
+      }
+    ]);
+    editor.pushUndoStop();
+
     const nextModel = editor.getModel();
 
     if (nextModel && selectionOffsets.length > 0) {
@@ -3149,7 +3226,7 @@ export function App() {
   }, [activeDocumentSupportsPreview]);
 
   useEffect(() => {
-    if (!activeDocument || activeDocument.kind !== "article") {
+    if (!activeDocument || !activePreviewSource) {
       schedulePreviewSourceUpdate("", { immediate: true });
       return;
     }
@@ -3158,23 +3235,22 @@ export function App() {
       return;
     }
 
-    schedulePreviewSourceUpdate(getDraftValue(activeDocument), { immediate: true });
-  }, [activeDocument?.id, activeDocument?.savedValue, activeDocumentSupportsPreview, getDraftValue]);
+    schedulePreviewSourceUpdate(activePreviewSource.body, { immediate: true });
+  }, [activeDocument?.id, activeDocumentSupportsPreview, activePreviewSource]);
 
   useEffect(() => {
     const previewRoot = previewProseRef.current;
     const requestId = previewRenderRequestRef.current + 1;
     previewRenderRequestRef.current = requestId;
 
-    if (!previewRoot || !activeDocument || activeDocument.kind !== "article" || !activeDocumentSupportsPreview) {
+    if (!previewRoot || !activeDocument || !activePreviewSource || !activeDocumentSupportsPreview) {
       previewRoot?.replaceChildren();
       previewBlocksRef.current = [];
       setPageError((current) => (current && current.includes("end of the stream") ? null : current));
       return;
     }
 
-    const parsedSource = parsePreviewSource(activeDocument.articlePath, previewSourceText);
-    const bodyLineOffset = computeBodyLineOffset(previewSourceText);
+    const parsedSource = activePreviewSource;
     let previewRenderError = parsedSource.frontmatterError;
     let renderBlockConfig = markdownBlockConfigPayload?.value ?? null;
     let nextBlocks: ParsedPreviewBlock[];
@@ -3189,8 +3265,8 @@ export function App() {
 
     const nextPreviewBlocks = nextBlocks.map((block) => ({
       ...block,
-      startLine: block.startLine + bodyLineOffset,
-      endLine: block.endLine + bodyLineOffset
+      startLine: block.startLine + parsedSource.lineOffset,
+      endLine: block.endLine + parsedSource.lineOffset
     }));
     const currentBlocks = previewBlocksRef.current;
 
@@ -3218,7 +3294,11 @@ export function App() {
 
     Promise.all(
       changedBlocks.map(async (block) => {
-        const html = await renderMarkdownFragmentWithKatex(block.source, renderBlockConfig);
+        const html = await renderMarkdownFragmentWithKatex(
+          block.source,
+          renderBlockConfig,
+          activePreviewFenceRenderers
+        );
         return rewriteManagedMediaUrls(
           rewriteRelativeAssetUrls(html, parsedSource.directory, "/content-files"),
           "/media"
@@ -3294,13 +3374,21 @@ export function App() {
           setPageError(error.message);
         }
       });
-  }, [activeDocument?.id, activeDocumentSupportsPreview, markdownBlockConfigPayload?.raw, previewReadyVersion, previewSourceText]);
+  }, [
+    activeDocument?.id,
+    activeDocumentSupportsPreview,
+    activePreviewFenceRenderers,
+    activePreviewSource,
+    markdownBlockConfigPayload?.raw,
+    previewReadyVersion,
+    previewSourceText
+  ]);
 
   useEffect(() => {
     const editor = editorRef.current;
     const previewElement = previewRef.current;
 
-    if (!editor || !previewElement || !activeDocumentSupportsPreview || !isArticleDocument(activeDocument)) {
+    if (!editor || !previewElement || !activeDocumentSupportsPreview || !activeDocument) {
       schedulePreviewCursorSyncRef.current = null;
       return;
     }
@@ -3402,7 +3490,7 @@ export function App() {
   useEffect(() => {
     const previewRoot = previewProseRef.current;
 
-    if (!previewRoot || !activeDocumentSupportsPreview || !isArticleDocument(activeDocument)) {
+    if (!previewRoot || !activeDocumentSupportsPreview || !activeDocument) {
       return;
     }
 
@@ -3637,6 +3725,8 @@ export function App() {
   }, [activeDocumentId, commandPaletteOpen, documents]);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
+    editorFeatureCleanupRef.current?.();
+    editorFeatureCleanupRef.current = null;
     editorRef.current = editor;
     monacoRef.current = monaco;
     setEditorReadyVersion((current) => current + 1);
@@ -3647,10 +3737,28 @@ export function App() {
     if (activeTheme) {
       monaco.editor.setTheme(activeTheme.id);
     }
+
+    if (activeDocument?.language === "markdown") {
+      const cleanups = pluginRuntime
+        .getMarkdownEditorFeatures()
+        .filter((feature) => feature.matches(activeDocument))
+        .map((feature) => feature.onMount?.(editor, monaco, activeDocument))
+        .filter((cleanup): cleanup is () => void => typeof cleanup === "function");
+
+      if (cleanups.length > 0) {
+        editorFeatureCleanupRef.current = () => {
+          for (const cleanup of cleanups) {
+            cleanup();
+          }
+        };
+      }
+    }
   };
 
   useEffect(() => {
     if (!activeDocument || activeDocument.kind === "home") {
+      editorFeatureCleanupRef.current?.();
+      editorFeatureCleanupRef.current = null;
       editorRef.current = null;
       monacoRef.current = null;
     }
@@ -4202,8 +4310,11 @@ export function App() {
         return changed ? nextDocuments : current;
       });
 
-      if (isArticleDocument(activeDocument) && activeDocumentSupportsPreview) {
-        schedulePreviewSourceUpdate(nextValue);
+      if (activeDocumentSupportsPreview) {
+        const nextPreviewBody = activeEditorContribution?.previewSource?.(activeDocument, nextValue);
+        if (typeof nextPreviewBody === "string") {
+          schedulePreviewSourceUpdate(nextPreviewBody);
+        }
       }
     },
     [activeDocument, activeDocumentSupportsPreview, activeEditorContribution, schedulePreviewSourceUpdate]

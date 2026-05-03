@@ -21,6 +21,7 @@ export const coreWorkbenchPlugin: PluginDefinition = {
       editorId: "workbench.article-markdown",
       label: "Article Markdown",
       matches: (document) => document.kind === "article",
+      previewSource: (document, value) => (document.kind === "article" ? value : null),
       supportsPreview: true
     });
     context.registerEditorContribution({

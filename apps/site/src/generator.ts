@@ -178,6 +178,9 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   const basePrefix = normalizeBasePath(settings.basePath);
   const markdownBlockConfig = await loadMarkdownBlockConfig(settings.configRoot);
   const enabledThemeAssets = await listEnabledThemeAssets(settings.configRoot);
+  const enabledMarkdownPlugins = sitePlugins.filter(
+    (candidate) => candidate.kind === "markdown" && config.enabledPlugins.includes(candidate.id)
+  );
 
   await fs.rm(settings.distDir, { recursive: true, force: true });
   await fs.mkdir(path.join(settings.distDir, "assets"), { recursive: true });
@@ -193,6 +196,52 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   const siteData = await loadSiteData(settings.contentRoot, basePrefix);
   const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published");
   const aboutArticle = resolveAboutArticle(publishedArticles);
+  const writeTextAsset = createWriteTextAsset(settings);
+  const markdownFenceRenderers = enabledMarkdownPlugins.flatMap((plugin) => plugin.getFenceRenderers?.({
+    aboutArticle,
+    basePrefix,
+    config,
+    externalScripts: enabledThemeAssets
+      .filter((asset) => asset.type === "js")
+      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    externalStylesheets: enabledThemeAssets
+      .filter((asset) => asset.type === "css")
+      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    markdownFenceRenderers: [],
+    markdownBlockConfig,
+    projectRoot: settings.projectRoot,
+    publishedArticles,
+    settings,
+    siteData,
+    theme,
+    writeHtml: createWriteHtml(settings),
+    writeTextAsset
+  }) ?? []);
+  const markdownStylesheets = enabledMarkdownPlugins.flatMap((plugin) => plugin.getStylesheets?.({
+    aboutArticle,
+    basePrefix,
+    config,
+    externalScripts: enabledThemeAssets
+      .filter((asset) => asset.type === "js")
+      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    externalStylesheets: enabledThemeAssets
+      .filter((asset) => asset.type === "css")
+      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    markdownFenceRenderers: [],
+    markdownBlockConfig,
+    projectRoot: settings.projectRoot,
+    publishedArticles,
+    settings,
+    siteData,
+    theme,
+    writeHtml: createWriteHtml(settings),
+    writeTextAsset
+  }) ?? []);
+
+  for (const stylesheet of markdownStylesheets) {
+    await writeTextAsset(stylesheet.relativePath, stylesheet.content);
+  }
+
   const context: SiteBuildContext = {
     aboutArticle,
     basePrefix,
@@ -203,6 +252,7 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
     externalStylesheets: enabledThemeAssets
       .filter((asset) => asset.type === "css")
       .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    markdownFenceRenderers,
     markdownBlockConfig,
     projectRoot: settings.projectRoot,
     publishedArticles,
@@ -210,8 +260,14 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
     siteData,
     theme,
     writeHtml: createWriteHtml(settings),
-    writeTextAsset: createWriteTextAsset(settings)
+    writeTextAsset
   };
+
+  context.externalStylesheets.push(
+    ...markdownStylesheets.map((asset) =>
+      (asset.urlPath ?? `${basePrefix}/${asset.relativePath}`.replace(/\/{2,}/g, "/"))
+    )
+  );
 
   for (const plugin of sitePlugins.filter((candidate) => candidate.kind === "data" && config.enabledPlugins.includes(candidate.id))) {
     await plugin.run(context);

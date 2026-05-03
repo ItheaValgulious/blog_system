@@ -1,6 +1,7 @@
 import type { PluginDefinition } from "./types";
 import { clipboardImagePlugin } from "./plugins/clipboard-image-plugin";
 import { commandPalettePlugin } from "./plugins/command-palette-plugin";
+import { commutativePlugin } from "./plugins/commutative-plugin";
 import { createMetadataPlugin } from "./plugins/create-metadata-plugin";
 import { gitPlugin } from "./plugins/git-plugin";
 import { globalSearchReplacePlugin } from "./plugins/global-search-replace-plugin";
@@ -16,6 +17,7 @@ export const builtInPlugins: PluginDefinition[] = [
   coreWorkbenchPlugin,
   snippetActionsPlugin,
   commandPalettePlugin,
+  commutativePlugin,
   themePlugin,
   clipboardImagePlugin,
   createMetadataPlugin,

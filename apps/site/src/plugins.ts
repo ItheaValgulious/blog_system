@@ -5,10 +5,22 @@ import {
   rewriteRelativeAssetUrls,
   type ArticleSummary
 } from "@blog-system/content-core";
+import {
+  COMMUTATIVE_FENCE_LANGUAGE,
+  commutativeCssText,
+  parseCommutative,
+  renderCommutativeStaticHtml
+} from "@blog-system/commutative";
 
-import type { SiteBuildContext, SitePluginDefinition, SiteThemePluginDefinition } from "./runtime.js";
+import type {
+  SiteBuildContext,
+  SiteMarkdownPluginDefinition,
+  SitePluginDefinition,
+  SiteThemePluginDefinition
+} from "./runtime.js";
 
 const HOME_PAGE_SIZE = 12;
+const COMMUTATIVE_SITE_PLUGIN_ID = "commutative";
 
 function escapeHtml(value: string) {
   return value
@@ -284,7 +296,18 @@ export const articlePagesPlugin: SitePluginDefinition = {
     await Promise.all(
       context.publishedArticles.map(async (record) => {
         const summary = context.siteData.articles.find((article) => article.path === record.path)!;
-        const rendered = await renderMarkdownWithKatex(record.body, context.markdownBlockConfig);
+        const rendered = await renderMarkdownWithKatex(
+          record.body,
+          context.markdownBlockConfig,
+          context.markdownFenceRenderers
+        );
+        if ((rendered.errors?.length ?? 0) > 0) {
+          throw new Error(
+            `Failed to render markdown fences in ${record.path}: ${rendered.errors
+              ?.map((error) => `[${error.fenceLanguage ?? "unknown"}] ${error.message}`)
+              .join("; ")}`
+          );
+        }
         const html = rewriteManagedMediaUrls(
           rewriteRelativeAssetUrls(rendered.html, record.directory, `${context.basePrefix}/content`),
           `${context.basePrefix}/media`
@@ -460,8 +483,16 @@ export const aboutPlugin: SitePluginDefinition = {
     const navigation = enabledNavigation(context);
     const rendered = await renderMarkdownWithKatex(
       context.aboutArticle.body,
-      context.markdownBlockConfig
+      context.markdownBlockConfig,
+      context.markdownFenceRenderers
     );
+    if ((rendered.errors?.length ?? 0) > 0) {
+      throw new Error(
+        `Failed to render markdown fences in ${context.aboutArticle.path}: ${rendered.errors
+          ?.map((error) => `[${error.fenceLanguage ?? "unknown"}] ${error.message}`)
+          .join("; ")}`
+      );
+    }
     const html = rewriteManagedMediaUrls(
       rewriteRelativeAssetUrls(
         rendered.html,
@@ -530,8 +561,36 @@ export const searchPlugin: SitePluginDefinition = {
   }
 };
 
+export const commutativePlugin: SiteMarkdownPluginDefinition = {
+  id: COMMUTATIVE_SITE_PLUGIN_ID,
+  kind: "markdown",
+  label: "Commutative",
+  getFenceRenderers() {
+    return [
+      {
+        language: COMMUTATIVE_FENCE_LANGUAGE,
+        name: "commutative",
+        render(context) {
+          const document = parseCommutative(context.content);
+          return renderCommutativeStaticHtml(document);
+        }
+      }
+    ];
+  },
+  getStylesheets(context) {
+    return [
+      {
+        content: commutativeCssText,
+        relativePath: "assets/commutative.css",
+        urlPath: `${context.basePrefix}/assets/commutative.css`.replace(/\/{2,}/g, "/")
+      }
+    ];
+  }
+};
+
 export const sitePlugins = [
   atlasThemePlugin,
+  commutativePlugin,
   topOrderPlugin,
   homePlugin,
   articlePagesPlugin,

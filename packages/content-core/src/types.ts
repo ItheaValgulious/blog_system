@@ -36,8 +36,39 @@ export interface ArticleRecord {
 }
 
 export interface ArticleRenderResult {
+  errors?: MarkdownRenderError[];
   html: string;
   headings: HeadingItem[];
+}
+
+export interface MarkdownFenceRenderContext {
+  content: string;
+  language: string;
+  meta?: string;
+  position?: {
+    endLine?: number;
+    startLine?: number;
+  };
+}
+
+export interface MarkdownFenceRenderOutput {
+  cssText?: string;
+  html: string;
+}
+
+export interface MarkdownFenceRendererDefinition {
+  language: string;
+  name: string;
+  render: (context: MarkdownFenceRenderContext) => MarkdownFenceRenderOutput;
+}
+
+export interface MarkdownRenderError {
+  code: string;
+  endLine?: number;
+  fenceLanguage?: string;
+  message: string;
+  rendererName?: string;
+  startLine?: number;
 }
 
 export interface MarkdownBlock {

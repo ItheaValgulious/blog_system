@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>quiver: a modern commutative diagram editor</title>
+    <link rel="icon" href="icon.png">
+    <!-- Prevent zooming on mobile -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no">
+    <!-- Metadata for Open Graph -->
+    <meta name="description" content="A modern commutative diagram editor with support for tikz-cd.">
+    <meta property="og:title" content="quiver">
+    <meta property="og:url" content="https://varkor.github.io/quiver">
+    <meta property="og:description" content="A modern commutative diagram editor with support for tikz-cd.">
+    <meta property="og:image" content="icon.png">
+    <meta property="og:type" content="website">
+    <meta property="og:locale" content="en_GB">
+    <!-- Viewport -->
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Preload images that we want to display immediately. -->
+    <link rel="preload" href="quiver-blue.svg" as="image">
+    <link rel="preload" href="icons/about.svg" as="image">
+    <link rel="preload" href="icons/centre-view.svg" as="image">
+    <link rel="preload" href="icons/delete.svg" as="image">
+    <link rel="preload" href="icons/deselect-all.svg" as="image">
+    <link rel="preload" href="icons/hide-grid.svg" as="image">
+    <link rel="preload" href="icons/redo.svg" as="image">
+    <link rel="preload" href="icons/reset-zoom.svg" as="image">
+    <link rel="preload" href="icons/save.svg" as="image">
+    <link rel="preload" href="icons/select-all.svg" as="image">
+    <link rel="preload" href="icons/shortcuts.svg" as="image">
+    <link rel="preload" href="icons/show-hints.svg" as="image">
+    <link rel="preload" href="icons/show-queue.svg" as="image">
+    <link rel="preload" href="icons/undo.svg" as="image">
+    <link rel="preload" href="icons/zoom-in.svg" as="image">
+    <link rel="preload" href="icons/zoom-out.svg" as="image">
+    <!-- Style sheets and scripts -->
+    <link rel="stylesheet" type="text/css" media="screen" href="main.css">
+    <script type="module" src="ds.mjs"></script>
+    <script type="module" src="dom.mjs"></script>
+    <script type="module" src="quiver.mjs"></script>
+    <script type="module" src="curve.mjs"></script>
+    <script type="module" src="arrow.mjs"></script>
+    <script type="module" src="parser.mjs"></script>
+    <script type="module" src="ui.mjs"></script>
+    <!-- Web app manifest -->
+    <link rel="manifest" href="manifest.json">
+</head>
+<body>
+    <a id="logo-link" href="https://github.com/varkor/quiver" target="_blank">
+        <img src="quiver.svg" class="logo">
+    </a>
+    <noscript>JavaScript must be enabled to use quiver.</noscript>
+    <script type="module">
+        import { url_parameters } from "./ds.mjs";
+
+        const query_data = url_parameters();
+        if (query_data.has("embed")) {
+            document.body.classList.add("embedded");
+            document.querySelector("#logo-link").href = reconstruct_URL(query_data, [
+                "embed",
+                "scale",
+            ]);
+        }
+
+        function reconstruct_URL(query_data, ignore) {
+            const URL_prefix = new URL(window.location.href);
+            URL_prefix.search = "";
+            URL_prefix.hash = "";
+            return `${URL_prefix}#${
+                Array.from(query_data.entries())
+                    .filter(([key,]) => !ignore.includes(key))
+                    .map(([key, value]) => `${key}=${value}`).join("&")
+            }`;
+        }
+    </script>
+</body>
+</html>

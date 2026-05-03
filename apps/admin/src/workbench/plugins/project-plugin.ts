@@ -3,7 +3,12 @@ import {
   PROJECT_MODULE_ID,
   PROJECT_OVERVIEW_PANE_ID
 } from "../project-utils";
-import { ProjectLogEditor, ProjectOverviewEditor, ProjectTaskEditor } from "../editors/project-editors";
+import {
+  ProjectLogEditor,
+  ProjectOverviewEditor,
+  ProjectTaskEditor,
+  projectMarkdownPreviewSource
+} from "../editors/project-editors";
 import { ProjectOverviewPane } from "../panes/project-overview-pane";
 import { promptCreateProject } from "../panes/project-pane-shared";
 
@@ -34,21 +39,27 @@ export const projectPlugin: PluginDefinition = {
       component: ProjectOverviewEditor,
       editorId: "project.overview",
       label: "Project Overview",
-      matches: (document) => document.kind === "project"
+      matches: (document) => document.kind === "project",
+      previewSource: projectMarkdownPreviewSource,
+      supportsPreview: true
     });
     context.registerEditorContribution({
       canHandle: (document) => document.kind === "projectTask",
       component: ProjectTaskEditor,
       editorId: "project.task-markdown",
       label: "Project Task",
-      matches: (document) => document.kind === "projectTask"
+      matches: (document) => document.kind === "projectTask",
+      previewSource: projectMarkdownPreviewSource,
+      supportsPreview: true
     });
     context.registerEditorContribution({
       canHandle: (document) => document.kind === "projectLog",
       component: ProjectLogEditor,
       editorId: "project.log-markdown",
       label: "Project Log",
-      matches: (document) => document.kind === "projectLog"
+      matches: (document) => document.kind === "projectLog",
+      previewSource: projectMarkdownPreviewSource,
+      supportsPreview: true
     });
     context.registerCommand({
       id: "project.openModule",
