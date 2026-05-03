@@ -1,29 +1,31 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const backendProxyTarget = process.env.BLOG_SYSTEM_ADMIN_PROXY_TARGET ?? "http://localhost:8787";
+
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8787",
+        target: backendProxyTarget,
         changeOrigin: true
       },
       "/content-files": {
-        target: "http://localhost:8787",
+        target: backendProxyTarget,
         changeOrigin: true
       },
       "/media": {
-        target: "http://localhost:8787",
+        target: backendProxyTarget,
         changeOrigin: true
       },
       "/project-files": {
-        target: "http://localhost:8787",
+        target: backendProxyTarget,
         changeOrigin: true
       },
       "/theme-files": {
-        target: "http://localhost:8787",
+        target: backendProxyTarget,
         changeOrigin: true
       }
     }

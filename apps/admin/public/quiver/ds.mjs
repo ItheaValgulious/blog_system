@@ -394,14 +394,24 @@ export class Colour extends Encodable {
 /// the fragment identifier. If a parameter is found in both the query string and the fragment
 /// identifier, the query string parameter is prioritised.
 export function url_parameters() {
+    const parse_segment = (segment) => {
+        const separatorIndex = segment.indexOf("=");
+        const key = separatorIndex === -1 ? segment : segment.slice(0, separatorIndex);
+        const value = separatorIndex === -1 ? "" : segment.slice(separatorIndex + 1);
+
+        // Do not use URLSearchParams here: it decodes `+` as a space, corrupting legacy raw
+        // base64 quiver payloads. Percent-encoding is still decoded for new URLs.
+        return [decodeURIComponent(key), decodeURIComponent(value)];
+    };
+
     let data = [];
     const fragment_string = window.location.hash.replace(/^#/, "");
     if (fragment_string !== "") {
-        data = data.concat(fragment_string.split("&").map(segment => segment.split("=")));
+        data = data.concat(fragment_string.split("&").map(parse_segment));
     }
     const query_string = window.location.href.match(/\?(.*)$/);
     if (query_string !== null) {
-        data = data.concat(query_string[1].split("&").map(segment => segment.split("=")));
+        data = data.concat(query_string[1].split("&").map(parse_segment));
     }
     return new Map(data);
 }

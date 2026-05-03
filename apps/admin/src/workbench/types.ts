@@ -208,6 +208,7 @@ export interface WorkbenchEditorComponentProps {
   homeWidgets: HomeWidgetContributionDefinition[];
   onChange: (nextValue: string) => void;
   onChangeHomeConfig: (nextValue: AdminHomeConfig) => void;
+  onModelContentChange?: (event: monacoEditor.editor.IModelContentChangedEvent) => void;
   onMount: (
     editor: monacoEditor.editor.IStandaloneCodeEditor,
     monaco: typeof monacoEditor

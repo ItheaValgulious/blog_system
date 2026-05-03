@@ -5,6 +5,7 @@ interface MonacoMarkdownEditorProps {
   editorKey?: string;
   language?: string;
   onChange: (nextValue: string) => void;
+  onModelContentChange?: (event: monacoEditor.editor.IModelContentChangedEvent) => void;
   onMount: (
     editor: monacoEditor.editor.IStandaloneCodeEditor,
     monaco: typeof monacoEditor
@@ -17,6 +18,7 @@ export function MonacoMarkdownEditor({
   editorKey,
   language = "markdown",
   onChange,
+  onModelContentChange,
   onMount,
   path,
   value
@@ -27,22 +29,68 @@ export function MonacoMarkdownEditor({
       defaultLanguage={language}
       defaultValue={value}
       language={language}
-      onMount={onMount}
+      onMount={(editor, monaco) => {
+        const disposable = onModelContentChange
+          ? editor.onDidChangeModelContent(onModelContentChange)
+          : null;
+        onMount(editor, monaco);
+        if (disposable) {
+          editor.onDidDispose(() => {
+            disposable.dispose();
+          });
+        }
+      }}
       options={{
         automaticLayout: true,
+        bracketPairColorization: { enabled: false },
+        codeLens: false,
+        colorDecorators: false,
+        contextmenu: true,
+        find: {
+          addExtraSpaceOnTop: false
+        },
+        folding: false,
+        foldingStrategy: "indentation",
         fontFamily: "'Cascadia Code', 'Fira Code', monospace",
         fontLigatures: true,
+        glyphMargin: false,
+        hideCursorInOverviewRuler: true,
+        hover: {
+          enabled: false
+        },
+        inlayHints: { enabled: "off" },
+        largeFileOptimizations: true,
+        lightbulb: {
+          enabled: "off"
+        },
+        links: false,
         minimap: { enabled: false },
+        occurrencesHighlight: "off",
+        overviewRulerBorder: false,
+        overviewRulerLanes: 0,
         quickSuggestions: { other: true, strings: true, comments: false },
+        renderValidationDecorations: "off",
+        selectionHighlight: false,
         smoothScrolling: true,
         snippetSuggestions: "top",
+        stickyScroll: { enabled: false },
         tabCompletion: "on",
+        unicodeHighlight: {
+          ambiguousCharacters: false,
+          invisibleCharacters: false,
+          nonBasicASCII: false
+        },
+        wordBasedSuggestions: "off",
         wordWrap: "on"
       }}
       path={path}
-      onChange={(nextValue) => {
-        onChange(nextValue ?? "");
-      }}
+      onChange={
+        onModelContentChange
+          ? undefined
+          : (nextValue) => {
+              onChange(nextValue ?? "");
+            }
+      }
     />
   );
 }

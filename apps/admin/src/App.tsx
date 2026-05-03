@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, type SetStateAction, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { loader, type OnMount } from "@monaco-editor/react";
 import * as monacoEditor from "monaco-editor";
 import "monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2.js";
@@ -88,7 +88,9 @@ import {
 loader.config({ monaco: monacoEditor });
 void installMarkdownMathTokenization(monacoEditor);
 
-const PREVIEW_UPDATE_DEBOUNCE_MS = 180;
+const PREVIEW_UPDATE_DEBOUNCE_MS = 320;
+const DRAFT_VALUE_SYNC_DEBOUNCE_MS = 420;
+const DIRTY_CHECK_DEBOUNCE_MS = 700;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";
 const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
 const ARTICLE_CURSOR_STATE_STORAGE_KEY = "admin-article-cursor-state";
@@ -710,6 +712,10 @@ function shouldStoreLiveDocumentValue(document: WorkbenchDocument) {
     document.kind !== "config" &&
     document.kind !== "themeAsset"
   );
+}
+
+function canReadFullDocumentValueFromEditor(document: WorkbenchDocument) {
+  return !shouldStoreLiveDocumentValue(document);
 }
 
 function parsePreviewSourceForDocument(
@@ -1398,7 +1404,13 @@ export function App() {
   const editorFeatureCleanupRef = useRef<(() => void) | null>(null);
   const adminHomeSaveTimerRef = useRef<number | null>(null);
   const articleCursorPersistTimerRef = useRef<number | null>(null);
+  const dirtyCheckTimerRef = useRef<number | null>(null);
+  const draftValueSyncTimerRef = useRef<number | null>(null);
   const articleCursorStatesRef = useRef<Record<string, StoredArticleCursorState>>(initialArticleCursorStates);
+  const lastStoredArticleLineNumberRef = useRef<number | null>(null);
+  const lastPreviewCursorSyncLineRef = useRef<number | null>(null);
+  const activeDocumentIdRef = useRef<string | null>(activeDocumentId);
+  const dirtyDocumentIdsRef = useRef<Set<string>>(new Set());
   const textInputDialogResolveRef = useRef<((value: string | null) => void) | null>(null);
   const textInputDialogInputRef = useRef<HTMLInputElement | null>(null);
   const draftValuesRef = useRef<Record<string, string>>({});
@@ -1413,6 +1425,8 @@ export function App() {
     return runtime;
   }, [enabledPlugins]);
   const activeDocument = useMemo(() => documents.find((document) => document.id === activeDocumentId) ?? null, [documents, activeDocumentId]);
+  activeDocumentIdRef.current = activeDocumentId;
+  dirtyDocumentIdsRef.current = new Set(documents.filter((document) => document.dirty).map((document) => document.id));
   const normalizedConfig = useMemo(() => buildNormalizedEditorConfig(configPayload), [configPayload]);
   const fileTreeMap = useMemo(() => buildFileTreeMap(treePayload?.fileTree ?? []), [treePayload?.fileTree]);
   const selectedTreeNode = selectedTreePath ? fileTreeMap.get(selectedTreePath) ?? null : null;
@@ -1878,8 +1892,115 @@ export function App() {
   const selectedTags = treePayload?.tags ?? [];
 
   const getDraftValue = useCallback(
+    (document: WorkbenchDocument) => {
+      if (document.id === activeDocumentId && canReadFullDocumentValueFromEditor(document)) {
+        return editorRef.current?.getValue() ?? draftValuesRef.current[document.id] ?? document.savedValue;
+      }
+
+      return draftValuesRef.current[document.id] ?? document.savedValue;
+    },
+    [activeDocumentId]
+  );
+
+  const getRenderDraftValue = useCallback(
     (document: WorkbenchDocument) => draftValuesRef.current[document.id] ?? document.savedValue,
     []
+  );
+
+  const computeDocumentDirtyState = useCallback(
+    (document: WorkbenchDocument, nextValue: string) =>
+      pluginRuntime.getEditorContribution(document.editorId)?.isDirty?.(document, nextValue) ??
+      nextValue !== document.savedValue,
+    [pluginRuntime]
+  );
+
+  const scheduleDocumentDirtyCheck = useCallback(
+    (documentId: string) => {
+      if (dirtyCheckTimerRef.current !== null) {
+        window.clearTimeout(dirtyCheckTimerRef.current);
+      }
+
+      dirtyCheckTimerRef.current = window.setTimeout(() => {
+        dirtyCheckTimerRef.current = null;
+        setDocuments((current) => {
+          let changed = false;
+          const nextDocuments = current.map((document) => {
+            if (document.id !== documentId) {
+              return document;
+            }
+
+            const nextValue = draftValuesRef.current[document.id] ?? document.savedValue;
+            const shouldBeDirty = computeDocumentDirtyState(document, nextValue);
+            if (document.dirty === shouldBeDirty) {
+              return document;
+            }
+
+            changed = true;
+            return { ...document, dirty: shouldBeDirty };
+          });
+
+          return changed ? nextDocuments : current;
+        });
+      }, DIRTY_CHECK_DEBOUNCE_MS);
+    },
+    [computeDocumentDirtyState]
+  );
+
+  const cancelPendingDirtyCheck = useCallback(() => {
+    if (dirtyCheckTimerRef.current !== null) {
+      window.clearTimeout(dirtyCheckTimerRef.current);
+      dirtyCheckTimerRef.current = null;
+    }
+  }, []);
+
+  const flushDocumentDraft = useCallback(
+    (document: WorkbenchDocument | null = activeDocument) => {
+      if (!document || !canReadFullDocumentValueFromEditor(document)) {
+        return null;
+      }
+
+      const editor = editorRef.current;
+      if (!editor || activeDocumentIdRef.current !== document.id) {
+        return null;
+      }
+
+      if (draftValueSyncTimerRef.current !== null) {
+        window.clearTimeout(draftValueSyncTimerRef.current);
+        draftValueSyncTimerRef.current = null;
+      }
+
+      const nextValue = editor.getValue();
+      draftValuesRef.current[document.id] = nextValue;
+      const shouldBeDirty = computeDocumentDirtyState(document, nextValue);
+      if (shouldBeDirty) {
+        dirtyDocumentIdsRef.current.add(document.id);
+      } else {
+        dirtyDocumentIdsRef.current.delete(document.id);
+      }
+      setDocuments((current) => {
+        let changed = false;
+        const nextDocuments = current.map((currentDocument) => {
+          if (currentDocument.id !== document.id || currentDocument.dirty === shouldBeDirty) {
+            return currentDocument;
+          }
+
+          changed = true;
+          return { ...currentDocument, dirty: shouldBeDirty };
+        });
+
+        return changed ? nextDocuments : current;
+      });
+      return nextValue;
+    },
+    [activeDocument, computeDocumentDirtyState]
+  );
+
+  const activateDocument = useCallback(
+    (nextDocumentIdOrUpdater: SetStateAction<string | null>) => {
+      flushDocumentDraft();
+      setActiveDocumentId(nextDocumentIdOrUpdater);
+    },
+    [flushDocumentDraft]
   );
 
   const flushArticleCursorStates = useCallback(() => {
@@ -1895,7 +2016,7 @@ export function App() {
 
   const scheduleArticleCursorStatePersist = useCallback(() => {
     if (articleCursorPersistTimerRef.current !== null) {
-      window.clearTimeout(articleCursorPersistTimerRef.current);
+      return;
     }
 
     articleCursorPersistTimerRef.current = window.setTimeout(() => {
@@ -1924,7 +2045,10 @@ export function App() {
         scrollTop: editor.getScrollTop(),
         scrollLeft: editor.getScrollLeft()
       };
-      setActiveArticleLineNumber(lineNumber);
+      if (lastStoredArticleLineNumberRef.current !== lineNumber) {
+        lastStoredArticleLineNumberRef.current = lineNumber;
+        setActiveArticleLineNumber(lineNumber);
+      }
       scheduleArticleCursorStatePersist();
     },
     [scheduleArticleCursorStatePersist]
@@ -1996,6 +2120,7 @@ export function App() {
       if (shouldFocus) {
         editor.focus();
       }
+      lastStoredArticleLineNumberRef.current = shouldMoveCursor ? nextLineNumber : currentPosition?.lineNumber ?? nextLineNumber;
       setActiveArticleLineNumber(shouldMoveCursor ? nextLineNumber : currentPosition?.lineNumber ?? nextLineNumber);
 
       window.requestAnimationFrame(() => {
@@ -2057,6 +2182,72 @@ export function App() {
       previewUpdateTimerRef.current = null;
     }, PREVIEW_UPDATE_DEBOUNCE_MS);
   }, []);
+
+  const scheduleDocumentPreviewUpdate = useCallback(
+    (document: WorkbenchDocument, nextValue: string, options?: { immediate?: boolean }) => {
+      if (!previewPaneVisible) {
+        return;
+      }
+
+      const update = () => {
+        const contribution = pluginRuntime.getEditorContribution(document.editorId);
+        if (!contribution?.supportsPreview) {
+          schedulePreviewSourceUpdate("", { immediate: true });
+          return;
+        }
+
+        const nextPreviewBody = contribution.previewSource?.(document, nextValue);
+        schedulePreviewSourceUpdate(
+          typeof nextPreviewBody === "string" ? nextPreviewBody : "",
+          { immediate: true }
+        );
+      };
+
+      if (previewUpdateTimerRef.current !== null) {
+        window.clearTimeout(previewUpdateTimerRef.current);
+        previewUpdateTimerRef.current = null;
+      }
+
+      if (options?.immediate) {
+        update();
+        return;
+      }
+
+      previewUpdateTimerRef.current = window.setTimeout(() => {
+        previewUpdateTimerRef.current = null;
+        update();
+      }, DRAFT_VALUE_SYNC_DEBOUNCE_MS);
+    },
+    [pluginRuntime, previewPaneVisible, schedulePreviewSourceUpdate]
+  );
+
+  const scheduleDraftValueSync = useCallback(
+    (document: WorkbenchDocument) => {
+      const editor = editorRef.current;
+      if (!editor) {
+        return;
+      }
+
+      if (draftValueSyncTimerRef.current !== null) {
+        window.clearTimeout(draftValueSyncTimerRef.current);
+      }
+
+      draftValueSyncTimerRef.current = window.setTimeout(() => {
+        draftValueSyncTimerRef.current = null;
+        if (activeDocumentIdRef.current !== document.id) {
+          return;
+        }
+
+        const nextValue = editor.getValue();
+        draftValuesRef.current[document.id] = nextValue;
+        scheduleDocumentDirtyCheck(document.id);
+        if (previewPaneVisible) {
+          scheduleDocumentPreviewUpdate(document, nextValue);
+        }
+      }, PREVIEW_UPDATE_DEBOUNCE_MS);
+    },
+    [previewPaneVisible, scheduleDocumentDirtyCheck, scheduleDocumentPreviewUpdate]
+  );
 
   const openPalette = (mode: "commands" | "editors" | "themeGroupCreate" | "themes") => {
     setCommandPaletteMode(mode);
@@ -2189,7 +2380,7 @@ export function App() {
           )
         );
       }
-      setActiveDocumentId(existingDocument.id);
+      activateDocument(existingDocument.id);
       setSelectedTreePath(articlePath);
       return;
     }
@@ -2197,7 +2388,7 @@ export function App() {
     const articleDocument = withResolvedEditor(buildArticleDocument(article), preferredEditorId);
     draftValuesRef.current[articleDocument.id] = articleDocument.value;
     setDocuments((current) => upsertDocument(current, articleDocument));
-    setActiveDocumentId(articleDocument.id);
+    activateDocument(articleDocument.id);
     setSelectedTreePath(articlePath);
   };
 
@@ -2288,7 +2479,7 @@ export function App() {
             )
           );
         }
-        setActiveDocumentId(existingDocument.id);
+        activateDocument(existingDocument.id);
         return;
       }
 
@@ -2296,7 +2487,7 @@ export function App() {
       const nextDocument = withResolvedEditor(buildThemeAssetDocument(payload), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
-      setActiveDocumentId(nextDocument.id);
+      activateDocument(nextDocument.id);
       setPageError(null);
     } catch (error) {
       setPageError((error as Error).message);
@@ -2327,7 +2518,7 @@ export function App() {
             )
           );
         }
-        setActiveDocumentId(existingDocument.id);
+        activateDocument(existingDocument.id);
         return;
       }
 
@@ -2343,7 +2534,7 @@ export function App() {
       }), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
-      setActiveDocumentId(nextDocument.id);
+      activateDocument(nextDocument.id);
       setPageError(null);
     } catch (error) {
       setPageError((error as Error).message);
@@ -2368,7 +2559,7 @@ export function App() {
             )
           );
         }
-        setActiveDocumentId(existingDocument.id);
+        activateDocument(existingDocument.id);
         setSidebarGroupId(PROJECT_MODULE_ID);
         return;
       }
@@ -2377,7 +2568,7 @@ export function App() {
       const nextDocument = withResolvedEditor(buildProjectDocument(payload), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
-      setActiveDocumentId(nextDocument.id);
+      activateDocument(nextDocument.id);
       setSidebarGroupId(PROJECT_MODULE_ID);
       setPageError(null);
     } catch (error) {
@@ -2410,7 +2601,7 @@ export function App() {
             )
           );
         }
-        setActiveDocumentId(existingDocument.id);
+        activateDocument(existingDocument.id);
         setSidebarGroupId(PROJECT_MODULE_ID);
         return;
       }
@@ -2419,7 +2610,7 @@ export function App() {
       const nextDocument = withResolvedEditor(buildProjectTaskDocument(payload), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
-      setActiveDocumentId(nextDocument.id);
+      activateDocument(nextDocument.id);
       setSidebarGroupId(PROJECT_MODULE_ID);
       setPageError(null);
     } catch (error) {
@@ -2452,7 +2643,7 @@ export function App() {
             )
           );
         }
-        setActiveDocumentId(existingDocument.id);
+        activateDocument(existingDocument.id);
         setSidebarGroupId(PROJECT_MODULE_ID);
         return;
       }
@@ -2461,7 +2652,7 @@ export function App() {
       const nextDocument = withResolvedEditor(buildProjectLogDocument(payload), preferredEditorId);
       draftValuesRef.current[nextDocument.id] = nextDocument.value;
       setDocuments((current) => upsertDocument(current, nextDocument));
-      setActiveDocumentId(nextDocument.id);
+      activateDocument(nextDocument.id);
       setSidebarGroupId(PROJECT_MODULE_ID);
       setPageError(null);
     } catch (error) {
@@ -2620,7 +2811,7 @@ export function App() {
         const updatedDocument = buildArticleDocument(updatedArticle);
         draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
         setDocuments((current) => upsertDocument(remapDocuments(current, dialog.path, result.path), updatedDocument));
-        setActiveDocumentId(updatedDocument.id);
+        activateDocument(updatedDocument.id);
         syncEditorValuePreservingView(updatedDocument.value);
         schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
       }
@@ -2632,7 +2823,7 @@ export function App() {
     setDocuments((current) => removeDocuments(current, dialog.path));
     draftValuesRef.current = removeArticleDraftValues(draftValuesRef.current, dialog.path);
     discardStoredArticleCursorStates(dialog.path);
-    setActiveDocumentId((current) =>
+    activateDocument((current) =>
       current?.startsWith("article:") && matchesPathPrefix(current.slice("article:".length), dialog.path)
         ? HOME_DOCUMENT_ID
         : current
@@ -2655,7 +2846,7 @@ export function App() {
           )
         );
       }
-      setActiveDocumentId(existingDocument.id);
+      activateDocument(existingDocument.id);
       return;
     }
     const payload =
@@ -2667,7 +2858,7 @@ export function App() {
     const document = withResolvedEditor(buildConfigDocument(kind, payload), preferredEditorId);
     draftValuesRef.current[document.id] = document.value;
     setDocuments((current) => upsertDocument(current, document));
-    setActiveDocumentId(document.id);
+    activateDocument(document.id);
   };
 
   const refreshWorkspace = async () => {
@@ -2681,7 +2872,7 @@ export function App() {
       loadSiteConfig()
     ]);
     setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
-    setActiveDocumentId((current) => current ?? HOME_DOCUMENT_ID);
+    activateDocument((current) => current ?? HOME_DOCUMENT_ID);
   };
 
   const saveConfigDocuments = async () => {
@@ -2782,6 +2973,8 @@ export function App() {
     if (activeDocument.kind === "home") {
       return;
     }
+    cancelPendingDirtyCheck();
+    flushDocumentDraft(activeDocument);
     setBusyMessage(`Saving ${activeDocument.title}...`);
     try {
       if (activeDocument.kind === "article") {
@@ -2923,15 +3116,15 @@ export function App() {
     setDocuments((current) => closeProjectDocuments(current, projectId));
 
     if (activeDocument && isDocumentInProject(activeDocument, projectId)) {
-      setActiveDocumentId(HOME_DOCUMENT_ID);
+      activateDocument(HOME_DOCUMENT_ID);
     }
-  }, [activeDocument]);
+  }, [activateDocument, activeDocument]);
   const openResource = useCallback(
     async (target: WorkbenchResourceTarget) => {
       switch (target.kind) {
         case "home":
           setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
-          setActiveDocumentId(HOME_DOCUMENT_ID);
+          activateDocument(HOME_DOCUMENT_ID);
           return;
         case "article":
           pendingArticleRevealRef.current =
@@ -2982,6 +3175,7 @@ export function App() {
       openProjectTaskDocument,
       openThemeAssetDocument,
       openThemeGroupConfigDocument,
+      activateDocument,
       activeDocument
     ]
   );
@@ -2997,7 +3191,7 @@ export function App() {
     hasDirtyArticleDocument,
     openHome: () => {
       setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
-      setActiveDocumentId(HOME_DOCUMENT_ID);
+      activateDocument(HOME_DOCUMENT_ID);
     },
     openResource,
     showCommandPalette: () => openPalette("commands"),
@@ -3028,7 +3222,10 @@ export function App() {
       openPalette("themeGroupCreate");
     },
     toggleSidebar: () => setSidebarVisible((current) => !current),
-    togglePreview: () => setPreviewVisible((current) => !current),
+    togglePreview: () => {
+      flushDocumentDraft();
+      setPreviewVisible((current) => !current);
+    },
     requestTextInput: (options) => {
       if (textInputDialogResolveRef.current) {
         textInputDialogResolveRef.current(null);
@@ -3232,14 +3429,8 @@ export function App() {
     }
 
     const activeValue = draftValuesRef.current[activeDocument.id] ?? activeDocument.savedValue;
-    const source = activeEditorContribution?.previewSource?.(activeDocument, activeValue);
-    if (typeof source !== "string") {
-      schedulePreviewSourceUpdate("", { immediate: true });
-      return;
-    }
-
-    schedulePreviewSourceUpdate(source, { immediate: true });
-  }, [activeDocument?.id, activeDocumentSupportsPreview, activeEditorContribution, previewPaneVisible, schedulePreviewSourceUpdate]);
+    scheduleDocumentPreviewUpdate(activeDocument, activeValue, { immediate: true });
+  }, [activeDocument?.id, activeDocumentSupportsPreview, previewPaneVisible, scheduleDocumentPreviewUpdate, schedulePreviewSourceUpdate]);
 
   useEffect(() => {
     if (!previewPaneVisible || !activeDocument || !activeDocumentSupportsPreview) {
@@ -3408,13 +3599,17 @@ export function App() {
     };
     const editorDomNode = editor.getDomNode();
 
-    const runCursorSync = () => {
+    const runCursorSync = (force = false) => {
       previewCursorSyncRafRef.current = null;
 
       const position = editor.getPosition();
       if (!position) {
         return;
       }
+      if (!force && lastPreviewCursorSyncLineRef.current === position.lineNumber) {
+        return;
+      }
+      lastPreviewCursorSyncLineRef.current = position.lineNumber;
 
       const block = findPreviewBlockByLine(previewBlocksRef.current, position.lineNumber);
       if (!block || !block.element.isConnected) {
@@ -3448,18 +3643,23 @@ export function App() {
       });
     };
 
-    const scheduleCursorSync = () => {
+    const scheduleCursorSync = (options?: { force?: boolean }) => {
       if (previewCursorSyncRafRef.current !== null) {
         return;
       }
 
-      previewCursorSyncRafRef.current = window.requestAnimationFrame(runCursorSync);
+      previewCursorSyncRafRef.current = window.requestAnimationFrame(() => runCursorSync(options?.force));
     };
 
     schedulePreviewCursorSyncRef.current = scheduleCursorSync;
+    lastPreviewCursorSyncLineRef.current = null;
 
     const cursorDisposable = editor.onDidChangeCursorPosition(() => {
+      const position = editor.getPosition();
       if (isPreviewFollowSuppressed()) {
+        return;
+      }
+      if (position && lastPreviewCursorSyncLineRef.current === position.lineNumber) {
         return;
       }
       scheduleCursorSync();
@@ -3469,7 +3669,7 @@ export function App() {
         if (isPreviewFollowSuppressed()) {
           return;
         }
-        scheduleCursorSync();
+        scheduleCursorSync({ force: true });
       }
     });
 
@@ -3550,6 +3750,16 @@ export function App() {
         articleCursorPersistTimerRef.current = null;
       }
       flushArticleCursorStates();
+
+      if (dirtyCheckTimerRef.current !== null) {
+        window.clearTimeout(dirtyCheckTimerRef.current);
+        dirtyCheckTimerRef.current = null;
+      }
+
+      if (draftValueSyncTimerRef.current !== null) {
+        window.clearTimeout(draftValueSyncTimerRef.current);
+        draftValueSyncTimerRef.current = null;
+      }
 
       if (previewUpdateTimerRef.current !== null) {
         window.clearTimeout(previewUpdateTimerRef.current);
@@ -3690,7 +3900,7 @@ export function App() {
         const index = Number(tabIndexMatch[1]) - 1;
         const targetDocument = documents[index];
         if (targetDocument) {
-          setActiveDocumentId(targetDocument.id);
+          activateDocument(targetDocument.id);
         }
         return;
       }
@@ -3706,7 +3916,7 @@ export function App() {
 
         const delta = isPageUp ? -1 : 1;
         const nextIndex = (activeIndex + delta + documents.length) % documents.length;
-        setActiveDocumentId(documents[nextIndex]?.id ?? activeDocumentId);
+        activateDocument(documents[nextIndex]?.id ?? activeDocumentId);
         return;
       }
 
@@ -3720,7 +3930,7 @@ export function App() {
         if (activeDocumentId) {
           const closedIndex = documents.findIndex((document) => document.id === activeDocumentId);
           const fallbackIndex = Math.max(0, closedIndex - 1);
-          setActiveDocumentId(nextDocuments[fallbackIndex]?.id ?? HOME_DOCUMENT_ID);
+          activateDocument(nextDocuments[fallbackIndex]?.id ?? HOME_DOCUMENT_ID);
         }
       }
     };
@@ -3731,7 +3941,7 @@ export function App() {
       document.removeEventListener("keydown", listener, true);
       window.removeEventListener("keydown", listener, true);
     };
-  }, [activeDocumentId, commandPaletteOpen, documents]);
+  }, [activateDocument, activeDocumentId, commandPaletteOpen, documents]);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorFeatureCleanupRef.current?.();
@@ -3778,6 +3988,7 @@ export function App() {
     const model = editor?.getModel();
 
     if (!editor || !model || !isArticleDocument(activeDocument)) {
+      lastStoredArticleLineNumberRef.current = null;
       setActiveArticleLineNumber(null);
       return;
     }
@@ -3798,6 +4009,7 @@ export function App() {
         editor.setScrollLeft(0);
       }
       editor.focus();
+      lastStoredArticleLineNumberRef.current = lineNumber;
       setActiveArticleLineNumber(lineNumber);
     });
 
@@ -4299,6 +4511,7 @@ export function App() {
       }
 
       draftValuesRef.current[activeDocument.id] = nextValue;
+      const shouldStoreValue = shouldStoreLiveDocumentValue(activeDocument);
       setDocuments((current) => {
         let changed = false;
         const nextDocuments = current.map((document) => {
@@ -4306,9 +4519,7 @@ export function App() {
             return document;
           }
 
-          const shouldBeDirty =
-            activeEditorContribution?.isDirty?.(document, nextValue) ?? nextValue !== document.savedValue;
-          const shouldStoreValue = shouldStoreLiveDocumentValue(document);
+          const shouldBeDirty = true;
           if (
             document.dirty !== shouldBeDirty ||
             (shouldStoreValue && document.value !== nextValue)
@@ -4327,14 +4538,40 @@ export function App() {
         return changed ? nextDocuments : current;
       });
 
+      scheduleDocumentDirtyCheck(activeDocument.id);
+
       if (activeDocumentSupportsPreview) {
-        const nextPreviewBody = activeEditorContribution?.previewSource?.(activeDocument, nextValue);
-        if (typeof nextPreviewBody === "string") {
-          schedulePreviewSourceUpdate(nextPreviewBody);
-        }
+        scheduleDocumentPreviewUpdate(activeDocument, nextValue);
       }
     },
-    [activeDocument, activeDocumentSupportsPreview, activeEditorContribution, schedulePreviewSourceUpdate]
+    [activeDocument, activeDocumentSupportsPreview, scheduleDocumentDirtyCheck, scheduleDocumentPreviewUpdate]
+  );
+
+  const handleEditorModelContentChange = useCallback(
+    (_event: monacoEditor.editor.IModelContentChangedEvent) => {
+      if (!activeDocument || shouldStoreLiveDocumentValue(activeDocument)) {
+        return;
+      }
+
+      if (!dirtyDocumentIdsRef.current.has(activeDocument.id)) {
+        dirtyDocumentIdsRef.current.add(activeDocument.id);
+        setDocuments((current) => {
+          let changed = false;
+          const nextDocuments = current.map((document) => {
+            if (document.id !== activeDocument.id || document.dirty) {
+              return document;
+            }
+
+            changed = true;
+            return { ...document, dirty: true };
+          });
+
+          return changed ? nextDocuments : current;
+        });
+      }
+      scheduleDraftValueSync(activeDocument);
+    },
+    [activeDocument, scheduleDraftValueSync]
   );
 
   const renderSidebarPaneContent = () => {
@@ -5042,7 +5279,7 @@ export function App() {
                 <button
                   className={`tab-button ${document.id === activeDocumentId ? "is-active" : ""}`}
                   key={document.id}
-                  onClick={() => setActiveDocumentId(document.id)}
+                  onClick={() => activateDocument(document.id)}
                   type="button"
                 >
                   <span>{document.title}</span>
@@ -5056,7 +5293,7 @@ export function App() {
                         setDocuments(nextDocuments);
                         if (activeDocumentId === document.id) {
                           const closedIndex = documents.findIndex((candidate) => candidate.id === document.id);
-                          setActiveDocumentId(nextDocuments[Math.max(0, closedIndex - 1)]?.id ?? HOME_DOCUMENT_ID);
+                          activateDocument(nextDocuments[Math.max(0, closedIndex - 1)]?.id ?? HOME_DOCUMENT_ID);
                         }
                       }}
                       role="presentation"
@@ -5078,9 +5315,10 @@ export function App() {
                     homeWidgets={homeWidgetContributions}
                     onChange={handleDocumentValueChange}
                     onChangeHomeConfig={updateAdminHomeConfigValue}
+                    onModelContentChange={handleEditorModelContentChange}
                     onMount={handleEditorMount}
                     path={getDocumentPath(activeDocument, null)}
-                    value={getDraftValue(activeDocument)}
+                    value={getRenderDraftValue(activeDocument)}
                   />
                 ) : (
                   <div className="empty-editor">No editor is available for this document.</div>

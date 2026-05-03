@@ -69,7 +69,7 @@
             return `${URL_prefix}#${
                 Array.from(query_data.entries())
                     .filter(([key,]) => !ignore.includes(key))
-                    .map(([key, value]) => `${key}=${value}`).join("&")
+                    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&")
             }`;
         }
     </script>

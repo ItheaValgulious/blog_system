@@ -18,9 +18,10 @@ export interface WorkspacePaths {
 
 export function loadWorkspacePaths(codeRoot: string): WorkspacePaths {
   const workspaceConfigPath = path.join(codeRoot, "config.json");
-  const rawConfig = readFileSync(workspaceConfigPath, "utf8");
-  const parsed = JSON.parse(rawConfig) as Partial<WorkspaceConfigFile>;
-  const workspaceValue = parsed.workspace?.trim();
+  const envWorkspaceValue = process.env.BLOG_SYSTEM_WORKSPACE?.trim();
+  const rawConfig = envWorkspaceValue ? null : readFileSync(workspaceConfigPath, "utf8");
+  const parsed = rawConfig ? (JSON.parse(rawConfig) as Partial<WorkspaceConfigFile>) : {};
+  const workspaceValue = envWorkspaceValue ?? parsed.workspace?.trim();
 
   if (!workspaceValue) {
     throw new Error(`"workspace" is required in ${workspaceConfigPath}.`);

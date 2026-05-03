@@ -251,10 +251,6 @@ function isMarkdownDocument(document: WorkbenchDocument | null) {
   );
 }
 
-function escapeAttribute(value: string) {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-}
-
 function buildCommutativeFence(content: string) {
   return `\`\`\`${COMMUTATIVE_FENCE_LANGUAGE}\n${content.replace(/\s+$/, "")}\n\`\`\`\n`;
 }
@@ -390,7 +386,7 @@ function readCurrentQuiverDocument(iframe: HTMLIFrameElement) {
     throw new Error("No graph payload found in Quiver URL.");
   }
 
-  return decodeCommutativeBase64(encoded);
+  return decodeCommutativeBase64(decodeURIComponent(encoded));
 }
 
 function openCommutativeModal(
@@ -417,7 +413,7 @@ function openCommutativeModal(
   const encoded = encodeCommutativeBase64(startingDocument);
   const iframe = document.createElement("iframe");
   iframe.className = "commutative-modal__iframe";
-  iframe.src = `/quiver/index.html#q=${escapeAttribute(encoded)}`;
+  iframe.src = `/quiver/index.html#q=${encodeURIComponent(encoded)}`;
   iframe.addEventListener("load", () => {
     try {
       const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
