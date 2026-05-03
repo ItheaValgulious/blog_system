@@ -704,6 +704,37 @@ function parsePlainPreviewSource(rawContent: string, directory: string): Preview
   };
 }
 
+function shouldStoreLiveDocumentValue(document: WorkbenchDocument) {
+  return (
+    document.kind !== "article" &&
+    document.kind !== "config" &&
+    document.kind !== "themeAsset"
+  );
+}
+
+function parsePreviewSourceForDocument(
+  document: WorkbenchDocument,
+  rawContent: string
+): PreviewSourceParseResult | null {
+  if (document.kind === "article") {
+    return parsePreviewSource(document.articlePath, rawContent);
+  }
+
+  if (document.kind === "projectTask") {
+    return parsePlainPreviewSource(rawContent, `projects/${document.projectId}/tasks`);
+  }
+
+  if (document.kind === "projectLog") {
+    return parsePlainPreviewSource(rawContent, `projects/${document.projectId}/logs`);
+  }
+
+  if (document.kind === "project") {
+    return parsePlainPreviewSource(rawContent, `projects/${document.projectId}`);
+  }
+
+  return null;
+}
+
 function isArticleDocument(document: WorkbenchDocument | null): document is ArticleWorkbenchDocument {
   return Boolean(document && document.kind === "article");
 }
@@ -1500,41 +1531,10 @@ export function App() {
       null
     );
   }, [activeDocument, availableEditors, pluginRuntime]);
-  const activePreviewSource = useMemo(() => {
-    if (!activeDocument || !activeEditorContribution?.supportsPreview) {
-      return null;
-    }
-
-    const activeValue = draftValuesRef.current[activeDocument.id] ?? activeDocument.savedValue;
-    const source = activeEditorContribution.previewSource?.(
-      activeDocument,
-      activeValue
-    );
-    if (typeof source !== "string") {
-      return null;
-    }
-
-    if (activeDocument.kind === "article") {
-      return parsePreviewSource(activeDocument.articlePath, source);
-    }
-
-    if (activeDocument.kind === "projectTask") {
-      return parsePlainPreviewSource(source, `projects/${activeDocument.projectId}/tasks`);
-    }
-
-    if (activeDocument.kind === "projectLog") {
-      return parsePlainPreviewSource(source, `projects/${activeDocument.projectId}/logs`);
-    }
-
-    if (activeDocument.kind === "project") {
-      return parsePlainPreviewSource(source, `projects/${activeDocument.projectId}`);
-    }
-
-    return null;
-  }, [activeDocument, activeEditorContribution]);
   const activeDocumentSupportsPreview = Boolean(
-    activeDocument && activeEditorContribution?.supportsPreview && activePreviewSource
+    activeDocument && activeEditorContribution?.supportsPreview
   );
+  const previewPaneVisible = activeDocumentSupportsPreview && previewVisible;
   const hasDirtyArticleDocument = useCallback(
     () => documents.some((document) => document.kind === "article" && document.dirty),
     [documents]
@@ -3226,31 +3226,39 @@ export function App() {
   }, [activeDocumentSupportsPreview]);
 
   useEffect(() => {
-    if (!activeDocument || !activePreviewSource) {
+    if (!previewPaneVisible || !activeDocument || !activeDocumentSupportsPreview) {
       schedulePreviewSourceUpdate("", { immediate: true });
       return;
     }
 
-    if (!activeDocumentSupportsPreview) {
+    const activeValue = draftValuesRef.current[activeDocument.id] ?? activeDocument.savedValue;
+    const source = activeEditorContribution?.previewSource?.(activeDocument, activeValue);
+    if (typeof source !== "string") {
+      schedulePreviewSourceUpdate("", { immediate: true });
       return;
     }
 
-    schedulePreviewSourceUpdate(activePreviewSource.body, { immediate: true });
-  }, [activeDocument?.id, activeDocumentSupportsPreview, activePreviewSource]);
+    schedulePreviewSourceUpdate(source, { immediate: true });
+  }, [activeDocument?.id, activeDocumentSupportsPreview, activeEditorContribution, previewPaneVisible, schedulePreviewSourceUpdate]);
 
   useEffect(() => {
+    if (!previewPaneVisible || !activeDocument || !activeDocumentSupportsPreview) {
+      previewBlocksRef.current = [];
+      return;
+    }
+
     const previewRoot = previewProseRef.current;
     const requestId = previewRenderRequestRef.current + 1;
     previewRenderRequestRef.current = requestId;
+    const parsedSource = parsePreviewSourceForDocument(activeDocument, previewSourceText);
 
-    if (!previewRoot || !activeDocument || !activePreviewSource || !activeDocumentSupportsPreview) {
+    if (!previewRoot || !parsedSource) {
       previewRoot?.replaceChildren();
       previewBlocksRef.current = [];
       setPageError((current) => (current && current.includes("end of the stream") ? null : current));
       return;
     }
 
-    const parsedSource = activePreviewSource;
     let previewRenderError = parsedSource.frontmatterError;
     let renderBlockConfig = markdownBlockConfigPayload?.value ?? null;
     let nextBlocks: ParsedPreviewBlock[];
@@ -3376,10 +3384,11 @@ export function App() {
       });
   }, [
     activeDocument?.id,
+    activeDocument?.kind,
     activeDocumentSupportsPreview,
     activePreviewFenceRenderers,
-    activePreviewSource,
     markdownBlockConfigPayload?.raw,
+    previewPaneVisible,
     previewReadyVersion,
     previewSourceText
   ]);
@@ -4299,9 +4308,17 @@ export function App() {
 
           const shouldBeDirty =
             activeEditorContribution?.isDirty?.(document, nextValue) ?? nextValue !== document.savedValue;
-          if (document.dirty !== shouldBeDirty || document.value !== nextValue) {
+          const shouldStoreValue = shouldStoreLiveDocumentValue(document);
+          if (
+            document.dirty !== shouldBeDirty ||
+            (shouldStoreValue && document.value !== nextValue)
+          ) {
             changed = true;
-            return { ...document, dirty: shouldBeDirty, value: nextValue };
+            return {
+              ...document,
+              dirty: shouldBeDirty,
+              value: shouldStoreValue ? nextValue : document.value
+            };
           }
 
           return document;
@@ -4336,6 +4353,7 @@ export function App() {
           activeArticleLineNumber={activeArticleLineNumber ?? 1}
           activeDocument={activeDocument}
           api={workbenchApi}
+          getDocumentValue={getDraftValue}
           projects={projectsPayload?.projects ?? []}
         />
       );
@@ -5011,9 +5029,9 @@ export function App() {
         />
 
         <section
-          className={`workspace-grid ${activeDocumentSupportsPreview ? "with-preview" : ""}`}
+          className={`workspace-grid ${previewPaneVisible ? "with-preview" : ""}`}
           style={
-            activeDocumentSupportsPreview
+            previewPaneVisible
               ? { gridTemplateColumns: `minmax(0, 1fr) 8px ${previewWidth}px` }
               : undefined
           }
@@ -5073,7 +5091,7 @@ export function App() {
             </div>
           </div>
 
-          {activeDocumentSupportsPreview ? (
+          {previewPaneVisible ? (
             <>
               <div
                 className="panel-resizer vertical"

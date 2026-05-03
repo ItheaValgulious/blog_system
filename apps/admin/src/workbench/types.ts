@@ -160,6 +160,7 @@ export interface PaneComponentProps {
   activeDocument: WorkbenchDocument | null;
   activeArticleLineNumber: number;
   api: WorkbenchApi;
+  getDocumentValue: (document: WorkbenchDocument) => string;
   projects: ProjectSummary[];
 }
 

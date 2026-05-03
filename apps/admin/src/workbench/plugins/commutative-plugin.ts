@@ -30,6 +30,7 @@ interface CommutativeFenceBlock {
 
 interface CommutativeZoneRecord {
   block: CommutativeFenceBlock;
+  key: string;
   domNode: HTMLDivElement;
   height: number;
   measure: () => void;
@@ -40,6 +41,42 @@ interface CommutativeZoneRecord {
 
 let activeMarkdownEditor: monacoEditor.editor.IStandaloneCodeEditor | null = null;
 let activeMonacoApi: typeof monacoEditor | null = null;
+
+function getBlockKey(block: CommutativeFenceBlock) {
+  return `${block.startLineNumber}:${block.endLineNumber}:${block.content}`;
+}
+
+function getBlockSignature(blocks: CommutativeFenceBlock[]) {
+  return blocks.map(getBlockKey).join("\n---commutative-block---\n");
+}
+
+function contentChangeMayAffectCommutativeBlocks(
+  editor: monacoEditor.editor.IStandaloneCodeEditor,
+  event: monacoEditor.editor.IModelContentChangedEvent
+) {
+  const model = editor.getModel();
+  if (!model) {
+    return true;
+  }
+
+  return event.changes.some((change) => {
+    const insertedText = change.text;
+    if (insertedText.includes("```") || insertedText.includes(COMMUTATIVE_FENCE_LANGUAGE)) {
+      return true;
+    }
+
+    const startLine = Math.max(1, change.range.startLineNumber - 1);
+    const endLine = Math.min(model.getLineCount(), change.range.endLineNumber + 1);
+    for (let lineNumber = startLine; lineNumber <= endLine; lineNumber += 1) {
+      const line = model.getLineContent(lineNumber);
+      if (line.includes("```") || line.includes(COMMUTATIVE_FENCE_LANGUAGE)) {
+        return true;
+      }
+    }
+
+    return false;
+  });
+}
 
 function ensureAdminStyles() {
   if (document.getElementById(STYLE_ID)) {
@@ -542,14 +579,14 @@ function setEditorHiddenAreas(
 function applyCommutativeZones(
   editor: monacoEditor.editor.IStandaloneCodeEditor,
   monaco: typeof monacoEditor,
-  previousZones: CommutativeZoneRecord[]
+  previousZones: CommutativeZoneRecord[],
+  blocks: CommutativeFenceBlock[]
 ) {
   const model = editor.getModel();
   if (!model) {
     return [];
   }
 
-  const blocks = findCommutativeBlocks(model);
   const hiddenAreas = blocks.map(
     (block) =>
       new monaco.Range(
@@ -575,6 +612,7 @@ function applyCommutativeZones(
       rendered.setZoneId(zoneId);
       nextZones.push({
         block,
+        key: getBlockKey(block),
         domNode: rendered.domNode,
         dispose: rendered.dispose,
         height: rendered.height,
@@ -732,21 +770,25 @@ export const commutativePlugin: PluginDefinition = {
         activeMarkdownEditor = editor;
         activeMonacoApi = monaco;
         let zones: CommutativeZoneRecord[] = [];
-        let hiddenAreaSyncFrame = 0;
-        const scheduleHiddenAreaSync = () => {
-          if (hiddenAreaSyncFrame) {
-            window.cancelAnimationFrame(hiddenAreaSyncFrame);
-          }
-          hiddenAreaSyncFrame = window.requestAnimationFrame(() => {
-            hiddenAreaSyncFrame = 0;
-            syncHiddenAreasForCurrentBlocks(editor, monaco);
-          });
-        };
+        let blockSignature = "";
+        let refreshTimer = 0;
         const refresh = () => {
-          zones = applyCommutativeZones(editor, monaco, zones);
-          // Monaco can clear hidden areas after content resets such as save-time
-          // normalization, so re-apply on the next frame as well.
-          scheduleHiddenAreaSync();
+          refreshTimer = 0;
+          const blocks = findCommutativeBlocks(editor.getModel()!);
+          const nextSignature = getBlockSignature(blocks);
+          if (nextSignature === blockSignature) {
+            syncHiddenAreasForCurrentBlocks(editor, monaco);
+            return;
+          }
+
+          blockSignature = nextSignature;
+          zones = applyCommutativeZones(editor, monaco, zones, blocks);
+        };
+        const scheduleRefresh = () => {
+          if (refreshTimer) {
+            window.clearTimeout(refreshTimer);
+          }
+          refreshTimer = window.setTimeout(refresh, 120);
         };
         const editorDomNode = editor.getDomNode();
         const pointerDownListener = (event: MouseEvent) => {
@@ -761,11 +803,14 @@ export const commutativePlugin: PluginDefinition = {
         };
 
         refresh();
-        const contentDisposable = editor.onDidChangeModelContent(() => {
-          refresh();
+        const contentDisposable = editor.onDidChangeModelContent((event) => {
+          if (zones.length > 0 || blockSignature || contentChangeMayAffectCommutativeBlocks(editor, event)) {
+            scheduleRefresh();
+          }
         });
         const modelDisposable = editor.onDidChangeModel(() => {
           zones = [];
+          blockSignature = "";
           refresh();
         });
         editorDomNode?.addEventListener("mousedown", pointerDownListener, true);
@@ -777,8 +822,8 @@ export const commutativePlugin: PluginDefinition = {
           if (activeMonacoApi === monaco) {
             activeMonacoApi = null;
           }
-          if (hiddenAreaSyncFrame) {
-            window.cancelAnimationFrame(hiddenAreaSyncFrame);
+          if (refreshTimer) {
+            window.clearTimeout(refreshTimer);
           }
           editorDomNode?.removeEventListener("mousedown", pointerDownListener, true);
           contentDisposable.dispose();

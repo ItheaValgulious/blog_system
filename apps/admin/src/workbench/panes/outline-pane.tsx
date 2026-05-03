@@ -33,7 +33,12 @@ function renderOutlineNode(
   );
 }
 
-export function OutlinePane({ activeArticleLineNumber, activeDocument, api }: PaneComponentProps) {
+export function OutlinePane({
+  activeArticleLineNumber,
+  activeDocument,
+  api,
+  getDocumentValue
+}: PaneComponentProps) {
   if (!activeDocument || activeDocument.kind !== "article") {
     return (
       <div className="sidebar-scroll">
@@ -45,7 +50,7 @@ export function OutlinePane({ activeArticleLineNumber, activeDocument, api }: Pa
     );
   }
 
-  const outline = extractMarkdownOutline(activeDocument.articlePath, activeDocument.value);
+  const outline = extractMarkdownOutline(activeDocument.articlePath, getDocumentValue(activeDocument));
   const activeItemId = findActiveMarkdownOutlineItemId(outline, activeArticleLineNumber);
 
   return (

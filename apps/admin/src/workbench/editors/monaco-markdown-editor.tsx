@@ -2,6 +2,8 @@ import Editor from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
 
 interface MonacoMarkdownEditorProps {
+  editorKey?: string;
+  language?: string;
   onChange: (nextValue: string) => void;
   onMount: (
     editor: monacoEditor.editor.IStandaloneCodeEditor,
@@ -12,6 +14,8 @@ interface MonacoMarkdownEditorProps {
 }
 
 export function MonacoMarkdownEditor({
+  editorKey,
+  language = "markdown",
   onChange,
   onMount,
   path,
@@ -19,8 +23,10 @@ export function MonacoMarkdownEditor({
 }: MonacoMarkdownEditorProps) {
   return (
     <Editor
-      defaultLanguage="markdown"
-      language="markdown"
+      key={editorKey ?? `${path}:${language}`}
+      defaultLanguage={language}
+      defaultValue={value}
+      language={language}
       onMount={onMount}
       options={{
         automaticLayout: true,
@@ -34,7 +40,6 @@ export function MonacoMarkdownEditor({
         wordWrap: "on"
       }}
       path={path}
-      value={value}
       onChange={(nextValue) => {
         onChange(nextValue ?? "");
       }}
