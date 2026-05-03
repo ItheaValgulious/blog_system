@@ -49,8 +49,8 @@ export function MonacoMarkdownEditor({
         find: {
           addExtraSpaceOnTop: false
         },
-        folding: false,
-        foldingStrategy: "indentation",
+        folding: true,
+        foldingStrategy: "auto",
         fontFamily: "'Cascadia Code', 'Fira Code', monospace",
         fontLigatures: true,
         glyphMargin: false,

@@ -22,9 +22,13 @@ const MIME_TYPES: Record<string, string> = {
   ".jpg": "image/jpeg",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
+  ".ttf": "font/ttf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
   ".webp": "image/webp"
 };
 
@@ -33,7 +37,7 @@ function isProxiedPath(pathname: string) {
 }
 
 function isStaticAdminAsset(pathname: string) {
-  return pathname === "/favicon.svg" || pathname.startsWith("/assets/");
+  return pathname === "/favicon.svg" || pathname.startsWith("/assets/") || pathname.startsWith("/quiver/");
 }
 
 function getContentType(filePath: string) {

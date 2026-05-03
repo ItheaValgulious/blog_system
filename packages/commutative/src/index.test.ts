@@ -63,6 +63,21 @@ test("commutative base64 helpers round-trip", () => {
   assert.deepEqual(decoded, original);
 });
 
+test("parseCommutative accepts encoded base64 payloads", () => {
+  const original = parseCommutative(
+    JSON.stringify([
+      0,
+      2,
+      [0, 0, "A"],
+      [1, 0, "B"],
+      [0, 1, "f"]
+    ])
+  );
+  const encoded = encodeCommutativeBase64(original);
+
+  assert.deepEqual(parseCommutative(encoded), original);
+});
+
 test("renderCommutativeStaticHtml emits HTML and SVG", () => {
   const document = parseCommutative(
     JSON.stringify([

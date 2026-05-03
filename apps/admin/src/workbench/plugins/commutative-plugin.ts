@@ -5,7 +5,6 @@ import {
   encodeCommutativeBase64,
   parseCommutative,
   renderCommutativeStaticHtml,
-  serializeCommutative,
   commutativeCssText
 } from "@blog-system/commutative";
 
@@ -13,30 +12,15 @@ import type * as monacoEditor from "monaco-editor";
 import type { PluginDefinition, WorkbenchDocument } from "../types";
 
 const INSERT_COMMAND_ID = "commutative.insertBlock";
+const EDIT_CURRENT_COMMAND_ID = "commutative.editCurrentBlock";
 const MODAL_ID = "commutative-modal-root";
 const STYLE_ID = "commutative-admin-style";
-const WIDGET_MIN_HEIGHT = 120;
-
-interface MeasuredViewZone extends monacoEditor.editor.IViewZone {
-  heightInPx: number;
-}
 
 interface CommutativeFenceBlock {
   content: string;
   endLineNumber: number;
   range: monacoEditor.IRange;
   startLineNumber: number;
-}
-
-interface CommutativeZoneRecord {
-  block: CommutativeFenceBlock;
-  key: string;
-  domNode: HTMLDivElement;
-  height: number;
-  measure: () => void;
-  dispose: () => void;
-  viewZone: MeasuredViewZone;
-  zoneId: string;
 }
 
 let activeMarkdownEditor: monacoEditor.editor.IStandaloneCodeEditor | null = null;
@@ -86,79 +70,6 @@ function ensureAdminStyles() {
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = `
-${commutativeCssText}
-
-.commutative-editor-zone {
-  position: relative;
-  padding: 10px 0 14px;
-  pointer-events: auto;
-  z-index: 20;
-}
-
-.commutative-editor-card {
-  margin: 0 10px;
-  border: 1px solid var(--wb-border);
-  border-radius: 16px;
-  background: var(--wb-bg-elevated);
-  box-shadow: 0 12px 30px rgba(10, 16, 24, 0.18);
-  overflow: hidden;
-  cursor: pointer;
-  color: var(--wb-foreground);
-}
-
-.commutative-editor-zone .commutative .cg-svg {
-  max-width: none;
-  height: auto;
-}
-
-.commutative-editor-card__toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--wb-border);
-  background: var(--wb-bg-panel);
-}
-
-.commutative-editor-card__title {
-  font: 600 12px/1.2 "Cascadia Code", "Fira Code", monospace;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--wb-foreground);
-}
-
-.commutative-editor-card__hint {
-  font: 500 12px/1.2 "Georgia", serif;
-  color: var(--wb-foreground-muted);
-}
-
-.commutative-editor-card__body {
-  padding: 8px 14px 14px;
-  background: var(--wb-bg-elevated);
-}
-
-.commutative-editor-card__error {
-  margin: 0 16px 14px 54px;
-  border: 1px solid #c44536;
-  border-radius: 16px;
-  background: var(--wb-bg-panel);
-  color: #c44536;
-  padding: 16px 18px;
-}
-
-.commutative-editor-card__error strong {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 13px;
-}
-
-.commutative-editor-card__error code {
-  display: block;
-  white-space: pre-wrap;
-  font-size: 12px;
-}
-
 .commutative-modal {
   position: fixed;
   inset: 0;
@@ -251,8 +162,9 @@ function isMarkdownDocument(document: WorkbenchDocument | null) {
   );
 }
 
-function buildCommutativeFence(content: string) {
-  return `\`\`\`${COMMUTATIVE_FENCE_LANGUAGE}\n${content.replace(/\s+$/, "")}\n\`\`\`\n`;
+function buildCommutativeFence(document: ReturnType<typeof parseCommutative>) {
+  const encoded = encodeCommutativeBase64(document);
+  return `\`\`\`${COMMUTATIVE_FENCE_LANGUAGE}\n${encoded}\n\`\`\`\n`;
 }
 
 function findCommutativeBlocks(model: monacoEditor.editor.ITextModel): CommutativeFenceBlock[] {
@@ -283,86 +195,38 @@ function findCommutativeBlocks(model: monacoEditor.editor.ITextModel): Commutati
   });
 }
 
-function layoutWidgetHeightFromHtml(html: string, fallbackHeight: number) {
-  const heightMatch =
-    /\bheight="(\d+(?:\.\d+)?)"/i.exec(html) ??
-    /viewBox="0 0 [^"]+ (\d+(?:\.\d+)?)"/.exec(html);
-  const parsedHeight = heightMatch ? Number(heightMatch[1]) : NaN;
-  // Seed the zone with a reasonable estimate before we can measure the real DOM.
-  return Math.max(WIDGET_MIN_HEIGHT, Number.isFinite(parsedHeight) ? parsedHeight + 64 : fallbackHeight);
-}
-
-function measureZoneHeight(zoneNode: HTMLDivElement) {
-  const card = zoneNode.firstElementChild;
-  if (!(card instanceof HTMLElement)) {
-    return WIDGET_MIN_HEIGHT;
+function findBlockAtSelection(editor: monacoEditor.editor.IStandaloneCodeEditor) {
+  const model = editor.getModel();
+  const selection = editor.getSelection();
+  if (!model || !selection) {
+    return null;
   }
 
-  const zoneStyle = window.getComputedStyle(zoneNode);
-  const paddingTop = Number.parseFloat(zoneStyle.paddingTop) || 0;
-  const paddingBottom = Number.parseFloat(zoneStyle.paddingBottom) || 0;
-
-  return Math.max(
-    WIDGET_MIN_HEIGHT,
-    Math.ceil(card.getBoundingClientRect().height + paddingTop + paddingBottom)
+  return (
+    findCommutativeBlocks(model).find(
+      (block) =>
+        selection.startLineNumber >= block.startLineNumber &&
+        selection.startLineNumber <= block.endLineNumber
+    ) ?? null
   );
 }
 
-function createZoneMeasurer(
+function foldCommutativeBlocks(
   editor: monacoEditor.editor.IStandaloneCodeEditor,
-  zoneNode: HTMLDivElement,
-  viewZone: MeasuredViewZone
+  blocks: CommutativeFenceBlock[]
 ) {
-  let zoneId = "";
-  let frame = 0;
-  let lastHeight = viewZone.heightInPx;
-  const observer =
-    typeof ResizeObserver === "function"
-      ? new ResizeObserver(() => {
-          scheduleMeasure();
-        })
-      : null;
-
-  const applyMeasuredHeight = () => {
-    frame = 0;
-    const nextHeight = measureZoneHeight(zoneNode);
-    if (nextHeight === lastHeight) {
-      return;
-    }
-
-    lastHeight = nextHeight;
-    viewZone.heightInPx = nextHeight;
-    if (zoneId) {
-      editor.changeViewZones((accessor) => {
-        accessor.layoutZone(zoneId);
-      });
-    }
-  };
-
-  const scheduleMeasure = () => {
-    if (frame) {
-      window.cancelAnimationFrame(frame);
-    }
-    frame = window.requestAnimationFrame(applyMeasuredHeight);
-  };
-
-  const observedCard = zoneNode.firstElementChild;
-  if (observer && observedCard instanceof HTMLElement) {
-    observer.observe(observedCard);
+  if (blocks.length === 0) {
+    return;
   }
 
-  return {
-    measure: scheduleMeasure,
-    setZoneId(nextZoneId: string) {
-      zoneId = nextZoneId;
-    },
-    dispose() {
-      if (frame) {
-        window.cancelAnimationFrame(frame);
-      }
-      observer?.disconnect();
-    }
-  };
+  const action = editor.getAction("editor.fold");
+  if (!action) {
+    return;
+  }
+
+  void action.run({
+    selectionLines: blocks.map((block) => block.startLineNumber)
+  }).catch(() => undefined);
 }
 
 function readCurrentQuiverDocument(iframe: HTMLIFrameElement) {
@@ -373,8 +237,6 @@ function readCurrentQuiverDocument(iframe: HTMLIFrameElement) {
 
   const currentUrl = new URL(iframeWindow.location.href);
   const hash = currentUrl.hash.startsWith("#") ? currentUrl.hash.slice(1) : currentUrl.hash;
-  // Use manual parsing instead of URLSearchParams, because URLSearchParams decodes
-  // "+" as space, which corrupts base64 data produced by Quiver's own parser.
   const encoded = hash.split("&").reduce<string | null>((found, segment) => {
     if (found !== null) return found;
     const eqIndex = segment.indexOf("=");
@@ -391,7 +253,6 @@ function readCurrentQuiverDocument(iframe: HTMLIFrameElement) {
 
 function openCommutativeModal(
   editor: monacoEditor.editor.IStandaloneCodeEditor,
-  monaco: typeof monacoEditor,
   block: CommutativeFenceBlock
 ) {
   ensureAdminStyles();
@@ -421,7 +282,7 @@ function openCommutativeModal(
       const globalPanel = iframeDoc.querySelector(".global");
       if (globalPanel) (globalPanel as HTMLElement).style.display = "none";
     } catch {
-      // cross-origin access denied — ignore
+      // Ignore cross-origin access failures.
     }
   });
 
@@ -431,7 +292,7 @@ function openCommutativeModal(
 
   const apply = () => {
     const nextDocument = readCurrentQuiverDocument(iframe);
-    const nextFence = buildCommutativeFence(serializeCommutative(nextDocument).trimEnd());
+    const nextFence = buildCommutativeFence(nextDocument);
     editor.executeEdits("commutative-modal", [
       {
         range: block.range,
@@ -440,6 +301,12 @@ function openCommutativeModal(
     ]);
     close();
     editor.focus();
+    window.setTimeout(() => {
+      const model = editor.getModel();
+      if (model) {
+        foldCommutativeBlocks(editor, findCommutativeBlocks(model));
+      }
+    }, 120);
   };
 
   root.innerHTML = `
@@ -447,7 +314,7 @@ function openCommutativeModal(
       <div class="commutative-modal__header">
         <div>
           <div class="commutative-modal__title">Commutative Editor</div>
-          <div class="commutative-modal__status">Use Quiver's Save action first, then Apply here to write JSON back into Markdown.</div>
+          <div class="commutative-modal__status">Use Quiver's Save action first, then Apply here to write base64 back into Markdown.</div>
         </div>
         <div class="commutative-modal__actions">
           <button class="commutative-modal__button" data-action="cancel" type="button">Cancel</button>
@@ -455,7 +322,7 @@ function openCommutativeModal(
       </div>
       <div></div>
       <div class="commutative-modal__footer">
-        <div class="commutative-modal__status">Stored format: raw JSON inside \`\`\`commutative fences.</div>
+        <div class="commutative-modal__status">Stored format: base64 inside \`\`\`commutative fences.</div>
         <div class="commutative-modal__actions">
           <button class="commutative-modal__button" data-action="cancel-footer" type="button">Close</button>
           <button class="commutative-modal__button primary" data-action="apply" type="button">Apply</button>
@@ -485,192 +352,6 @@ function openCommutativeModal(
   document.body.appendChild(root);
 }
 
-function renderBlockZone(
-  editor: monacoEditor.editor.IStandaloneCodeEditor,
-  monaco: typeof monacoEditor,
-  block: CommutativeFenceBlock
-) {
-  ensureAdminStyles();
-  const zoneNode = document.createElement("div");
-  zoneNode.className = "commutative-editor-zone";
-
-  try {
-    const rendered = renderCommutativeStaticHtml(parseCommutative(block.content), {
-      className: "commutative--editor"
-    });
-    const initialHeight = layoutWidgetHeightFromHtml(rendered.html, WIDGET_MIN_HEIGHT);
-    zoneNode.innerHTML = `
-      <div class="commutative-editor-card" data-commutative-open="true">
-        <div class="commutative-editor-card__toolbar">
-          <span class="commutative-editor-card__title">Commutative</span>
-          <span class="commutative-editor-card__hint">Click to edit in Quiver</span>
-        </div>
-        <div class="commutative-editor-card__body">${rendered.html}</div>
-      </div>
-    `;
-    zoneNode.querySelector('[data-commutative-open="true"]')?.addEventListener("click", () => {
-      openCommutativeModal(editor, monaco, block);
-    });
-    const viewZone: MeasuredViewZone = {
-      afterLineNumber: block.startLineNumber - 1,
-      domNode: zoneNode,
-      heightInPx: initialHeight,
-      showInHiddenAreas: true,
-      suppressMouseDown: true
-    };
-    const measurer = createZoneMeasurer(editor, zoneNode, viewZone);
-    return {
-      domNode: zoneNode,
-      dispose: measurer.dispose,
-      height: initialHeight,
-      measure: measurer.measure,
-      setZoneId: measurer.setZoneId,
-      viewZone
-    };
-  } catch (error) {
-    zoneNode.innerHTML = `
-      <div class="commutative-editor-card__error" data-commutative-open="true">
-        <strong>Invalid commutative JSON</strong>
-        <code>${String((error as Error).message ?? error)}</code>
-      </div>
-    `;
-    zoneNode.querySelector('[data-commutative-open="true"]')?.addEventListener("click", () => {
-      openCommutativeModal(editor, monaco, block);
-    });
-    const viewZone: MeasuredViewZone = {
-      afterLineNumber: block.startLineNumber - 1,
-      domNode: zoneNode,
-      heightInPx: WIDGET_MIN_HEIGHT,
-      showInHiddenAreas: true,
-      suppressMouseDown: true
-    };
-    const measurer = createZoneMeasurer(editor, zoneNode, viewZone);
-    return {
-      domNode: zoneNode,
-      dispose: measurer.dispose,
-      height: WIDGET_MIN_HEIGHT,
-      measure: measurer.measure,
-      setZoneId: measurer.setZoneId,
-      viewZone
-    };
-  }
-}
-
-function setEditorHiddenAreas(
-  editor: monacoEditor.editor.IStandaloneCodeEditor,
-  ranges: monacoEditor.IRange[]
-) {
-  const e = editor as Record<string, unknown>;
-  try {
-    if (typeof e.setHiddenAreas === "function") {
-      e.setHiddenAreas(ranges);
-    } else if (typeof e._setHiddenAreas === "function") {
-      e._setHiddenAreas(ranges);
-    }
-  } catch {
-    // Monaco internal API may not be available — zones still provide visual replacement
-  }
-}
-
-function applyCommutativeZones(
-  editor: monacoEditor.editor.IStandaloneCodeEditor,
-  monaco: typeof monacoEditor,
-  previousZones: CommutativeZoneRecord[],
-  blocks: CommutativeFenceBlock[]
-) {
-  const model = editor.getModel();
-  if (!model) {
-    return [];
-  }
-
-  const hiddenAreas = blocks.map(
-    (block) =>
-      new monaco.Range(
-        block.startLineNumber,
-        1,
-        block.endLineNumber,
-        model.getLineMaxColumn(block.endLineNumber)
-      )
-  );
-
-  editor.changeViewZones((accessor) => {
-    for (const zone of previousZones) {
-      zone.dispose();
-      accessor.removeZone(zone.zoneId);
-    }
-  });
-
-  const nextZones: CommutativeZoneRecord[] = [];
-  editor.changeViewZones((accessor) => {
-    for (const block of blocks) {
-      const rendered = renderBlockZone(editor, monaco, block);
-      const zoneId = accessor.addZone(rendered.viewZone);
-      rendered.setZoneId(zoneId);
-      nextZones.push({
-        block,
-        key: getBlockKey(block),
-        domNode: rendered.domNode,
-        dispose: rendered.dispose,
-        height: rendered.height,
-        measure: rendered.measure,
-        viewZone: rendered.viewZone,
-        zoneId
-      });
-    }
-  });
-
-  for (const zone of nextZones) {
-    zone.measure();
-  }
-
-  setEditorHiddenAreas(editor, hiddenAreas);
-
-  return nextZones;
-}
-
-function syncHiddenAreasForCurrentBlocks(
-  editor: monacoEditor.editor.IStandaloneCodeEditor,
-  monaco: typeof monacoEditor
-) {
-  const model = editor.getModel();
-  if (!model) {
-    return;
-  }
-
-  const hiddenAreas = findCommutativeBlocks(model).map(
-    (block) =>
-      new monaco.Range(
-        block.startLineNumber,
-        1,
-        block.endLineNumber,
-        model.getLineMaxColumn(block.endLineNumber)
-      )
-  );
-  setEditorHiddenAreas(editor, hiddenAreas);
-}
-
-function findVisibleZoneAtPoint(
-  zones: CommutativeZoneRecord[],
-  clientX: number,
-  clientY: number
-) {
-  for (const zone of zones) {
-    const bounds = zone.domNode.getBoundingClientRect();
-    if (
-      bounds.width > 0 &&
-      bounds.height > 0 &&
-      clientX >= bounds.left &&
-      clientX <= bounds.right &&
-      clientY >= bounds.top &&
-      clientY <= bounds.bottom
-    ) {
-      return zone;
-    }
-  }
-
-  return null;
-}
-
 function insertCommutativeBlockAtSelection(
   editor: monacoEditor.editor.IStandaloneCodeEditor,
   monaco: typeof monacoEditor
@@ -681,8 +362,7 @@ function insertCommutativeBlockAtSelection(
     return false;
   }
 
-  const serialized = serializeCommutative(createEmptyCommutativeDocument()).trimEnd();
-  const snippet = buildCommutativeFence(serialized);
+  const snippet = buildCommutativeFence(createEmptyCommutativeDocument());
   const containingBlock = findCommutativeBlocks(model).find(
     (block) =>
       selection.startLineNumber >= block.startLineNumber &&
@@ -719,13 +399,42 @@ function insertCommutativeBlockAtSelection(
     column: 1
   });
   editor.focus();
+
+  window.setTimeout(() => {
+    const nextModel = editor.getModel();
+    if (!nextModel) {
+      return;
+    }
+
+    const blocks = findCommutativeBlocks(nextModel);
+    const insertedBlock =
+      blocks.find((block) => block.startLineNumber === insertedLine) ??
+      blocks.find(
+        (block) => insertedLine >= block.startLineNumber && insertedLine <= block.endLineNumber
+      );
+    foldCommutativeBlocks(editor, blocks);
+    if (insertedBlock) {
+      openCommutativeModal(editor, insertedBlock);
+    }
+  }, 120);
+  return true;
+}
+
+function editCurrentCommutativeBlock(editor: monacoEditor.editor.IStandaloneCodeEditor) {
+  const block = findBlockAtSelection(editor);
+  if (!block) {
+    window.alert("Place the cursor inside a commutative block first.");
+    return false;
+  }
+
+  openCommutativeModal(editor, block);
   return true;
 }
 
 export const commutativePlugin: PluginDefinition = {
   id: "commutative",
   label: "Commutative",
-  description: "Adds commutative diagram widgets, preview rendering, and Quiver-based editing for fenced commutative blocks.",
+  description: "Adds right-pane preview rendering and Quiver-based editing for fenced commutative blocks.",
   activate(context) {
     context.registerMarkdownFenceRenderer({
       language: COMMUTATIVE_FENCE_LANGUAGE,
@@ -753,8 +462,21 @@ export const commutativePlugin: PluginDefinition = {
       }
     });
 
+    context.registerCommand({
+      id: EDIT_CURRENT_COMMAND_ID,
+      title: "Edit: Current Commutative Diagram",
+      keywords: ["diagram", "quiver", "commutative", "graph", "markdown"],
+      handler() {
+        const editor = activeMarkdownEditor;
+        if (!editor) {
+          return;
+        }
+        editCurrentCommutativeBlock(editor);
+      }
+    });
+
     context.registerMarkdownEditorFeature({
-      id: "commutative-markdown-widget",
+      id: "commutative-markdown-source-folding",
       matches(document) {
         return isMarkdownDocument(document);
       },
@@ -765,51 +487,45 @@ export const commutativePlugin: PluginDefinition = {
 
         activeMarkdownEditor = editor;
         activeMonacoApi = monaco;
-        let zones: CommutativeZoneRecord[] = [];
         let blockSignature = "";
         let refreshTimer = 0;
         const refresh = () => {
           refreshTimer = 0;
-          const blocks = findCommutativeBlocks(editor.getModel()!);
+          const model = editor.getModel();
+          if (!model) {
+            return;
+          }
+
+          const blocks = findCommutativeBlocks(model);
           const nextSignature = getBlockSignature(blocks);
           if (nextSignature === blockSignature) {
-            syncHiddenAreasForCurrentBlocks(editor, monaco);
             return;
           }
 
           blockSignature = nextSignature;
-          zones = applyCommutativeZones(editor, monaco, zones, blocks);
+          foldCommutativeBlocks(editor, blocks);
         };
-        const scheduleRefresh = () => {
+        const scheduleRefresh = (delay = 160) => {
           if (refreshTimer) {
             window.clearTimeout(refreshTimer);
           }
-          refreshTimer = window.setTimeout(refresh, 120);
+          refreshTimer = window.setTimeout(refresh, delay);
         };
-        const editorDomNode = editor.getDomNode();
-        const pointerDownListener = (event: MouseEvent) => {
-          const matchingZone = findVisibleZoneAtPoint(zones, event.clientX, event.clientY);
-          if (!matchingZone) {
-            return;
-          }
+        const focusDisposable = editor.onDidFocusEditorText(() => {
+          activeMarkdownEditor = editor;
+          activeMonacoApi = monaco;
+        });
 
-          event.preventDefault();
-          event.stopPropagation();
-          openCommutativeModal(editor, monaco, matchingZone.block);
-        };
-
-        refresh();
+        scheduleRefresh(320);
         const contentDisposable = editor.onDidChangeModelContent((event) => {
-          if (zones.length > 0 || blockSignature || contentChangeMayAffectCommutativeBlocks(editor, event)) {
+          if (blockSignature || contentChangeMayAffectCommutativeBlocks(editor, event)) {
             scheduleRefresh();
           }
         });
         const modelDisposable = editor.onDidChangeModel(() => {
-          zones = [];
           blockSignature = "";
-          refresh();
+          scheduleRefresh();
         });
-        editorDomNode?.addEventListener("mousedown", pointerDownListener, true);
 
         return () => {
           if (activeMarkdownEditor === editor) {
@@ -821,16 +537,9 @@ export const commutativePlugin: PluginDefinition = {
           if (refreshTimer) {
             window.clearTimeout(refreshTimer);
           }
-          editorDomNode?.removeEventListener("mousedown", pointerDownListener, true);
+          focusDisposable.dispose();
           contentDisposable.dispose();
           modelDisposable.dispose();
-          editor.changeViewZones((accessor) => {
-            for (const zone of zones) {
-              zone.dispose();
-              accessor.removeZone(zone.zoneId);
-            }
-          });
-          setEditorHiddenAreas(editor, []);
         };
       }
     });

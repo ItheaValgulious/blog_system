@@ -542,9 +542,18 @@ export function commutativeDocumentToBase64Raw(document: CommutativeDocument): B
 }
 
 export function parseCommutative(raw: string): CommutativeDocument {
+  const trimmedRaw = raw.trim();
+  if (!trimmedRaw) {
+    throw new CommutativeError("invalid-json", "Empty commutative source.");
+  }
+
+  if (!trimmedRaw.startsWith("{") && !trimmedRaw.startsWith("[")) {
+    return decodeCommutativeBase64(trimmedRaw);
+  }
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(trimmedRaw);
   } catch (error) {
     throw new CommutativeError("invalid-json", (error as Error).message);
   }
