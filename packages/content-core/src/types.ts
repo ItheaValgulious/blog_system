@@ -168,3 +168,27 @@ export interface SiteData {
   tree: ContentTreeNode[];
   directories: SiteDirectoryPage[];
 }
+
+export interface UsageStatsDocumentEntry {
+  documentId: string;
+  documentKind: string;
+  title: string;
+  netCharacterDelta: number;
+  updatedAt: string;
+}
+
+export interface UsageStatsPeriodEntry {
+  activeMilliseconds: number;
+  documents: UsageStatsDocumentEntry[];
+  periodKey: string;
+  totalNetCharacterDelta: number;
+  updatedAt: string;
+}
+
+export interface UsageStats {
+  daily: UsageStatsPeriodEntry[];
+  documents: UsageStatsDocumentEntry[];
+  totalActiveMilliseconds: number;
+  totalNetCharacterDelta: number;
+  updatedAt: string;
+}

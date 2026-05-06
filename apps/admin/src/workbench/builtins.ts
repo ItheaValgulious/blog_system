@@ -12,6 +12,7 @@ import { projectPlugin } from "./plugins/project-plugin";
 import { snippetActionsPlugin } from "./plugins/snippet-actions-plugin";
 import { themePlugin } from "./plugins/theme-plugin";
 import { topFrontmatterPlugin } from "./plugins/top-frontmatter-plugin";
+import { usageStatsPlugin } from "./plugins/usage-stats-plugin";
 
 export const builtInPlugins: PluginDefinition[] = [
   coreWorkbenchPlugin,
@@ -26,5 +27,6 @@ export const builtInPlugins: PluginDefinition[] = [
   topFrontmatterPlugin,
   mediaLibraryPlugin,
   globalSearchReplacePlugin,
-  gitPlugin
+  gitPlugin,
+  usageStatsPlugin
 ];

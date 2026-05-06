@@ -76,6 +76,7 @@ import {
   saveThemeAsset,
   saveThemeGroupConfig
 } from "./theme-group-service.js";
+import { loadUsageStats, recordUsageStats } from "./usage-stats-service.js";
 
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!req.session.isAuthenticated) {
@@ -410,6 +411,68 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       }
 
       res.json(await saveAdminHomeConfig(settings.configRoot, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/usage-stats", async (_req, res, next) => {
+    try {
+      res.json(await loadUsageStats(settings.configRoot));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/usage-stats", async (req, res, next) => {
+    try {
+      const { activeMilliseconds, documents } = req.body as {
+        activeMilliseconds?: number;
+        documents?: Array<{
+          documentId?: string;
+          documentKind?: string;
+          title?: string;
+          netCharacterDelta?: number;
+        }>;
+      };
+
+      if (
+        activeMilliseconds !== undefined &&
+        (!Number.isFinite(activeMilliseconds) || Number(activeMilliseconds) < 0)
+      ) {
+        res.status(400).json({ error: "activeMilliseconds must be a non-negative number." });
+        return;
+      }
+
+      if (documents !== undefined && !Array.isArray(documents)) {
+        res.status(400).json({ error: "documents must be an array when provided." });
+        return;
+      }
+
+      const normalizedDocuments = (documents ?? []).map((entry) => ({
+        documentId: String(entry.documentId ?? "").trim(),
+        documentKind: String(entry.documentKind ?? "").trim() || "unknown",
+        title: String(entry.title ?? "").trim() || String(entry.documentId ?? "").trim(),
+        netCharacterDelta: Number(entry.netCharacterDelta ?? 0)
+      }));
+
+      if (
+        normalizedDocuments.some(
+          (entry) => !entry.documentId || !Number.isFinite(entry.netCharacterDelta)
+        )
+      ) {
+        res.status(400).json({
+          error: "Each document entry requires documentId and a finite netCharacterDelta."
+        });
+        return;
+      }
+
+      res.json(
+        await recordUsageStats(settings.configRoot, {
+          activeMilliseconds,
+          documents: normalizedDocuments
+        })
+      );
     } catch (error) {
       next(error);
     }

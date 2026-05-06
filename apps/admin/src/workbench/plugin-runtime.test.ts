@@ -8,6 +8,7 @@ import { coreWorkbenchPlugin } from "./plugins/core-workbench-plugin";
 import { markdownOutlinePlugin } from "./plugins/markdown-outline-plugin";
 import { mediaLibraryPlugin } from "./plugins/media-library-plugin";
 import { projectPlugin } from "./plugins/project-plugin";
+import { usageStatsPlugin } from "./plugins/usage-stats-plugin";
 
 import type { ModuleContributionDefinition, PaneContributionDefinition, WorkbenchApi } from "./types";
 
@@ -83,4 +84,23 @@ test("project plugin registers module, panes, and editors", () => {
   assert.ok(runtime.getEditorContribution("project.overview"));
   assert.ok(runtime.getEditorContribution("project.task-markdown"));
   assert.ok(runtime.getEditorContribution("project.log-markdown"));
+});
+
+test("usage stats plugin registers editor and command", async () => {
+  const runtime = new PluginRuntime();
+  runtime.activate([usageStatsPlugin]);
+
+  assert.ok(runtime.getEditorContribution("usage-stats.overview"));
+  const command = runtime.getCommand("usageStats.open");
+  assert.ok(command);
+
+  let opened = false;
+  await command?.handler({
+    openResource(target) {
+      opened = target.kind === "usageStats";
+      return Promise.resolve();
+    }
+  } as WorkbenchApi);
+
+  assert.equal(opened, true);
 });

@@ -64,6 +64,10 @@ export function getWorkbenchDocumentPath(document: WorkbenchDocument) {
     return "home";
   }
 
+  if (document.kind === "usageStats") {
+    return "usage-stats";
+  }
+
   return document.title;
 }
 

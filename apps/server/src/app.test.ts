@@ -321,6 +321,83 @@ test("config endpoints expose markdown block rules and admin home defaults", asy
   assert.deepEqual(adminHome.body.value.widgets, {});
 });
 
+test("usage stats endpoint persists net delta and active time", async () => {
+  const { agent, tempRoot } = await setupTempApp();
+
+  const initialStats = await agent.get("/api/usage-stats").expect(200);
+  assert.equal(initialStats.body.value.totalNetCharacterDelta, 0);
+  assert.equal(initialStats.body.value.totalActiveMilliseconds, 0);
+
+  const recordedStats = await agent
+    .post("/api/usage-stats")
+    .send({
+      activeMilliseconds: 90000,
+      documents: [
+        {
+          documentId: "article:notes/draft.md",
+          documentKind: "article",
+          title: "Draft Note",
+          netCharacterDelta: 12
+        },
+        {
+          documentId: "article:notes/draft.md",
+          documentKind: "article",
+          title: "Draft Note",
+          netCharacterDelta: -5
+        }
+      ]
+    })
+    .expect(200);
+
+  assert.equal(recordedStats.body.value.totalActiveMilliseconds, 90000);
+  assert.equal(recordedStats.body.value.totalNetCharacterDelta, 7);
+  assert.equal(recordedStats.body.value.documents[0].netCharacterDelta, 7);
+  assert.equal(recordedStats.body.value.daily.length, 1);
+  assert.equal(recordedStats.body.value.daily[0].totalNetCharacterDelta, 7);
+  assert.equal(recordedStats.body.value.daily[0].activeMilliseconds, 90000);
+
+  const persistedRaw = await fs.readFile(path.join(tempRoot, "config", "usage-stats.json"), "utf8");
+  assert.match(persistedRaw, /"daily": \[/);
+  assert.match(persistedRaw, /"totalActiveMilliseconds": 90000/);
+  assert.match(persistedRaw, /"netCharacterDelta": 7/);
+});
+
+test("usage stats period key follows local calendar day instead of UTC midnight", async () => {
+  const { agent } = await setupTempApp();
+  const originalDateNow = Date.now;
+  const mockedNow = new Date("2026-05-04T16:30:00.000Z").valueOf();
+
+  Date.now = () => mockedNow;
+
+  try {
+    const recordedStats = await agent
+      .post("/api/usage-stats")
+      .send({
+        activeMilliseconds: 1000,
+        documents: [
+          {
+            documentId: "article:notes/draft.md",
+            documentKind: "article",
+            title: "Draft Note",
+            netCharacterDelta: 1
+          }
+        ]
+      })
+      .expect(200);
+
+    const localDate = new Date(mockedNow);
+    const expectedPeriodKey = new Date(
+      localDate.getTime() - localDate.getTimezoneOffset() * 60_000
+    )
+      .toISOString()
+      .slice(0, 10);
+
+    assert.equal(recordedStats.body.value.daily[0].periodKey, expectedPeriodKey);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
 test("site config rejects legacy about payloads", async () => {
   const { agent } = await setupTempApp();
 

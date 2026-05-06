@@ -39,7 +39,8 @@ import {
   type SiteConfigPayload,
   type ThemeAssetPayload,
   type ThemeGroupsPayload,
-  type TreePayload
+  type TreePayload,
+  type UsageStatsPayload
 } from "./api";
 import { jsonSchemas } from "./editor-config-schema";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
@@ -68,6 +69,7 @@ import type {
   ProjectTaskWorkbenchDocument,
   ProjectWorkbenchDocument,
   ThemeAssetWorkbenchDocument,
+  UsageStatsWorkbenchDocument,
   WorkbenchApi,
   WorkbenchDocument,
   WorkbenchEditorId,
@@ -88,13 +90,17 @@ import {
 loader.config({ monaco: monacoEditor });
 void installMarkdownMathTokenization(monacoEditor);
 
-const PREVIEW_UPDATE_DEBOUNCE_MS = 320;
-const DRAFT_VALUE_SYNC_DEBOUNCE_MS = 420;
+const PREVIEW_UPDATE_DEBOUNCE_MS = 50;
+const DRAFT_VALUE_SYNC_DEBOUNCE_MS = 50;
 const DIRTY_CHECK_DEBOUNCE_MS = 700;
+const USAGE_STATS_FLUSH_DEBOUNCE_MS = 2500;
+const USAGE_STATS_ACTIVITY_TICK_MS = 15000;
+const USAGE_STATS_ACTIVITY_IDLE_MS = 60000;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";
 const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
 const ARTICLE_CURSOR_STATE_STORAGE_KEY = "admin-article-cursor-state";
 const HOME_DOCUMENT_ID = "home:dashboard";
+const USAGE_STATS_DOCUMENT_ID = "usage-stats:overview";
 
 interface PreviewSourceParseResult {
   body: string;
@@ -249,7 +255,7 @@ function getDocumentPath(document: WorkbenchDocument | null, fallbackPath: strin
     return fallbackPath ?? "";
   }
 
-  if (document.kind === "home") {
+  if (document.kind === "home" || document.kind === "usageStats") {
     return fallbackPath ?? "";
   }
 
@@ -710,7 +716,8 @@ function shouldStoreLiveDocumentValue(document: WorkbenchDocument) {
   return (
     document.kind !== "article" &&
     document.kind !== "config" &&
-    document.kind !== "themeAsset"
+    document.kind !== "themeAsset" &&
+    document.kind !== "usageStats"
   );
 }
 
@@ -747,6 +754,10 @@ function isArticleDocument(document: WorkbenchDocument | null): document is Arti
 
 function isHomeDocument(document: WorkbenchDocument | null): document is HomeWorkbenchDocument {
   return Boolean(document && document.kind === "home");
+}
+
+function isUsageStatsDocument(document: WorkbenchDocument | null): document is UsageStatsWorkbenchDocument {
+  return Boolean(document && document.kind === "usageStats");
 }
 
 function isConfigDocument(document: WorkbenchDocument | null): document is ConfigWorkbenchDocument {
@@ -821,6 +832,21 @@ function buildHomeDocument(): HomeWorkbenchDocument {
     savedValue: "",
     dirty: false,
     previewable: false
+  };
+}
+
+function buildUsageStatsDocument(payload: UsageStatsPayload): UsageStatsWorkbenchDocument {
+  return {
+    id: USAGE_STATS_DOCUMENT_ID,
+    kind: "usageStats",
+    editorId: "usage-stats.overview",
+    title: "Usage Stats",
+    language: "json",
+    value: payload.raw,
+    savedValue: payload.raw,
+    dirty: false,
+    previewable: false,
+    stats: payload.value
   };
 }
 
@@ -1331,6 +1357,7 @@ export function App() {
   const [projectsPayload, setProjectsPayload] = useState<ProjectsPayload | null>(null);
   const [themeGroupsPayload, setThemeGroupsPayload] = useState<ThemeGroupsPayload | null>(null);
   const [siteConfigPayload, setSiteConfigPayload] = useState<SiteConfigPayload | null>(null);
+  const [usageStatsPayload, setUsageStatsPayload] = useState<UsageStatsPayload | null>(null);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>(() => [buildHomeDocument()]);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(HOME_DOCUMENT_ID);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
@@ -1406,6 +1433,8 @@ export function App() {
   const articleCursorPersistTimerRef = useRef<number | null>(null);
   const dirtyCheckTimerRef = useRef<number | null>(null);
   const draftValueSyncTimerRef = useRef<number | null>(null);
+  const usageStatsFlushTimerRef = useRef<number | null>(null);
+  const usageStatsActivityTimerRef = useRef<number | null>(null);
   const articleCursorStatesRef = useRef<Record<string, StoredArticleCursorState>>(initialArticleCursorStates);
   const lastStoredArticleLineNumberRef = useRef<number | null>(null);
   const lastPreviewCursorSyncLineRef = useRef<number | null>(null);
@@ -1414,6 +1443,11 @@ export function App() {
   const textInputDialogResolveRef = useRef<((value: string | null) => void) | null>(null);
   const textInputDialogInputRef = useRef<HTMLInputElement | null>(null);
   const draftValuesRef = useRef<Record<string, string>>({});
+  const usageStatsPendingActiveMsRef = useRef(0);
+  const usageStatsPendingDocumentDeltaRef = useRef<
+    Map<string, { documentId: string; documentKind: string; title: string; netCharacterDelta: number }>
+  >(new Map());
+  const usageStatsLastInteractionAtRef = useRef<number | null>(null);
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
   const treeRootRef = useRef<HTMLDivElement | null>(null);
   const pendingArticleRevealRef = useRef<PendingArticleReveal | null>(null);
@@ -2312,6 +2346,21 @@ export function App() {
     return payload;
   };
 
+  const loadUsageStats = async () => {
+    const payload = await api.getUsageStats();
+    startTransition(() => {
+      setUsageStatsPayload(payload);
+      setDocuments((current) =>
+        current.map((document) =>
+          document.kind === "usageStats"
+            ? withResolvedEditor(buildUsageStatsDocument(payload), document.editorId)
+            : document
+        )
+      );
+    });
+    return payload;
+  };
+
   const loadProjects = async () => {
     const payload = await api.listProjects();
     startTransition(() => {
@@ -2364,6 +2413,110 @@ export function App() {
         });
     }, 220);
   }, []);
+
+  const flushUsageStats = useCallback(async () => {
+    if (!authenticated) {
+      return null;
+    }
+
+    if (usageStatsFlushTimerRef.current !== null) {
+      window.clearTimeout(usageStatsFlushTimerRef.current);
+      usageStatsFlushTimerRef.current = null;
+    }
+
+    const activeMilliseconds = usageStatsPendingActiveMsRef.current;
+    const documents = [...usageStatsPendingDocumentDeltaRef.current.values()].filter(
+      (entry) => entry.netCharacterDelta !== 0
+    );
+
+    if (activeMilliseconds <= 0 && documents.length === 0) {
+      return null;
+    }
+
+    usageStatsPendingActiveMsRef.current = 0;
+    usageStatsPendingDocumentDeltaRef.current = new Map();
+
+    const payload = await api.recordUsageStats({
+      activeMilliseconds,
+      documents
+    });
+
+    startTransition(() => {
+      setUsageStatsPayload(payload);
+      setDocuments((current) =>
+        current.map((document) =>
+          document.kind === "usageStats"
+            ? withResolvedEditor(buildUsageStatsDocument(payload), document.editorId)
+            : document
+        )
+      );
+    });
+
+    return payload;
+  }, [authenticated, withResolvedEditor]);
+
+  const scheduleUsageStatsFlush = useCallback(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    if (usageStatsFlushTimerRef.current !== null) {
+      return;
+    }
+
+    usageStatsFlushTimerRef.current = window.setTimeout(() => {
+      void flushUsageStats().catch((error: Error) => {
+        setPageError(error.message);
+      });
+    }, USAGE_STATS_FLUSH_DEBOUNCE_MS);
+  }, [authenticated, flushUsageStats]);
+
+  const queueUsageDocumentDelta = useCallback(
+    (document: WorkbenchDocument, netCharacterDelta: number) => {
+      if (!authenticated || netCharacterDelta === 0 || document.kind === "home" || document.kind === "usageStats") {
+        return;
+      }
+
+      const current =
+        usageStatsPendingDocumentDeltaRef.current.get(document.id) ?? {
+          documentId: document.id,
+          documentKind: document.kind,
+          title: document.title,
+          netCharacterDelta: 0
+        };
+
+      usageStatsPendingDocumentDeltaRef.current.set(document.id, {
+        ...current,
+        documentKind: document.kind,
+        title: document.title,
+        netCharacterDelta: current.netCharacterDelta + netCharacterDelta
+      });
+      scheduleUsageStatsFlush();
+    },
+    [authenticated, scheduleUsageStatsFlush]
+  );
+
+  const markUsageActivity = useCallback(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    const now = Date.now();
+    const previous = usageStatsLastInteractionAtRef.current;
+    usageStatsLastInteractionAtRef.current = now;
+
+    if (previous === null) {
+      return;
+    }
+
+    const elapsed = now - previous;
+    if (elapsed <= 0 || elapsed > USAGE_STATS_ACTIVITY_IDLE_MS) {
+      return;
+    }
+
+    usageStatsPendingActiveMsRef.current += elapsed;
+    scheduleUsageStatsFlush();
+  }, [authenticated, scheduleUsageStatsFlush]);
 
   const openArticleDocument = async (articlePath: string, preferredEditorId?: WorkbenchEditorId) => {
     const existingDocument = documents.find((document) => document.kind === "article" && document.articlePath === articlePath);
@@ -2866,6 +3019,7 @@ export function App() {
       loadTree(),
       loadConfig(),
       loadMarkdownBlockConfig(),
+      loadUsageStats(),
       loadProjects(),
       loadAdminHomeConfig(),
       loadThemeGroups(),
@@ -2970,7 +3124,7 @@ export function App() {
     if (!activeDocument) {
       return;
     }
-    if (activeDocument.kind === "home") {
+    if (activeDocument.kind === "home" || activeDocument.kind === "usageStats") {
       return;
     }
     cancelPendingDirtyCheck();
@@ -3033,6 +3187,7 @@ export function App() {
         | "adminHome"
         | "config"
         | "markdownBlockConfig"
+        | "usageStats"
         | "projects"
         | "siteConfig"
         | "themeGroups"
@@ -3041,6 +3196,7 @@ export function App() {
             | "adminHome"
             | "config"
             | "markdownBlockConfig"
+            | "usageStats"
             | "projects"
             | "siteConfig"
             | "themeGroups"
@@ -3057,6 +3213,8 @@ export function App() {
               return loadConfig();
             case "markdownBlockConfig":
               return loadMarkdownBlockConfig();
+            case "usageStats":
+              return loadUsageStats();
             case "projects":
               return loadProjects();
             case "adminHome":
@@ -3126,6 +3284,32 @@ export function App() {
           setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
           activateDocument(HOME_DOCUMENT_ID);
           return;
+        case "usageStats": {
+          const existingDocument = documents.find((document) => document.kind === "usageStats");
+          if (existingDocument) {
+            if (target.preferredEditorId && existingDocument.editorId !== target.preferredEditorId) {
+              setDocuments((current) =>
+                current.map((document) =>
+                  document.id === existingDocument.id
+                    ? {
+                        ...document,
+                        editorId: resolveDocumentEditorId(document, target.preferredEditorId)
+                      }
+                    : document
+                )
+              );
+            }
+            activateDocument(existingDocument.id);
+            return;
+          }
+
+          const payload = usageStatsPayload ?? (await loadUsageStats());
+          const document = withResolvedEditor(buildUsageStatsDocument(payload), target.preferredEditorId);
+          draftValuesRef.current[document.id] = document.value;
+          setDocuments((current) => upsertDocument(current, document));
+          activateDocument(document.id);
+          return;
+        }
         case "article":
           pendingArticleRevealRef.current =
             typeof target.lineNumber === "number"
@@ -3170,13 +3354,18 @@ export function App() {
       openArticleDocument,
       openConfigDocument,
       jumpToActiveArticleLine,
+      loadUsageStats,
       openProjectDocument,
       openProjectLogDocument,
       openProjectTaskDocument,
       openThemeAssetDocument,
       openThemeGroupConfigDocument,
       activateDocument,
-      activeDocument
+      activeDocument,
+      documents,
+      resolveDocumentEditorId,
+      usageStatsPayload,
+      withResolvedEditor
     ]
   );
   const renderSidebarStatusPills = () => (
@@ -3387,6 +3576,47 @@ export function App() {
 
   useEffect(() => {
     if (!authenticated) {
+      usageStatsLastInteractionAtRef.current = null;
+      if (usageStatsActivityTimerRef.current !== null) {
+        window.clearInterval(usageStatsActivityTimerRef.current);
+        usageStatsActivityTimerRef.current = null;
+      }
+      return;
+    }
+
+    usageStatsLastInteractionAtRef.current = Date.now();
+    const activityListener = () => {
+      markUsageActivity();
+    };
+    const activityEvents: Array<keyof WindowEventMap> = [
+      "pointerdown",
+      "keydown",
+      "mousemove",
+      "focus"
+    ];
+
+    for (const eventName of activityEvents) {
+      window.addEventListener(eventName, activityListener, true);
+    }
+
+    usageStatsActivityTimerRef.current = window.setInterval(() => {
+      markUsageActivity();
+    }, USAGE_STATS_ACTIVITY_TICK_MS);
+
+    return () => {
+      for (const eventName of activityEvents) {
+        window.removeEventListener(eventName, activityListener, true);
+      }
+
+      if (usageStatsActivityTimerRef.current !== null) {
+        window.clearInterval(usageStatsActivityTimerRef.current);
+        usageStatsActivityTimerRef.current = null;
+      }
+    };
+  }, [authenticated, markUsageActivity]);
+
+  useEffect(() => {
+    if (!authenticated) {
       return;
     }
 
@@ -3407,6 +3637,22 @@ export function App() {
       keyboardApi.unlock();
     };
   }, [authenticated, requestWorkbenchKeyboardLock]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    const handleBeforeUnload = () => {
+      markUsageActivity();
+      void flushUsageStats().catch(() => undefined);
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [authenticated, flushUsageStats, markUsageActivity]);
 
   useEffect(() => {
     if (!commandPaletteOpen) {
@@ -3761,6 +4007,16 @@ export function App() {
         draftValueSyncTimerRef.current = null;
       }
 
+      if (usageStatsFlushTimerRef.current !== null) {
+        window.clearTimeout(usageStatsFlushTimerRef.current);
+        usageStatsFlushTimerRef.current = null;
+      }
+
+      if (usageStatsActivityTimerRef.current !== null) {
+        window.clearInterval(usageStatsActivityTimerRef.current);
+        usageStatsActivityTimerRef.current = null;
+      }
+
       if (previewUpdateTimerRef.current !== null) {
         window.clearTimeout(previewUpdateTimerRef.current);
         previewUpdateTimerRef.current = null;
@@ -3775,8 +4031,9 @@ export function App() {
       previewBlocksRef.current = [];
       schedulePreviewCursorSyncRef.current = null;
       previewProseRef.current?.replaceChildren();
+      void flushUsageStats().catch(() => undefined);
     };
-  }, [flushArticleCursorStates]);
+  }, [flushArticleCursorStates, flushUsageStats]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -4510,6 +4767,9 @@ export function App() {
         return;
       }
 
+      const previousValue = draftValuesRef.current[activeDocument.id] ?? activeDocument.savedValue;
+      const netCharacterDelta = nextValue.length - previousValue.length;
+
       draftValuesRef.current[activeDocument.id] = nextValue;
       const shouldStoreValue = shouldStoreLiveDocumentValue(activeDocument);
       setDocuments((current) => {
@@ -4539,19 +4799,33 @@ export function App() {
       });
 
       scheduleDocumentDirtyCheck(activeDocument.id);
+      queueUsageDocumentDelta(activeDocument, netCharacterDelta);
+      markUsageActivity();
 
       if (activeDocumentSupportsPreview) {
         scheduleDocumentPreviewUpdate(activeDocument, nextValue);
       }
     },
-    [activeDocument, activeDocumentSupportsPreview, scheduleDocumentDirtyCheck, scheduleDocumentPreviewUpdate]
+    [
+      activeDocument,
+      activeDocumentSupportsPreview,
+      markUsageActivity,
+      queueUsageDocumentDelta,
+      scheduleDocumentDirtyCheck,
+      scheduleDocumentPreviewUpdate
+    ]
   );
 
   const handleEditorModelContentChange = useCallback(
-    (_event: monacoEditor.editor.IModelContentChangedEvent) => {
+    (event: monacoEditor.editor.IModelContentChangedEvent) => {
       if (!activeDocument || shouldStoreLiveDocumentValue(activeDocument)) {
         return;
       }
+
+      const netCharacterDelta = event.changes.reduce(
+        (sum, change) => sum + change.text.length - change.rangeLength,
+        0
+      );
 
       if (!dirtyDocumentIdsRef.current.has(activeDocument.id)) {
         dirtyDocumentIdsRef.current.add(activeDocument.id);
@@ -4569,9 +4843,11 @@ export function App() {
           return changed ? nextDocuments : current;
         });
       }
+      queueUsageDocumentDelta(activeDocument, netCharacterDelta);
+      markUsageActivity();
       scheduleDraftValueSync(activeDocument);
     },
-    [activeDocument, scheduleDraftValueSync]
+    [activeDocument, markUsageActivity, queueUsageDocumentDelta, scheduleDraftValueSync]
   );
 
   const renderSidebarPaneContent = () => {

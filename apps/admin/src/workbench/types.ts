@@ -10,7 +10,8 @@ import type {
   MarkdownFenceRendererDefinition,
   ProjectLogRecord,
   ProjectSummary,
-  ProjectTaskRecord
+  ProjectTaskRecord,
+  UsageStats
 } from "@blog-system/content-core";
 import type {
   GlobalMarkdownSearchReplaceNextRequest,
@@ -33,6 +34,7 @@ export type WorkbenchRefreshTarget =
   | "adminHome"
   | "config"
   | "markdownBlockConfig"
+  | "usageStats"
   | "projects"
   | "siteConfig"
   | "themeGroups"
@@ -58,6 +60,11 @@ export interface ArticleWorkbenchDocument extends WorkbenchBaseDocument {
 
 export interface HomeWorkbenchDocument extends WorkbenchBaseDocument {
   kind: "home";
+}
+
+export interface UsageStatsWorkbenchDocument extends WorkbenchBaseDocument {
+  kind: "usageStats";
+  stats: UsageStats;
 }
 
 export interface ConfigWorkbenchDocument extends WorkbenchBaseDocument {
@@ -106,6 +113,7 @@ export type WorkbenchDocument =
   | ProjectTaskWorkbenchDocument
   | ProjectWorkbenchDocument
   | ThemeAssetWorkbenchDocument
+  | UsageStatsWorkbenchDocument
   | GenericWorkbenchDocument;
 
 export interface ThemeDefinition {
@@ -278,6 +286,7 @@ export type WorkbenchResourceTarget =
     }
   | { kind: "config"; configKind: ConfigDocumentKind; preferredEditorId?: WorkbenchEditorId }
   | { kind: "home" }
+  | { kind: "usageStats"; preferredEditorId?: WorkbenchEditorId }
   | { kind: "project"; projectId: string; preferredEditorId?: WorkbenchEditorId }
   | { kind: "projectLog"; logId: string; projectId: string; preferredEditorId?: WorkbenchEditorId }
   | { kind: "projectTask"; projectId: string; preferredEditorId?: WorkbenchEditorId; taskId: string }

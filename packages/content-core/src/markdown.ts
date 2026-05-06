@@ -37,6 +37,95 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/\n/g, "&#10;");
 }
 
+function hasUnclosedMathDelimiter(markdown: string) {
+  let inCodeFence: { character: "`" | "~"; length: number } | null = null;
+  let inlineCodeTicks = 0;
+  let inInlineMath = false;
+  let inBlockMath = false;
+  const lines = markdown.split(/\r?\n/);
+
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    const fenceMatch = /^([`~]{3,})/.exec(trimmed);
+
+    if (inlineCodeTicks === 0 && fenceMatch) {
+      const fence = fenceMatch[1];
+      const character = fence[0] as "`" | "~";
+      const length = fence.length;
+
+      if (inCodeFence && inCodeFence.character === character && length >= inCodeFence.length) {
+        inCodeFence = null;
+      } else if (!inCodeFence) {
+        inCodeFence = { character, length };
+      }
+
+      continue;
+    }
+
+    if (inCodeFence) {
+      continue;
+    }
+
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+
+      if (character === "\\") {
+        index += 1;
+        continue;
+      }
+
+      if (character === "`") {
+        let tickCount = 1;
+        while (line[index + tickCount] === "`") {
+          tickCount += 1;
+        }
+
+        if (inlineCodeTicks === 0) {
+          inlineCodeTicks = tickCount;
+        } else if (tickCount === inlineCodeTicks) {
+          inlineCodeTicks = 0;
+        }
+
+        index += tickCount - 1;
+        continue;
+      }
+
+      if (inlineCodeTicks > 0 || character !== "$") {
+        continue;
+      }
+
+      const isDoubleDollar = line[index + 1] === "$";
+      if (isDoubleDollar) {
+        if (!inInlineMath) {
+          inBlockMath = !inBlockMath;
+          index += 1;
+        }
+        continue;
+      }
+
+      if (!inBlockMath) {
+        inInlineMath = !inInlineMath;
+      }
+    }
+
+    inlineCodeTicks = 0;
+  }
+
+  return inInlineMath || inBlockMath;
+}
+
+function createRemarkParser(markdown: string) {
+  const processor = unified().use(remarkParse).use(remarkGfm);
+
+  // While the user is still typing an unfinished math delimiter, skip
+  // remark-math so preview rendering stays responsive.
+  if (!hasUnclosedMathDelimiter(markdown)) {
+    processor.use(remarkMath);
+  }
+
+  return processor;
+}
+
 function remarkMathPlaceholders() {
   return (tree: any) => {
     visit(tree, ["inlineMath", "math"], (node: any, index?: number, parent?: any) => {
@@ -164,7 +253,7 @@ function createMarkdownBlock(
 }
 
 export function extractHeadings(markdown: string): HeadingItem[] {
-  const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(markdown);
+  const tree = createRemarkParser(markdown).parse(markdown);
   const slugger = new GithubSlugger();
   const headings: HeadingItem[] = [];
 
@@ -204,9 +293,9 @@ async function renderMarkdownInternal(
     (options.fenceRenderers ?? []).map((renderer) => [renderer.language, renderer] as const)
   );
   const processor = unified()
-    .use(remarkParse)
-    .use(remarkGfm)
-    .use(remarkMath)
+    .use(() => undefined);
+  const remarkProcessor = createRemarkParser(preparedMarkdown);
+  const processorWithRemarkPlugins = remarkProcessor
     .use(() => (tree: any) => {
       visit(tree, "code", (node: any, index?: number, parent?: any) => {
         if (!parent || index === undefined) {
@@ -260,11 +349,11 @@ async function renderMarkdownInternal(
     .use(rehypeRaw)
     .use(rehypeSlug);
 
-  if (options.hydrateMathOnServer) {
-    processor.use(rehypeKatex, { strict: "ignore" });
+  if (options.hydrateMathOnServer && !hasUnclosedMathDelimiter(preparedMarkdown)) {
+    processorWithRemarkPlugins.use(rehypeKatex, { strict: "ignore" });
   }
 
-  const processed = await processor
+  const processed = await processorWithRemarkPlugins
     .use(rehypeHighlight)
     .use(rehypeStringify, { allowDangerousHtml: true })
     .process(preparedMarkdown);
@@ -322,7 +411,7 @@ export function extractMarkdownBlocks(
   markdownBlockConfig?: MarkdownBlockConfig | MarkdownBlockRule[] | null
 ): MarkdownBlock[] {
   const preparedMarkdown = applyMarkdownBlockRules(markdown, markdownBlockConfig);
-  const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(preparedMarkdown) as any;
+  const tree = createRemarkParser(preparedMarkdown).parse(preparedMarkdown) as any;
   const children = Array.isArray(tree.children) ? tree.children : [];
   const blocks: MarkdownBlock[] = [];
   let index = 0;

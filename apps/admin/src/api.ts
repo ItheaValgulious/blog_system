@@ -11,7 +11,8 @@ import type {
   ProjectTaskRecord,
   ThemeGroupConfig,
   ThemeGroupSummary,
-  TagInfo
+  TagInfo,
+  UsageStats
 } from "@blog-system/content-core";
 
 export class ApiRequestError extends Error {
@@ -176,6 +177,11 @@ export interface AdminHomeConfigPayload {
   value: AdminHomeConfig;
 }
 
+export interface UsageStatsPayload {
+  raw: string;
+  value: UsageStats;
+}
+
 export interface ClipboardAssetPayload {
   fileName: string;
   relativePath: string;
@@ -335,6 +341,23 @@ export const api = {
     return request<AdminHomeConfigPayload>("/api/admin-home-config", {
       method: "PUT",
       body: JSON.stringify({ raw })
+    });
+  },
+  getUsageStats() {
+    return request<UsageStatsPayload>("/api/usage-stats");
+  },
+  recordUsageStats(input: {
+    activeMilliseconds?: number;
+    documents?: Array<{
+      documentId: string;
+      documentKind: string;
+      title: string;
+      netCharacterDelta: number;
+    }>;
+  }) {
+    return request<UsageStatsPayload>("/api/usage-stats", {
+      method: "POST",
+      body: JSON.stringify(input)
     });
   },
   listProjects() {
