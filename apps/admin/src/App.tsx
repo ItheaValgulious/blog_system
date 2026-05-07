@@ -49,6 +49,14 @@ import {
   getSnippetTriggerCharacters,
   resolveActiveSnippetMatches
 } from "./snippet-completion";
+import {
+  parseStoredCollapsedTreePaths,
+  parseStoredWorkbenchResource,
+  remapCollapsedTreePaths,
+  removeCollapsedTreePaths,
+  serializeCollapsedTreePaths,
+  serializeWorkbenchResource
+} from "./workbench-session";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
@@ -103,6 +111,8 @@ const USAGE_STATS_ACTIVITY_IDLE_MS = 60000;
 const SIDEBAR_WIDTH_STORAGE_KEY = "admin-sidebar-width";
 const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
 const ARTICLE_CURSOR_STATE_STORAGE_KEY = "admin-article-cursor-state";
+const ACTIVE_RESOURCE_STORAGE_KEY = "admin-active-resource";
+const COLLAPSED_TREE_PATHS_STORAGE_KEY = "admin-collapsed-tree-paths";
 const HOME_DOCUMENT_ID = "home:dashboard";
 const USAGE_STATS_DOCUMENT_ID = "usage-stats:overview";
 
@@ -1330,6 +1340,12 @@ function CommandPalette({
 
 export function App() {
   const [initialArticleCursorStates] = useState(loadStoredArticleCursorStates);
+  const [initialCollapsedTreePaths] = useState(() =>
+    parseStoredCollapsedTreePaths(window.localStorage.getItem(COLLAPSED_TREE_PATHS_STORAGE_KEY))
+  );
+  const [initialActiveResource] = useState(() =>
+    parseStoredWorkbenchResource(window.localStorage.getItem(ACTIVE_RESOURCE_STORAGE_KEY))
+  );
   const [authenticated, setAuthenticated] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -1376,6 +1392,7 @@ export function App() {
     }
   });
   const [selectedTreePath, setSelectedTreePath] = useState<string | null>(null);
+  const [collapsedTreePaths, setCollapsedTreePaths] = useState<Set<string>>(initialCollapsedTreePaths);
   const [contextMenuState, setContextMenuState] = useState<{ path: string; x: number; y: number } | null>(null);
   const [treeClipboard, setTreeClipboard] = useState<{ path: string; mode: "copy" | "move" } | null>(null);
   const [fileDialog, setFileDialog] = useState<{
@@ -1448,6 +1465,8 @@ export function App() {
   const workbenchApiRef = useRef<WorkbenchApi | null>(null);
   const treeRootRef = useRef<HTMLDivElement | null>(null);
   const pendingArticleRevealRef = useRef<PendingArticleReveal | null>(null);
+  const restoredSessionRef = useRef(false);
+  const initialActiveResourceRef = useRef(initialActiveResource);
 
   const enabledPlugins = useMemo(() => builtInPlugins.filter((plugin) => !disabledPluginIds.includes(plugin.id)), [disabledPluginIds]);
   const pluginRuntime = useMemo(() => {
@@ -2955,6 +2974,7 @@ export function App() {
       await loadTree();
       setDocuments((current) => remapDocuments(current, dialog.path, result.path));
       remapStoredArticleCursorStates(dialog.path, result.path);
+      setCollapsedTreePaths((current) => remapCollapsedTreePaths(current, dialog.path, result.path));
       setSelectedTreePath(result.path);
       if (dialog.entryType === "file" && dialog.fileKind === "article") {
         const updatedArticle = await api.getArticle(result.path);
@@ -2973,6 +2993,7 @@ export function App() {
     setDocuments((current) => removeDocuments(current, dialog.path));
     draftValuesRef.current = removeArticleDraftValues(draftValuesRef.current, dialog.path);
     discardStoredArticleCursorStates(dialog.path);
+    setCollapsedTreePaths((current) => removeCollapsedTreePaths(current, dialog.path));
     activateDocument((current) =>
       current?.startsWith("article:") && matchesPathPrefix(current.slice("article:".length), dialog.path)
         ? HOME_DOCUMENT_ID
@@ -3471,6 +3492,33 @@ export function App() {
   }, [previewWidth]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        COLLAPSED_TREE_PATHS_STORAGE_KEY,
+        serializeCollapsedTreePaths(collapsedTreePaths)
+      );
+    } catch {
+      // Ignore storage failures and keep the in-memory tree state.
+    }
+  }, [collapsedTreePaths]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+    try {
+      const target = serializeWorkbenchResource(activeDocument);
+      if (target) {
+        window.localStorage.setItem(ACTIVE_RESOURCE_STORAGE_KEY, JSON.stringify(target));
+      } else {
+        window.localStorage.removeItem(ACTIVE_RESOURCE_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage failures and keep the in-memory workbench state.
+    }
+  }, [activeDocument, authenticated]);
+
+  useEffect(() => {
     const previewShadowHead = previewShadowHeadRef.current;
 
     if (!previewShadowHead) {
@@ -3567,7 +3615,21 @@ export function App() {
 
   useEffect(() => {
     if (authenticated) {
-      refreshWorkspace().catch((error: Error) => setPageError(error.message));
+      refreshWorkspace()
+        .then(async () => {
+          if (restoredSessionRef.current) {
+            return;
+          }
+          restoredSessionRef.current = true;
+
+          const target = initialActiveResourceRef.current;
+          if (!target || target.kind === "home") {
+            return;
+          }
+
+          await workbenchApiRef.current?.openResource(target);
+        })
+        .catch((error: Error) => setPageError(error.message));
     }
   }, [authenticated]);
 
@@ -4116,6 +4178,9 @@ export function App() {
                 result.path
               );
               remapStoredArticleCursorStates(treeClipboard.path, result.path);
+              setCollapsedTreePaths((current) =>
+                remapCollapsedTreePaths(current, treeClipboard.path, result.path)
+              );
               setTreeClipboard(null);
             }
             setSelectedTreePath(result.path);
@@ -4705,8 +4770,29 @@ export function App() {
     }
 
     if (node.type === "directory") {
+      const hasActiveFilters = deferredSearchQuery.trim().length > 0 || tagFilter !== "all" || statusFilter !== "all";
+      const isExpanded = hasActiveFilters || !collapsedTreePaths.has(node.path);
       return (
-        <details className="tree-group" key={node.path} open>
+        <details
+          className="tree-group"
+          key={node.path}
+          onToggle={(event) => {
+            const nextOpen = (event.currentTarget as HTMLDetailsElement).open;
+            if (hasActiveFilters) {
+              return;
+            }
+            setCollapsedTreePaths((current) => {
+              const nextPaths = new Set(current);
+              if (nextOpen) {
+                nextPaths.delete(node.path);
+              } else {
+                nextPaths.add(node.path);
+              }
+              return nextPaths;
+            });
+          }}
+          open={isExpanded}
+        >
           <summary
             className={`tree-directory ${selectedTreePath === node.path ? "is-active" : ""}`}
             onClick={() => setSelectedTreePath(node.path)}
@@ -4732,6 +4818,9 @@ export function App() {
                       result.path
                     );
                     remapStoredArticleCursorStates(sourcePath, result.path);
+                    setCollapsedTreePaths((current) =>
+                      remapCollapsedTreePaths(current, sourcePath, result.path)
+                    );
                     setSelectedTreePath(result.path);
                   })
                   .catch((error: Error) => setPageError(error.message))
@@ -5440,6 +5529,9 @@ export function App() {
                             result.path
                           );
                           remapStoredArticleCursorStates(treeClipboard.path, result.path);
+                          setCollapsedTreePaths((current) =>
+                            remapCollapsedTreePaths(current, treeClipboard.path, result.path)
+                          );
                           setTreeClipboard(null);
                         }
                         setSelectedTreePath(result.path);
