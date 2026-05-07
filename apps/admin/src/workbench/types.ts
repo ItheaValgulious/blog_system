@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import type * as monacoEditor from "monaco-editor";
+import type { SnippetCompletionMatch } from "../snippet-completion";
 
 import type {
   AdminHomeConfig,
@@ -338,6 +339,7 @@ export interface WorkbenchApi {
 
 export interface EditorActionApi {
   activeDocument: WorkbenchDocument | null;
+  activeSnippetMatches: SnippetCompletionMatch[];
   editor: monacoEditor.editor.IStandaloneCodeEditor;
   monaco: typeof monacoEditor;
   snippets: EditorSnippet[];

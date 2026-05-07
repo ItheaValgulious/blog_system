@@ -45,6 +45,10 @@ import {
 import { jsonSchemas } from "./editor-config-schema";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
 import { installMarkdownMathTokenization } from "./markdown-math-tokenization";
+import {
+  getSnippetTriggerCharacters,
+  resolveActiveSnippetMatches
+} from "./snippet-completion";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
@@ -1089,23 +1093,16 @@ function getScopedSnippets(snippets: NormalizedSnippet[], languageId: "markdown"
   return getSnippetsForLanguage(snippets, languageId);
 }
 
-function getSymbolSuffix(value: string) {
-  return /[^A-Za-z0-9_-]+$/.exec(value)?.[0] ?? "";
-}
-
-function isSymbolSnippetPrefix(prefix: string) {
-  return /[^A-Za-z0-9_-]/.test(prefix);
-}
-
-function getSymbolTriggerCharacters(snippets: NormalizedSnippet[]) {
-  return Array.from(
-    new Set(
-      snippets
-        .flatMap((snippet) => snippet.prefix)
-        .filter((prefix) => isSymbolSnippetPrefix(prefix))
-        .map((prefix) => prefix.slice(-1))
-        .filter(Boolean)
-    )
+function resolveEditorSnippetState(
+  linePrefix: string,
+  snippetLanguage: "markdown" | "latex",
+  normalizedConfig: NormalizedEditorConfig
+) {
+  return resolveActiveSnippetMatches(
+    linePrefix,
+    snippetLanguage,
+    getScopedSnippets(normalizedConfig.markdownSnippets, "markdown"),
+    getScopedSnippets(normalizedConfig.latexSnippets, "latex")
   );
 }
 
@@ -4338,10 +4335,12 @@ export function App() {
       return;
     }
     const allSnippets = [...normalizedConfig.markdownSnippets, ...normalizedConfig.latexSnippets];
-    const markdownSymbolTriggerCharacters = getSymbolTriggerCharacters(normalizedConfig.markdownSnippets);
-    const latexSymbolTriggerCharacters = getSymbolTriggerCharacters(normalizedConfig.latexSnippets);
+    const markdownSymbolTriggerCharacters = getSnippetTriggerCharacters(normalizedConfig.markdownSnippets);
+    const latexSymbolTriggerCharacters = getSnippetTriggerCharacters(normalizedConfig.latexSnippets);
     const completionProvider = monaco.languages.registerCompletionItemProvider("markdown", {
-      triggerCharacters: ["@"],
+      triggerCharacters: Array.from(
+        new Set(["@", ...markdownSymbolTriggerCharacters, ...latexSymbolTriggerCharacters])
+      ),
       provideCompletionItems(model, position) {
         const linePrefix = model.getValueInRange(new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column));
 
@@ -4378,42 +4377,23 @@ export function App() {
           return { suggestions: [] };
         }
         const snippetLanguage = getSnippetLanguage(model, position);
-        const relevantSnippets = getScopedSnippets(
-          snippetLanguage === "latex" ? normalizedConfig.latexSnippets : normalizedConfig.markdownSnippets,
-          snippetLanguage
+        const snippetState = resolveEditorSnippetState(linePrefix, snippetLanguage, normalizedConfig);
+        const suggestions = snippetState.matches.map(
+          ({ prefix, replacementText, snippet }) => ({
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            label: { label: snippet.name, description: prefix },
+            filterText: `${prefix} ${snippet.name} ${snippet.description ?? ""}`.trim(),
+            insertText: toSnippetBody(snippet.body),
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            range: new monaco.Range(
+              position.lineNumber,
+              Math.max(1, position.column - replacementText.length),
+              position.lineNumber,
+              position.column
+            ),
+            sortText: `0-${String(9999 - replacementText.length).padStart(4, "0")}-${String(prefix.length).padStart(4, "0")}-${prefix}`
+          })
         );
-        const trailingWord = /[A-Za-z0-9_-]+$/.exec(linePrefix)?.[0] ?? "";
-        const symbolSuffix = getSymbolSuffix(linePrefix);
-        const suggestions: monacoEditor.languages.CompletionItem[] = [];
-        relevantSnippets.forEach((snippet) => {
-          snippet.prefix.forEach((prefix) => {
-            const isSymbol = isSymbolSnippetPrefix(prefix);
-            const replacementText =
-              isSymbol
-                ? linePrefix.endsWith(prefix)
-                  ? prefix
-                  : symbolSuffix && prefix.startsWith(symbolSuffix)
-                    ? symbolSuffix
-                    : ""
-                : trailingWord && prefix.toLowerCase().startsWith(trailingWord.toLowerCase())
-                  ? trailingWord
-                  : !trailingWord && linePrefix.endsWith(prefix)
-                    ? prefix
-                    : "";
-            if (!replacementText) {
-              return;
-            }
-            suggestions.push({
-              kind: monaco.languages.CompletionItemKind.Snippet,
-              label: { label: snippet.name, description: prefix },
-              filterText: `${prefix} ${snippet.name} ${snippet.description ?? ""}`.trim(),
-              insertText: toSnippetBody(snippet.body),
-              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-              range: new monaco.Range(position.lineNumber, Math.max(1, position.column - replacementText.length), position.lineNumber, position.column),
-              sortText: `0-${prefix}`
-            });
-          });
-        });
         return { suggestions };
       }
     });
@@ -4468,7 +4448,8 @@ export function App() {
     };
     const executeEditorKeybinding = async (
       keybinding: EditorConfigPayload["keybindings"][number],
-      relevantSnippets: NormalizedSnippet[]
+      relevantSnippets: NormalizedSnippet[],
+      activeSnippetMatches: import("./snippet-completion").SnippetCompletionMatch[]
     ) => {
       if (keybinding.command === "editor.insertSnippet") {
         const snippetName = String(keybinding.args?.snippetName ?? "");
@@ -4503,7 +4484,13 @@ export function App() {
 
       const action = pluginRuntime.getEditorAction(keybinding.command);
       if (action) {
-        return await action.handler({ editor, monaco, activeDocument, snippets: relevantSnippets });
+        return await action.handler({
+          editor,
+          monaco,
+          activeDocument,
+          snippets: relevantSnippets,
+          activeSnippetMatches
+        });
       }
 
       if (
@@ -4528,16 +4515,21 @@ export function App() {
       }
 
       const snippetLanguage = getSnippetLanguage(model, position);
-      const relevantSnippets = getScopedSnippets(
-        snippetLanguage === "markdown" ? normalizedConfig.markdownSnippets : normalizedConfig.latexSnippets,
-        snippetLanguage
+      const linePrefix = model.getValueInRange(
+        new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column)
       );
+      const snippetState = resolveEditorSnippetState(linePrefix, snippetLanguage, normalizedConfig);
+      const relevantSnippets = snippetState.currentLanguageSnippets;
       const whenContext = createEditorWhenContext();
       const matchingKeybindings = getMatchingKeybindings(normalizedConfig.keybindings, event, whenContext);
       const activeKeybinding = getActiveKeybinding(normalizedConfig.keybindings, event, whenContext);
 
       if (activeKeybinding) {
-        const handled = await executeEditorKeybinding(activeKeybinding, relevantSnippets);
+        const handled = await executeEditorKeybinding(
+          activeKeybinding,
+          relevantSnippets,
+          snippetState.matches
+        );
         if (handled) {
           event.preventDefault();
           event.stopPropagation();
@@ -4571,7 +4563,9 @@ export function App() {
         return;
       }
 
-      const keyedSnippet = relevantSnippets.find((snippet) => snippet.key && matchesKeybindingEvent(snippet.key, event));
+      const keyedSnippet = relevantSnippets.find(
+        (snippet) => snippet.key && matchesKeybindingEvent(snippet.key, event)
+      );
       if (keyedSnippet) {
         event.preventDefault();
         event.stopPropagation();
@@ -4610,19 +4604,40 @@ export function App() {
       }
 
       const snippetLanguage = getSnippetLanguage(model, position);
-      const triggerCharacters =
-        snippetLanguage === "latex" ? latexSymbolTriggerCharacters : markdownSymbolTriggerCharacters;
-
-      if (!triggerCharacters.includes(text)) {
-        return;
-      }
 
       queueMicrotask(() => {
         if (!editor.hasTextFocus()) {
           return;
         }
 
-        editor.trigger("keyboard", "editor.action.triggerSuggest", {});
+        const currentModel = editor.getModel();
+        const currentPosition = editor.getPosition();
+        if (!currentModel || !currentPosition) {
+          return;
+        }
+
+        const currentSnippetLanguage = getSnippetLanguage(currentModel, currentPosition);
+        const currentLinePrefix = currentModel.getValueInRange(
+          new monaco.Range(currentPosition.lineNumber, 1, currentPosition.lineNumber, currentPosition.column)
+        );
+        const snippetState = resolveEditorSnippetState(
+          currentLinePrefix,
+          currentSnippetLanguage,
+          normalizedConfig
+        );
+        const triggerCharacters = getSnippetTriggerCharacters(
+          snippetState.matches.map((match) => match.snippet)
+        );
+        const suggestWidgetVisible = Boolean(domNode?.querySelector(".suggest-widget.visible"));
+
+        if (snippetState.matches.length === 0) {
+          editor.trigger("keyboard", "hideSuggestWidget", {});
+          return;
+        }
+
+        if (triggerCharacters.includes(text) || suggestWidgetVisible) {
+          editor.trigger("keyboard", "editor.action.triggerSuggest", {});
+        }
       });
     });
     const pasteListener = async (event: ClipboardEvent) => {

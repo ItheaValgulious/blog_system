@@ -1,5 +1,3 @@
-import { normalizeSnippetPrefixes } from "@blog-system/content-core";
-
 import type { PluginDefinition } from "../types";
 
 export const snippetActionsPlugin: PluginDefinition = {
@@ -10,7 +8,7 @@ export const snippetActionsPlugin: PluginDefinition = {
     context.registerEditorAction({
       id: "editor.expandMatchingSnippet",
       title: "Editor: Expand Matching Snippet",
-      handler({ editor, monaco, activeDocument, snippets }) {
+      handler({ activeSnippetMatches, editor, monaco, activeDocument }) {
         if (
           !activeDocument ||
           (activeDocument.kind !== "article" &&
@@ -30,14 +28,11 @@ export const snippetActionsPlugin: PluginDefinition = {
         const linePrefix = model.getValueInRange(
           new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column)
         );
-        const matchedEntry = snippets
-          .flatMap((snippet) =>
-            normalizeSnippetPrefixes(snippet).map((prefix) => ({
-              snippet,
-              prefix
-            }))
+        const matchedEntry = activeSnippetMatches
+          .filter(
+            (entry) =>
+              entry.replacementText === entry.prefix && linePrefix.endsWith(entry.replacementText)
           )
-          .filter((entry) => linePrefix.endsWith(entry.prefix))
           .sort((left, right) => right.prefix.length - left.prefix.length)[0];
 
         if (!matchedEntry) {
