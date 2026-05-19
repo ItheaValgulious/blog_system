@@ -8,7 +8,8 @@
     "build": "tsx src/cli-build.ts",
     "build-runtime": "tsup --config tsup.runtime.config.ts",
     "build-site": "tsx src/cli-build.ts",
-    "publish-site": "tsx src/publish.ts"
+    "publish-site": "tsx src/publish.ts",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@blog-system/commutative": "*",

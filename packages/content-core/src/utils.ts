@@ -5,7 +5,7 @@ import type { ArticleFrontmatter, ArticleRecord, ArticleStatus } from "./types.j
 const TITLE_HEADING_REGEX = /^#\s+(.+)$/m;
 
 function normalizeLineEndings(value: string): string {
-  return value.replace(/\r\n/g, "\n");
+  return value.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 }
 
 export function toPosixPath(value: string): string {
@@ -64,7 +64,7 @@ export function getExcerpt(body: string, maxLength = 180): string {
     return plain;
   }
 
-  return `${plain.slice(0, maxLength - 1).trim()}…`;
+  return `${plain.slice(0, maxLength - 1).trim()}...`;
 }
 
 export function normalizeTags(value: unknown): string[] {
@@ -98,6 +98,15 @@ export function normalizeTop(value: unknown): number {
   return Math.trunc(parsed);
 }
 
+function normalizePassword(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function normalizeFrontmatter(
   input: ArticleFrontmatter,
   body: string,
@@ -121,6 +130,7 @@ export function normalizeFrontmatter(
   const top = normalizeTop(rest.top);
   const slug =
     typeof rest.slug === "string" && rest.slug.trim() ? rest.slug.trim() : undefined;
+  const password = normalizePassword(rest.password);
   const statusSource =
     typeof rest.status === "string" && rest.status.trim()
       ? rest.status
@@ -136,7 +146,8 @@ export function normalizeFrontmatter(
     top,
     date,
     summary: undefined,
-    slug
+    slug,
+    password
   };
 }
 
@@ -145,11 +156,7 @@ export function parseArticleSource(relativePath: string, rawContent: string): Ar
   const normalizedRawContent = normalizeLineEndings(rawContent);
   const parsed = parseFrontmatterBlock(normalizedRawContent);
   const body = normalizeLineEndings(parsed.content).replace(/^\n+/, "");
-  const frontmatter = normalizeFrontmatter(
-    parsed.data,
-    body,
-    normalizedPath
-  );
+  const frontmatter = normalizeFrontmatter(parsed.data, body, normalizedPath);
   const title = String(frontmatter.title ?? titleFromMarkdownBody(body, normalizedPath));
   const slug = frontmatter.slug ? String(frontmatter.slug) : createDefaultSlug(title, frontmatter.date);
   const directory = normalizedPath.includes("/")
@@ -171,7 +178,8 @@ export function parseArticleSource(relativePath: string, rawContent: string): Ar
     date: frontmatter.date,
     summary: frontmatter.summary,
     tags: normalizeTags(frontmatter.tags),
-    excerpt: frontmatter.summary ?? getExcerpt(body)
+    excerpt: frontmatter.summary ?? getExcerpt(body),
+    isProtected: Boolean(normalizePassword(frontmatter.password))
   };
 }
 
@@ -255,6 +263,7 @@ export function toArticleSummary(record: ArticleRecord, basePath = "") {
     summary: record.summary,
     tags: record.tags,
     excerpt: record.excerpt,
-    urlPath
+    urlPath,
+    isProtected: record.isProtected
   };
 }

@@ -87,6 +87,53 @@ date: 2024-01-02T03:04:05.000Z
   assert.equal(record.date, "2024-01-02T03:04:05.000Z");
 });
 
+test("normalizeArticleForSave preserves password frontmatter", () => {
+  const record = normalizeArticleForSave(
+    "notes/protected.md",
+    `---
+password: secret-code
+---
+
+# Protected`
+  );
+
+  assert.equal(record.frontmatter.password, "secret-code");
+  assert.equal(record.isProtected, true);
+  assert.match(record.rawContent, /password: secret-code/);
+});
+
+test("normalizeArticleForSave accepts utf8 bom before frontmatter", () => {
+  const record = normalizeArticleForSave(
+    "notes/bom.md",
+    `\uFEFF---
+title: BOM Title
+status: published
+---
+
+# BOM Title
+
+Body`
+  );
+
+  assert.equal(record.title, "BOM Title");
+  assert.equal(record.status, "published");
+});
+
+test("normalizeArticleForSave treats blank password as unset", () => {
+  const record = normalizeArticleForSave(
+    "notes/unprotected.md",
+    `---
+password: "   "
+---
+
+# Public`
+  );
+
+  assert.equal(record.frontmatter.password, undefined);
+  assert.equal(record.isProtected, false);
+  assert.doesNotMatch(record.rawContent, /^password:/m);
+});
+
 test("createDefaultSlug uses title and date", () => {
   assert.equal(createDefaultSlug("Hello World", "2026-04-13T10:00:00.000Z"), "hello-world-2026-04-13");
 });
@@ -104,6 +151,20 @@ top: 7
   ) as ArticleRecord;
 
   assert.equal(toArticleSummary(record).top, 7);
+});
+
+test("toArticleSummary keeps protected metadata flag", () => {
+  const record = normalizeArticleForSave(
+    "notes/locked.md",
+    `---
+title: Locked
+password: open-sesame
+---
+
+# Locked`
+  ) as ArticleRecord;
+
+  assert.equal(toArticleSummary(record).isProtected, true);
 });
 
 test("rewriteRelativeAssetUrls rewrites local asset references", () => {

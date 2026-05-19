@@ -8,6 +8,7 @@ import { loadWorkspacePaths } from "@blog-system/content-core/node";
 import { loadSiteData, scanArticles } from "@blog-system/content-core/node";
 
 import { sitePlugins } from "./plugins.js";
+import { sanitizeSiteDataForProtectedContent } from "./protected-content.js";
 import { loadMarkdownBlockConfig } from "./markdown-block-config.js";
 import { createWriteHtml, createWriteTextAsset, normalizeBasePath, type SiteBuildContext } from "./runtime.js";
 import { loadSiteConfig } from "./site-config.js";
@@ -169,6 +170,9 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   };
   const config = await loadSiteConfig(settings.configRoot);
   const themePlugin = sitePlugins.find((candidate) => candidate.kind === "theme");
+  const protectedContentPlugin = sitePlugins.find(
+    (candidate) => candidate.kind === "protected-content"
+  );
 
   if (!themePlugin || themePlugin.kind !== "theme") {
     throw new Error("No site layout theme plugin could be resolved.");
@@ -182,6 +186,15 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
     (candidate) => candidate.kind === "markdown" && config.enabledPlugins.includes(candidate.id)
   );
 
+  const siteData = await loadSiteData(settings.contentRoot, basePrefix);
+  const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published");
+  const aboutArticle = resolveAboutArticle(publishedArticles);
+  const hasProtectedContent = publishedArticles.some((article) => article.isProtected);
+
+  if (hasProtectedContent && !config.enabledPlugins.includes("protected-content")) {
+    throw new Error('Protected articles require the "protected-content" site plugin to remain enabled.');
+  }
+
   await fs.rm(settings.distDir, { recursive: true, force: true });
   await fs.mkdir(path.join(settings.distDir, "assets"), { recursive: true });
   await copyContentAssets(settings.contentRoot, settings.distDir);
@@ -192,12 +205,8 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
     enabledThemeAssets,
     basePrefix
   );
-
-  const siteData = await loadSiteData(settings.contentRoot, basePrefix);
-  const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published");
-  const aboutArticle = resolveAboutArticle(publishedArticles);
   const writeTextAsset = createWriteTextAsset(settings);
-  const markdownFenceRenderers = enabledMarkdownPlugins.flatMap((plugin) => plugin.getFenceRenderers?.({
+  const initialContext: SiteBuildContext = {
     aboutArticle,
     basePrefix,
     config,
@@ -207,35 +216,45 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
     externalStylesheets: enabledThemeAssets
       .filter((asset) => asset.type === "css")
       .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    hasProtectedContent,
     markdownFenceRenderers: [],
     markdownBlockConfig,
     projectRoot: settings.projectRoot,
     publishedArticles,
+    publicArticleSummaries: siteData.articles,
     settings,
     siteData,
     theme,
     writeHtml: createWriteHtml(settings),
     writeTextAsset
+  };
+
+  if (protectedContentPlugin?.kind === "protected-content") {
+    await protectedContentPlugin.assertEnabled?.(initialContext);
+    const protectedAssets = hasProtectedContent ? protectedContentPlugin.getAssets?.(initialContext) ?? [] : [];
+    for (const asset of protectedAssets) {
+      await writeTextAsset(asset.relativePath, asset.content);
+    }
+
+    initialContext.externalScripts.push(
+      ...protectedAssets
+        .filter((asset) => asset.relativePath.endsWith(".js"))
+        .map((asset) => asset.urlPath ?? `${basePrefix}/${asset.relativePath}`.replace(/\/{2,}/g, "/"))
+    );
+    initialContext.externalStylesheets.push(
+      ...protectedAssets
+        .filter((asset) => asset.relativePath.endsWith(".css"))
+        .map((asset) => asset.urlPath ?? `${basePrefix}/${asset.relativePath}`.replace(/\/{2,}/g, "/"))
+    );
+  }
+
+  const markdownFenceRenderers = enabledMarkdownPlugins.flatMap((plugin) => plugin.getFenceRenderers?.({
+    ...initialContext,
+    markdownFenceRenderers: []
   }) ?? []);
   const markdownStylesheets = enabledMarkdownPlugins.flatMap((plugin) => plugin.getStylesheets?.({
-    aboutArticle,
-    basePrefix,
-    config,
-    externalScripts: enabledThemeAssets
-      .filter((asset) => asset.type === "js")
-      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
-    externalStylesheets: enabledThemeAssets
-      .filter((asset) => asset.type === "css")
-      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
-    markdownFenceRenderers: [],
-    markdownBlockConfig,
-    projectRoot: settings.projectRoot,
-    publishedArticles,
-    settings,
-    siteData,
-    theme,
-    writeHtml: createWriteHtml(settings),
-    writeTextAsset
+    ...initialContext,
+    markdownFenceRenderers: []
   }) ?? []);
 
   for (const stylesheet of markdownStylesheets) {
@@ -243,24 +262,10 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   }
 
   const context: SiteBuildContext = {
-    aboutArticle,
-    basePrefix,
-    config,
-    externalScripts: enabledThemeAssets
-      .filter((asset) => asset.type === "js")
-      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
-    externalStylesheets: enabledThemeAssets
-      .filter((asset) => asset.type === "css")
-      .map((asset) => `${basePrefix}/theme/${asset.assetPath}`.replace(/\/{2,}/g, "/")),
+    ...initialContext,
     markdownFenceRenderers,
-    markdownBlockConfig,
-    projectRoot: settings.projectRoot,
-    publishedArticles,
-    settings,
-    siteData,
-    theme,
-    writeHtml: createWriteHtml(settings),
-    writeTextAsset
+    siteData: initialContext.siteData,
+    publicArticleSummaries: initialContext.publicArticleSummaries
   };
 
   context.externalStylesheets.push(
@@ -271,6 +276,12 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
 
   for (const plugin of sitePlugins.filter((candidate) => candidate.kind === "data" && config.enabledPlugins.includes(candidate.id))) {
     await plugin.run(context);
+  }
+
+  if (hasProtectedContent) {
+    const sanitizedSiteData = sanitizeSiteDataForProtectedContent(context.siteData);
+    context.siteData = sanitizedSiteData;
+    context.publicArticleSummaries = sanitizedSiteData.articles;
   }
 
   await fs.writeFile(

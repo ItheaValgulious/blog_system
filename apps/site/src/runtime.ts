@@ -3,12 +3,14 @@ import path from "node:path";
 
 import type {
   ArticleRecord,
+  ArticleSummary,
   MarkdownBlockConfig,
   MarkdownFenceRendererDefinition,
   SiteData
 } from "@blog-system/content-core";
 
 import type { SiteBuildSettings } from "./generator.js";
+import type { ProtectedContentPayload } from "./protected-content.js";
 import type { SiteConfig } from "./site-config.js";
 
 export interface SiteNavigationItem {
@@ -43,10 +45,12 @@ export interface SiteBuildContext {
   config: SiteConfig;
   externalScripts: string[];
   externalStylesheets: string[];
+  hasProtectedContent: boolean;
   markdownFenceRenderers: MarkdownFenceRendererDefinition[];
   markdownBlockConfig: MarkdownBlockConfig;
   projectRoot: string;
   publishedArticles: ArticleRecord[];
+  publicArticleSummaries: ArticleSummary[];
   settings: SiteBuildSettings;
   siteData: SiteData;
   theme: SiteThemeDefinition;
@@ -80,6 +84,18 @@ export interface SiteMarkdownPluginDefinition extends SiteBaseExtensionDefinitio
   }>;
 }
 
+export interface SiteProtectedContentPluginDefinition extends SiteBaseExtensionDefinition {
+  kind: "protected-content";
+  assertEnabled?: (context: SiteBuildContext) => Promise<void> | void;
+  getAssets?: (context: SiteBuildContext) => Array<{
+    content: string;
+    relativePath: string;
+    urlPath?: string;
+  }>;
+  sanitizeSiteData?: (siteData: SiteData) => SiteData;
+  encryptHtml?: (html: string, password: string) => Promise<ProtectedContentPayload>;
+}
+
 export interface SiteThemePluginDefinition extends SiteBaseExtensionDefinition {
   kind: "theme";
   theme: SiteThemeDefinition;
@@ -87,6 +103,7 @@ export interface SiteThemePluginDefinition extends SiteBaseExtensionDefinition {
 
 export type SitePluginDefinition =
   | SiteDataPluginDefinition
+  | SiteProtectedContentPluginDefinition
   | SiteMarkdownPluginDefinition
   | SitePagePluginDefinition
   | SiteThemePluginDefinition;

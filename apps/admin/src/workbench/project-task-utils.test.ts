@@ -35,6 +35,7 @@ function createArticle(path: string, title: string): ArticleSummary {
     directory: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "",
     excerpt: "",
     fileName: path.split("/").at(-1) ?? path,
+    isProtected: false,
     path,
     slug: title.toLowerCase().replace(/\s+/g, "-"),
     status: "draft",

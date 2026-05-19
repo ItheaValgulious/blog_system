@@ -34,6 +34,14 @@ status: draft
   );
   await fs.writeFile(path.join(editorConfigDir, "snippets.json"), "[]\n", "utf8");
   await fs.writeFile(path.join(editorConfigDir, "keybindings.json"), "[]\n", "utf8");
+  await fs.writeFile(path.join(tempRoot, "index.html"), "<!doctype html><title>Site Home</title><h1>Site Home</h1>", "utf8");
+  await fs.writeFile(path.join(tempRoot, "404.html"), "<!doctype html><title>Site 404</title><h1>Site 404</h1>", "utf8");
+  await fs.mkdir(path.join(tempRoot, "posts", "demo"), { recursive: true });
+  await fs.writeFile(
+    path.join(tempRoot, "posts", "demo", "index.html"),
+    "<!doctype html><title>Demo Article</title><h1>Demo Article</h1>",
+    "utf8"
+  );
 
   const app = createApp({
     contentRoot,
@@ -57,6 +65,14 @@ status: draft
 
   return { tempRoot, assetsRoot, contentRoot, projectsRoot, agent };
 }
+
+test("site dist is served from the server root with static 404 fallback", async () => {
+  const { agent } = await setupTempApp();
+
+  await agent.get("/").expect(200).expect(/Site Home/);
+  await agent.get("/posts/demo/").expect(200).expect(/Demo Article/);
+  await agent.get("/missing-page/").expect(404).expect(/Site 404/);
+});
 
 test("save endpoint fills missing title from first heading", async () => {
   const { agent } = await setupTempApp();

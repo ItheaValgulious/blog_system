@@ -1154,6 +1154,20 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
     }
   });
 
+  app.use(express.static(settings.siteDistDir));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      next();
+      return;
+    }
+
+    res.status(404).sendFile(path.join(settings.siteDistDir, "404.html"), (error) => {
+      if (error) {
+        next(error);
+      }
+    });
+  });
+
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (error instanceof DuplicateArticleTitleError) {
       res.status(409).json({

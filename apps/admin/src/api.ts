@@ -66,6 +66,7 @@ export interface TreePayload {
     tags: string[];
     excerpt: string;
     urlPath: string;
+    isProtected: boolean;
   }>;
   tree: ContentTreeNode[];
   fileTree: FileSystemNode[];

@@ -8,6 +8,7 @@ export interface ArticleFrontmatter {
   date?: string;
   summary?: string;
   slug?: string;
+  password?: string;
   [key: string]: unknown;
 }
 
@@ -33,6 +34,7 @@ export interface ArticleRecord {
   summary?: string;
   tags: string[];
   excerpt: string;
+  isProtected: boolean;
 }
 
 export interface ArticleRenderResult {
@@ -92,6 +94,7 @@ export interface ArticleSummary {
   tags: string[];
   excerpt: string;
   urlPath: string;
+  isProtected: boolean;
 }
 
 export interface ContentTreeNode {

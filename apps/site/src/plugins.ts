@@ -3,6 +3,7 @@ import {
   resolveManagedMediaPath,
   rewriteManagedMediaUrls,
   rewriteRelativeAssetUrls,
+  type ArticleRecord,
   type ArticleSummary
 } from "@blog-system/content-core";
 import {
@@ -15,9 +16,23 @@ import {
 import type {
   SiteBuildContext,
   SiteMarkdownPluginDefinition,
+  SiteProtectedContentPluginDefinition,
   SitePluginDefinition,
   SiteThemePluginDefinition
 } from "./runtime.js";
+import {
+  PROTECTED_CONTENT_META_DESCRIPTION,
+  PROTECTED_CONTENT_PLUGIN_ID,
+  PROTECTED_CONTENT_SCRIPT_RELATIVE_PATH,
+  PROTECTED_CONTENT_STYLE_RELATIVE_PATH,
+  buildProtectedContentRuntimeScript,
+  buildProtectedContentRuntimeStyles,
+  createProtectedContentStorageKey,
+  encryptProtectedHtml,
+  getProtectedArticlePassword,
+  renderProtectedContentGate,
+  sanitizeSiteDataForProtectedContent
+} from "./protected-content.js";
 
 const HOME_PAGE_SIZE = 12;
 const COMMUTATIVE_SITE_PLUGIN_ID = "commutative";
@@ -55,14 +70,19 @@ function renderArticleMeta(article: ArticleSummary) {
 }
 
 function renderArticleCard(article: ArticleSummary, basePath: string) {
+  const protectedNote = article.isProtected
+    ? `<p class="entry-protected-note">Protected article. Unlock on the article page.</p>`
+    : `<p>${escapeHtml(article.excerpt)}</p>`;
+  const tagRowClass = article.isProtected ? "tag-row tag-row--suppressed" : "tag-row";
+
   return `<article class="post-entry">
     <div class="entry-pencil-line" aria-hidden="true"></div>
     <div class="entry-meta">${renderArticleMeta(article)}</div>
     <h2><a href="${article.urlPath}">${escapeHtml(article.title)}</a></h2>
-    <p>${escapeHtml(article.excerpt)}</p>
+    ${protectedNote}
     <div class="entry-footer">
       <span class="entry-path">${escapeHtml(article.path)}</span>
-      <div class="tag-row">${renderTagRow(article, basePath)}</div>
+      <div class="${tagRowClass}">${renderTagRow(article, basePath)}</div>
     </div>
   </article>`;
 }
@@ -114,6 +134,57 @@ function chunkArticles(articles: ArticleSummary[], size: number) {
   }
 
   return pages.length > 0 ? pages : [[]];
+}
+
+function findPublicSummary(context: SiteBuildContext, articlePath: string) {
+  return context.publicArticleSummaries.find((article) => article.path === articlePath);
+}
+
+function findPublishedSummary(context: SiteBuildContext, articlePath: string) {
+  return context.siteData.articles.find((article) => article.path === articlePath);
+}
+
+function buildArticleHero(summary: ArticleSummary, basePath: string) {
+  return `<section class="article-hero">
+    <span class="hero-note">${summary.date ? escapeHtml(summary.date.slice(0, 10)) : escapeHtml(summary.path)}</span>
+    <h1>${escapeHtml(summary.title)}</h1>
+    <div class="entry-meta article-hero__meta">${renderArticleMeta(summary)}</div>
+    <div class="tag-row">${renderTagRow(summary, basePath)}</div>
+  </section>`;
+}
+
+function buildArticlePager(previous: ArticleSummary | null, next: ArticleSummary | null) {
+  return `<div class="pager-row">
+    ${previous ? `<a href="${previous.urlPath}"><span>Older</span><strong>${escapeHtml(previous.title)}</strong></a>` : `<span class="pager-row__empty"></span>`}
+    ${next ? `<a href="${next.urlPath}"><span>Newer</span><strong>${escapeHtml(next.title)}</strong></a>` : `<span class="pager-row__empty"></span>`}
+  </div>`;
+}
+
+async function renderArticleHtml(
+  context: SiteBuildContext,
+  record: ArticleRecord
+) {
+  const rendered = await renderMarkdownWithKatex(
+    record.body,
+    context.markdownBlockConfig,
+    context.markdownFenceRenderers
+  );
+
+  if ((rendered.errors?.length ?? 0) > 0) {
+    throw new Error(
+      `Failed to render markdown fences in ${record.path}: ${rendered.errors
+        ?.map((error) => `[${error.fenceLanguage ?? "unknown"}] ${error.message}`)
+        .join("; ")}`
+    );
+  }
+
+  return {
+    headings: rendered.headings,
+    html: rewriteManagedMediaUrls(
+      rewriteRelativeAssetUrls(rendered.html, record.directory, `${context.basePrefix}/content`),
+      `${context.basePrefix}/media`
+    )
+  };
 }
 
 const atlasTheme = {
@@ -295,52 +366,59 @@ export const articlePagesPlugin: SitePluginDefinition = {
 
     await Promise.all(
       context.publishedArticles.map(async (record) => {
-        const summary = context.siteData.articles.find((article) => article.path === record.path)!;
-        const rendered = await renderMarkdownWithKatex(
-          record.body,
-          context.markdownBlockConfig,
-          context.markdownFenceRenderers
-        );
-        if ((rendered.errors?.length ?? 0) > 0) {
-          throw new Error(
-            `Failed to render markdown fences in ${record.path}: ${rendered.errors
-              ?.map((error) => `[${error.fenceLanguage ?? "unknown"}] ${error.message}`)
-              .join("; ")}`
-          );
-        }
-        const html = rewriteManagedMediaUrls(
-          rewriteRelativeAssetUrls(rendered.html, record.directory, `${context.basePrefix}/content`),
-          `${context.basePrefix}/media`
-        );
+        const summary = findPublicSummary(context, record.path)!;
+        const publishedSummary = findPublishedSummary(context, record.path) ?? summary;
         const index = context.siteData.articles.findIndex((article) => article.path === summary.path);
         const previous = index >= 0 ? context.siteData.articles[index + 1] ?? null : null;
         const next = index >= 0 ? context.siteData.articles[index - 1] ?? null : null;
-        const body = `<section class="article-hero">
-          <span class="hero-note">${summary.date ? escapeHtml(summary.date.slice(0, 10)) : escapeHtml(summary.path)}</span>
-          <h1>${escapeHtml(summary.title)}</h1>
-          <div class="entry-meta article-hero__meta">${renderArticleMeta(summary)}</div>
-          <div class="tag-row">${renderTagRow(summary, context.basePrefix)}</div>
-        </section>
-        <section class="article-layout">
-          <article class="article-panel">
-            <div class="prose">${html}</div>
-            <div class="pager-row">
-              ${previous ? `<a href="${previous.urlPath}"><span>Older</span><strong>${escapeHtml(previous.title)}</strong></a>` : `<span class="pager-row__empty"></span>`}
-              ${next ? `<a href="${next.urlPath}"><span>Newer</span><strong>${escapeHtml(next.title)}</strong></a>` : `<span class="pager-row__empty"></span>`}
-            </div>
-          </article>
-          <aside class="side-panel">
-            <h3>On This Page</h3>
-            <ul>${rendered.headings.map((heading) => `<li><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join("")}</ul>
-          </aside>
-        </section>`;
+        let body = "";
+        let description = summary.excerpt;
+
+        if (record.isProtected) {
+          const rendered = await renderArticleHtml(context, record);
+          const encryptedPayload = await encryptProtectedHtml(
+            `<section class="article-layout">
+              <article class="article-panel">
+                <div class="prose">${rendered.html}</div>
+                ${buildArticlePager(previous, next)}
+              </article>
+              <aside class="side-panel">
+                <h3>On This Page</h3>
+                <ul>${rendered.headings.map((heading) => `<li><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join("")}</ul>
+              </aside>
+            </section>`,
+            getProtectedArticlePassword(record)
+          );
+
+          body = `${buildArticleHero(summary, context.basePrefix)}
+            ${renderProtectedContentGate({
+              contentLabel: "article",
+              payload: encryptedPayload,
+              storageKey: createProtectedContentStorageKey(publishedSummary.urlPath),
+              title: summary.title
+            })}`;
+          description = PROTECTED_CONTENT_META_DESCRIPTION;
+        } else {
+          const rendered = await renderArticleHtml(context, record);
+          body = `${buildArticleHero(summary, context.basePrefix)}
+            <section class="article-layout">
+              <article class="article-panel">
+                <div class="prose">${rendered.html}</div>
+                ${buildArticlePager(previous, next)}
+              </article>
+              <aside class="side-panel">
+                <h3>On This Page</h3>
+                <ul>${rendered.headings.map((heading) => `<li><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join("")}</ul>
+              </aside>
+            </section>`;
+        }
 
         await context.writeHtml(
           `${summary.urlPath.replace(context.basePrefix, "").replace(/^\/+/, "")}index.html`,
           renderPageWithContext(context, {
             basePath: context.basePrefix,
             content: body,
-            description: summary.excerpt,
+            description,
             navigation,
             siteDescription: context.config.siteDescription,
             siteTitle: context.config.siteTitle,
@@ -384,7 +462,7 @@ export const tagsPlugin: SitePluginDefinition = {
 
     await Promise.all(
       context.siteData.tags.map(async (tag) => {
-        const matchingArticles = context.siteData.articles.filter((article) => article.tags.includes(tag.tag));
+        const matchingArticles = context.publicArticleSummaries.filter((article) => article.tags.includes(tag.tag));
         const body = `<section class="subhero-panel"><h1># ${escapeHtml(tag.tag)}</h1></section>
           <section class="content-section"><div class="post-list">${matchingArticles
             .map((article) => renderArticleCard(article, context.basePrefix))
@@ -481,38 +559,41 @@ export const aboutPlugin: SitePluginDefinition = {
     }
 
     const navigation = enabledNavigation(context);
-    const rendered = await renderMarkdownWithKatex(
-      context.aboutArticle.body,
-      context.markdownBlockConfig,
-      context.markdownFenceRenderers
-    );
-    if ((rendered.errors?.length ?? 0) > 0) {
-      throw new Error(
-        `Failed to render markdown fences in ${context.aboutArticle.path}: ${rendered.errors
-          ?.map((error) => `[${error.fenceLanguage ?? "unknown"}] ${error.message}`)
-          .join("; ")}`
+    const publicSummary = findPublicSummary(context, context.aboutArticle.path);
+    const title = publicSummary?.title ?? context.aboutArticle.title;
+    let body = "";
+    let description = publicSummary?.excerpt ?? context.aboutArticle.excerpt;
+
+    if (context.aboutArticle.isProtected) {
+      const rendered = await renderArticleHtml(context, context.aboutArticle);
+      const encryptedPayload = await encryptProtectedHtml(
+        `<section class="article-panel article-panel--single"><div class="prose">${rendered.html}</div></section>`,
+        getProtectedArticlePassword(context.aboutArticle)
       );
+      body = `<section class="subhero-panel"><h1>${escapeHtml(title)}</h1></section>
+        ${renderProtectedContentGate({
+          contentLabel: "page",
+          payload: encryptedPayload,
+          storageKey: createProtectedContentStorageKey(`${context.basePrefix}/about/`),
+          title
+        })}`;
+      description = PROTECTED_CONTENT_META_DESCRIPTION;
+    } else {
+      const rendered = await renderArticleHtml(context, context.aboutArticle);
+      body = `<section class="subhero-panel"><h1>${escapeHtml(title)}</h1></section>
+        <section class="article-panel article-panel--single"><div class="prose">${rendered.html}</div></section>`;
     }
-    const html = rewriteManagedMediaUrls(
-      rewriteRelativeAssetUrls(
-        rendered.html,
-        context.aboutArticle.directory,
-        `${context.basePrefix}/content`
-      ),
-      `${context.basePrefix}/media`
-    );
-    const body = `<section class="subhero-panel"><h1>${escapeHtml(context.aboutArticle.title)}</h1></section>
-      <section class="article-panel article-panel--single"><div class="prose">${html}</div></section>`;
+
     await context.writeHtml(
       "about/index.html",
       renderPageWithContext(context, {
         basePath: context.basePrefix,
         content: body,
-        description: context.aboutArticle.excerpt,
+        description,
         navigation,
         siteDescription: context.config.siteDescription,
         siteTitle: context.config.siteTitle,
-        title: context.aboutArticle.title
+        title
       })
     );
   }
@@ -528,13 +609,15 @@ export const searchPlugin: SitePluginDefinition = {
   }),
   async run(context) {
     const navigation = enabledNavigation(context);
-    const searchIndex = context.siteData.articles.map((article) => ({
-      excerpt: article.excerpt,
-      path: article.path,
-      tags: article.tags,
-      title: article.title,
-      urlPath: article.urlPath
-    }));
+    const searchIndex = context.publicArticleSummaries
+      .filter((article) => !article.isProtected)
+      .map((article) => ({
+        excerpt: article.excerpt,
+        path: article.path,
+        tags: article.tags,
+        title: article.title,
+        urlPath: article.urlPath
+      }));
     const searchScript = `const input = document.querySelector('[data-search-input]'); const results = document.querySelector('[data-search-results]'); let index = []; fetch('${context.basePrefix}/assets/search-index.json').then((response) => response.json()).then((payload) => { index = payload; }); input?.addEventListener('input', () => { const query = (input.value || '').trim().toLowerCase(); const matches = query ? index.filter((item) => item.title.toLowerCase().includes(query) || item.path.toLowerCase().includes(query) || item.tags.some((tag) => tag.toLowerCase().includes(query)) || item.excerpt.toLowerCase().includes(query)) : []; results.innerHTML = matches.map((item) => '<article class="post-entry"><div class="entry-meta"><span>' + item.path + '</span></div><h2><a href="' + item.urlPath + '">' + item.title + '</a></h2><p>' + item.excerpt + '</p></article>').join('') || '<p>No matches.</p>'; });`;
     await context.writeTextAsset("assets/search-index.json", `${JSON.stringify(searchIndex, null, 2)}\n`);
     await context.writeTextAsset("assets/search.js", searchScript);
@@ -588,8 +671,33 @@ export const commutativePlugin: SiteMarkdownPluginDefinition = {
   }
 };
 
+export const protectedContentPlugin: SiteProtectedContentPluginDefinition = {
+  id: PROTECTED_CONTENT_PLUGIN_ID,
+  kind: "protected-content",
+  label: "Protected Content",
+  getAssets(context) {
+    if (!context.hasProtectedContent) {
+      return [];
+    }
+
+    return [
+      {
+        content: buildProtectedContentRuntimeStyles(),
+        relativePath: PROTECTED_CONTENT_STYLE_RELATIVE_PATH,
+        urlPath: `${context.basePrefix}/${PROTECTED_CONTENT_STYLE_RELATIVE_PATH}`.replace(/\/{2,}/g, "/")
+      },
+      {
+        content: buildProtectedContentRuntimeScript(),
+        relativePath: PROTECTED_CONTENT_SCRIPT_RELATIVE_PATH,
+        urlPath: `${context.basePrefix}/${PROTECTED_CONTENT_SCRIPT_RELATIVE_PATH}`.replace(/\/{2,}/g, "/")
+      }
+    ];
+  }
+};
+
 export const sitePlugins = [
   atlasThemePlugin,
+  protectedContentPlugin,
   commutativePlugin,
   topOrderPlugin,
   homePlugin,

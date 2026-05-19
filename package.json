@@ -19,7 +19,7 @@
     "package:electron:win:local": "npm run build && npm run package:win:local -w apps/desktop",
     "package:electron:win:remote": "npm run build && npm run package:win:remote -w apps/desktop",
     "start:electron": "npm run start -w apps/desktop",
-    "test": "npm run test -w packages/commutative && npm run test -w packages/content-core && npm run test -w apps/server && npm run test -w apps/admin",
+    "test": "npm run test -w packages/commutative && npm run test -w packages/content-core && npm run test -w apps/server && npm run test -w apps/admin && npm run test -w apps/site",
     "build-site": "npm run build-site -w apps/site",
     "publish-site": "npm run publish-site -w apps/site"
   },
