@@ -1069,15 +1069,20 @@ function buildFileTreeMap(nodes: FileSystemNode[]) {
   return entries;
 }
 
-function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedTag: string, selectedStatus: "all" | "draft" | "published") {
+type SortOrder = "date-inc" | "date-dec" | "title-inc" | "title-dec";
+
+function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedTag: string, selectedStatus: "all" | "draft" | "published", showAssets: boolean) {
   const query = searchQuery.trim().toLowerCase();
   if (node.type === "directory") {
     return (
       query.length === 0 ||
       node.name.toLowerCase().includes(query) ||
       node.path.toLowerCase().includes(query) ||
-      node.children.some((child) => filterFileTreeNode(child, searchQuery, selectedTag, selectedStatus))
+      node.children.some((child) => filterFileTreeNode(child, searchQuery, selectedTag, selectedStatus, showAssets))
     );
+  }
+  if (!showAssets && node.fileKind === "asset") {
+    return false;
   }
   const article = node.article;
   const matchesQuery =
@@ -1089,6 +1094,34 @@ function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedT
   const matchesTag = !article || selectedTag === "all" || article.tags.includes(selectedTag);
   const matchesStatus = !article || selectedStatus === "all" || article.status === selectedStatus;
   return matchesQuery && matchesTag && matchesStatus;
+}
+
+function flattenAndSortFileTree(nodes: FileSystemNode[], sortOrder: SortOrder): FileSystemFileNode[] {
+  const now = Date.now();
+  const files: FileSystemFileNode[] = [];
+  for (const node of nodes) {
+    if (node.type === "directory") {
+      files.push(...flattenAndSortFileTree(node.children, sortOrder));
+    } else {
+      files.push(node);
+    }
+  }
+  return files.sort((left, right) => {
+    const leftTitle = left.article?.title ?? left.name;
+    const rightTitle = right.article?.title ?? right.name;
+    if (sortOrder.startsWith("date")) {
+      const leftDate = left.fileKind === "asset" ? Infinity
+        : left.article?.date ? Date.parse(left.article.date) : now;
+      const rightDate = right.fileKind === "asset" ? Infinity
+        : right.article?.date ? Date.parse(right.article.date) : now;
+      if (leftDate !== rightDate) {
+        return sortOrder === "date-inc" ? leftDate - rightDate : rightDate - leftDate;
+      }
+      return leftTitle.localeCompare(rightTitle) * (sortOrder === "date-inc" ? 1 : -1);
+    }
+    const titleCmp = leftTitle.localeCompare(rightTitle);
+    return sortOrder === "title-inc" ? titleCmp : -titleCmp;
+  });
 }
 
 function getSnippetLanguage(model: monacoEditor.editor.ITextModel, position: monacoEditor.Position) {
@@ -1379,6 +1412,8 @@ export function App() {
   const [publishBusy, setPublishBusy] = useState(false);
   const [tagFilter, setTagFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
+  const [sortOrder, setSortOrder] = useState<"date-inc" | "date-dec" | "title-inc" | "title-dec">("date-dec");
+  const [showAssets, setShowAssets] = useState(false);
   const [previewRenderDialogOpen, setPreviewRenderDialogOpen] = useState(false);
   const [renderStyleAssetVersion, setRenderStyleAssetVersion] = useState(0);
   const [activeArticleLineNumber, setActiveArticleLineNumber] = useState<number | null>(null);
@@ -4765,12 +4800,8 @@ export function App() {
   }, [activeDocument, editorReadyVersion, normalizedConfig, pluginRuntime, treePayload?.articles]);
 
   const renderFileNode = (node: FileSystemNode): JSX.Element | null => {
-    if (!filterFileTreeNode(node, deferredSearchQuery, tagFilter, statusFilter)) {
-      return null;
-    }
-
     if (node.type === "directory") {
-      const hasActiveFilters = deferredSearchQuery.trim().length > 0 || tagFilter !== "all" || statusFilter !== "all";
+      const hasActiveFilters = deferredSearchQuery.trim().length > 0 || tagFilter !== "all" || statusFilter !== "all" || !showAssets;
       const isExpanded = hasActiveFilters || !collapsedTreePaths.has(node.path);
       return (
         <details
@@ -4994,6 +5025,15 @@ export function App() {
             />
             <div className="filter-inline-row">
               <label className="filter-inline">
+                <span>Sort</span>
+                <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as SortOrder)}>
+                  <option value="date-dec">Date &#8595;</option>
+                  <option value="date-inc">Date &#8593;</option>
+                  <option value="title-dec">Title &#8595;</option>
+                  <option value="title-inc">Title &#8593;</option>
+                </select>
+              </label>
+              <label className="filter-inline">
                 <span>Tag</span>
                 <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
                   <option value="all">All</option>
@@ -5004,6 +5044,8 @@ export function App() {
                   ))}
                 </select>
               </label>
+            </div>
+            <div className="filter-inline-row">
               <label className="filter-inline">
                 <span>Status</span>
                 <select
@@ -5015,6 +5057,10 @@ export function App() {
                   <option value="published">Published</option>
                 </select>
               </label>
+              <label className="filter-inline filter-checkbox-inline">
+                <input type="checkbox" checked={showAssets} onChange={(event) => setShowAssets(event.target.checked)} />
+                <span>Show assets</span>
+              </label>
             </div>
           </div>
           <div
@@ -5024,7 +5070,9 @@ export function App() {
               setContextMenuState({ path: "", x: event.clientX, y: event.clientY });
             }}
           >
-            {(treePayload?.fileTree ?? []).map((node) => renderFileNode(node))}
+            {flattenAndSortFileTree(treePayload?.fileTree ?? [], sortOrder)
+              .filter((node) => filterFileTreeNode(node, deferredSearchQuery, tagFilter, statusFilter, showAssets))
+              .map((node) => renderFileNode(node))}
           </div>
         </div>
       );

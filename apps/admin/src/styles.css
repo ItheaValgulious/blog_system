@@ -500,6 +500,17 @@ a {
   padding: 3px 6px;
 }
 
+.filter-checkbox-inline {
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.filter-checkbox-inline span {
+  color: var(--wb-foreground-muted);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
 .tree-section {
   min-height: 0;
   overflow: auto;
