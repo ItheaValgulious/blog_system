@@ -85,7 +85,11 @@ export function normalizeTags(value: unknown): string[] {
 }
 
 export function normalizeStatus(value: unknown): ArticleStatus {
-  return value === "published" ? "published" : "draft";
+  if (value === "published" || value === "working") {
+    return value;
+  }
+
+  return "draft";
 }
 
 export function normalizeTop(value: unknown): number {

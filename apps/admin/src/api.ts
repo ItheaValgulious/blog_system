@@ -60,7 +60,7 @@ export interface TreePayload {
     fileName: string;
     title: string;
     slug: string;
-    status: "draft" | "published";
+    status: "draft" | "working" | "published";
     date?: string;
     summary?: string;
     tags: string[];
@@ -289,7 +289,7 @@ export const api = {
       })
     });
   },
-  updateStatus(articlePath: string, status: "draft" | "published") {
+  updateStatus(articlePath: string, status: "draft" | "working" | "published") {
     return request<ArticleRecord>("/api/article/status", {
       method: "POST",
       body: JSON.stringify({

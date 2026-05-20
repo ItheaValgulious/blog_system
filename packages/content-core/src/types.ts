@@ -1,4 +1,4 @@
-export type ArticleStatus = "draft" | "published";
+export type ArticleStatus = "draft" | "working" | "published";
 
 export interface ArticleFrontmatter {
   title?: string;

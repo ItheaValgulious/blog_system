@@ -21,7 +21,8 @@ import {
   rewriteRelativeAssetUrls,
   type ArticleRecord,
   type EditorSnippet,
-  type FileSystemNode
+  type FileSystemNode,
+  type FileSystemFileNode
 } from "@blog-system/content-core";
 
 import {
@@ -1071,7 +1072,7 @@ function buildFileTreeMap(nodes: FileSystemNode[]) {
 
 type SortOrder = "date-inc" | "date-dec" | "title-inc" | "title-dec";
 
-function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedTag: string, selectedStatus: "all" | "draft" | "published", showAssets: boolean) {
+function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedTag: string, selectedStatus: "all" | "draft" | "working" | "published", showAssets: boolean) {
   const query = searchQuery.trim().toLowerCase();
   if (node.type === "directory") {
     return (
@@ -1411,7 +1412,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [publishBusy, setPublishBusy] = useState(false);
   const [tagFilter, setTagFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "working" | "published">("all");
   const [sortOrder, setSortOrder] = useState<"date-inc" | "date-dec" | "title-inc" | "title-dec">("date-dec");
   const [showAssets, setShowAssets] = useState(false);
   const [previewRenderDialogOpen, setPreviewRenderDialogOpen] = useState(false);
@@ -4888,7 +4889,9 @@ export function App() {
       >
         <span className="tree-file-title">{node.article?.title ?? node.name}</span>
         {node.article ? (
-          <span className={`status-badge ${node.article.status}`}>{node.article.status}</span>
+          <span className={`status-badge ${node.article.status}`}>
+            {node.article.status === "draft" ? "dra" : node.article.status === "working" ? "ing" : "pub"}
+          </span>
         ) : (
           <span className="tag-chip">{node.extension || "file"}</span>
         )}
@@ -5050,10 +5053,11 @@ export function App() {
                 <span>Status</span>
                 <select
                   value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value as "all" | "draft" | "published")}
+                  onChange={(event) => setStatusFilter(event.target.value as "all" | "draft" | "working" | "published")}
                 >
                   <option value="all">All</option>
                   <option value="draft">Draft</option>
+                  <option value="working">Working</option>
                   <option value="published">Published</option>
                 </select>
               </label>
@@ -5093,36 +5097,40 @@ export function App() {
                 {publishBusy ? "Publishing..." : "Publish Static Site"}
               </button>
               {isArticleDocument(activeDocument) ? (
-                <button
-                  className="action-button ghost"
-                  onClick={async () => {
-                    setBusyMessage("Updating status...");
-                    try {
-                      const updated = await api.updateStatus(
-                        activeDocument.articlePath,
-                        activeDocument.record.status === "draft" ? "published" : "draft"
-                      );
-                      const updatedDocument = withResolvedEditor(
-                        buildArticleDocument(updated),
-                        activeDocument.editorId
-                      );
-                      setDocuments((current) => upsertDocument(current, updatedDocument));
-                      setActiveDocumentId(updatedDocument.id);
-                      draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
-                      syncEditorValuePreservingView(updatedDocument.value);
-                      schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
-                      await loadTree();
-                      setPageError(null);
-                    } catch (error) {
-                      setPageError((error as Error).message);
-                    } finally {
-                      setBusyMessage(null);
-                    }
-                  }}
-                  type="button"
-                >
-                  {activeDocument.record.status === "draft" ? "Publish Article" : "Move To Draft"}
-                </button>
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <select
+                    className="action-button ghost"
+                    style={{ padding: "6px 10px", textAlign: "left", cursor: "pointer" }}
+                    value={activeDocument.record.status}
+                    onChange={async (event) => {
+                      const nextStatus = event.target.value as "draft" | "working" | "published";
+                      if (nextStatus === activeDocument.record.status) return;
+                      setBusyMessage("Updating status...");
+                      try {
+                        const updated = await api.updateStatus(activeDocument.articlePath, nextStatus);
+                        const updatedDocument = withResolvedEditor(
+                          buildArticleDocument(updated),
+                          activeDocument.editorId
+                        );
+                        setDocuments((current) => upsertDocument(current, updatedDocument));
+                        setActiveDocumentId(updatedDocument.id);
+                        draftValuesRef.current[updatedDocument.id] = updatedDocument.value;
+                        syncEditorValuePreservingView(updatedDocument.value);
+                        schedulePreviewSourceUpdate(updatedDocument.value, { immediate: true });
+                        await loadTree();
+                        setPageError(null);
+                      } catch (error) {
+                        setPageError((error as Error).message);
+                      } finally {
+                        setBusyMessage(null);
+                      }
+                    }}
+                  >
+                    <option value="draft">Draft (dra)</option>
+                    <option value="working">Working (ing)</option>
+                    <option value="published">Published (pub)</option>
+                  </select>
+                </div>
               ) : null}
               <button
                 className="action-button primary"

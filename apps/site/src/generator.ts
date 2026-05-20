@@ -187,7 +187,7 @@ export async function buildSite(customSettings?: Partial<SiteBuildSettings>) {
   );
 
   const siteData = await loadSiteData(settings.contentRoot, basePrefix);
-  const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published");
+  const publishedArticles = (await scanArticles(settings.contentRoot)).filter((article) => article.status === "published" || article.status === "working");
   const aboutArticle = resolveAboutArticle(publishedArticles);
   const hasProtectedContent = publishedArticles.some((article) => article.isProtected);
 

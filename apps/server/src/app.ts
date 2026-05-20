@@ -195,10 +195,10 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
     try {
       const { path: relativePath, status } = req.body as {
         path?: string;
-        status?: "draft" | "published";
+        status?: "draft" | "working" | "published";
       };
 
-      if (!relativePath || (status !== "draft" && status !== "published")) {
+      if (!relativePath || (status !== "draft" && status !== "working" && status !== "published")) {
         res.status(400).json({ error: "Valid path and status are required." });
         return;
       }

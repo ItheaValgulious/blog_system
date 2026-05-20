@@ -89,7 +89,7 @@ async function applyPublishTransitionDate(
   try {
     const previous = await readArticle(contentRoot, nextRecord.path);
 
-    if (previous.status === "draft" && nextRecord.status === "published") {
+    if (previous.status === "draft" && (nextRecord.status === "published" || nextRecord.status === "working")) {
       const nextDate =
         typeof nextRecord.frontmatter.date === "string" && nextRecord.frontmatter.date.trim()
           ? nextRecord.frontmatter.date.trim()
@@ -137,16 +137,17 @@ export async function saveArticleContent(
 export async function updateArticleStatus(
   contentRoot: string,
   relativePath: string,
-  status: "draft" | "published"
+  status: "draft" | "working" | "published"
 ): Promise<ArticleRecord> {
   const article = await readArticle(contentRoot, relativePath);
+  const shouldSetDate =
+    (status === "published" || status === "working") &&
+    article.status === "draft" &&
+    !article.frontmatter.date;
   const nextFrontmatter = {
     ...article.frontmatter,
     status,
-    date:
-      status === "published" && article.status === "draft" && !article.frontmatter.date
-        ? new Date().toISOString()
-        : article.frontmatter.date
+    date: shouldSetDate ? new Date().toISOString() : article.frontmatter.date
   };
   const serialized = serializeArticle({
     frontmatter: nextFrontmatter,

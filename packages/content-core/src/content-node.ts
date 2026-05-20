@@ -238,6 +238,8 @@ export function collectTags(articles: ArticleRecord[]): TagInfo[] {
       existing.count += 1;
       if (article.status === "published") {
         existing.publishedCount += 1;
+      } else if (article.status === "working") {
+        existing.publishedCount += 1;
       } else {
         existing.draftCount += 1;
       }
@@ -277,12 +279,12 @@ function buildDirectoryPages(
 
 export async function loadSiteData(contentRoot: string, basePath = ""): Promise<SiteData> {
   const allArticles = await scanArticles(contentRoot);
-  const publishedArticles = allArticles.filter((article) => article.status === "published");
-  const tree = buildContentTree(publishedArticles, basePath);
+  const visibleArticles = allArticles.filter((article) => article.status === "published" || article.status === "working");
+  const tree = buildContentTree(visibleArticles, basePath);
 
   return {
-    articles: publishedArticles.map((article) => toArticleSummary(article, basePath)),
-    tags: collectTags(publishedArticles),
+    articles: visibleArticles.map((article) => toArticleSummary(article, basePath)),
+    tags: collectTags(visibleArticles),
     tree,
     directories: buildDirectoryPages(tree, basePath)
   };

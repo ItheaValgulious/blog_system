@@ -665,6 +665,11 @@ a {
   color: var(--wb-accent);
 }
 
+.status-badge.working {
+  background: var(--wb-warning-bg);
+  color: var(--wb-warning);
+}
+
 .status-badge.published {
   background: var(--wb-success-bg);
   color: var(--wb-accent-strong);
