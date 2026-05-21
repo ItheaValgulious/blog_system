@@ -1097,32 +1097,40 @@ function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedT
   return matchesQuery && matchesTag && matchesStatus;
 }
 
-function flattenAndSortFileTree(nodes: FileSystemNode[], sortOrder: SortOrder): FileSystemFileNode[] {
+function sortTreeNodes(nodes: FileSystemNode[], sortOrder: SortOrder): FileSystemNode[] {
   const now = Date.now();
-  const files: FileSystemFileNode[] = [];
-  for (const node of nodes) {
-    if (node.type === "directory") {
-      files.push(...flattenAndSortFileTree(node.children, sortOrder));
-    } else {
-      files.push(node);
-    }
-  }
-  return files.sort((left, right) => {
-    const leftTitle = left.article?.title ?? left.name;
-    const rightTitle = right.article?.title ?? right.name;
-    if (sortOrder.startsWith("date")) {
-      const leftDate = left.fileKind === "asset" ? Infinity
-        : left.article?.date ? Date.parse(left.article.date) : now;
-      const rightDate = right.fileKind === "asset" ? Infinity
-        : right.article?.date ? Date.parse(right.article.date) : now;
-      if (leftDate !== rightDate) {
-        return sortOrder === "date-inc" ? leftDate - rightDate : rightDate - leftDate;
+  return nodes
+    .map((node) => {
+      if (node.type === "directory") {
+        return { ...node, children: sortTreeNodes(node.children, sortOrder) };
       }
-      return leftTitle.localeCompare(rightTitle) * (sortOrder === "date-inc" ? 1 : -1);
-    }
-    const titleCmp = leftTitle.localeCompare(rightTitle);
-    return sortOrder === "title-inc" ? titleCmp : -titleCmp;
-  });
+      return node;
+    })
+    .sort((left, right) => {
+      if (left.type === "directory" && right.type !== "directory") {
+        return -1;
+      }
+      if (left.type !== "directory" && right.type === "directory") {
+        return 1;
+      }
+      if (left.type === "directory" && right.type === "directory") {
+        return left.name.localeCompare(right.name);
+      }
+      const leftTitle = left.article?.title ?? left.name;
+      const rightTitle = right.article?.title ?? right.name;
+      if (sortOrder.startsWith("date")) {
+        const leftDate = left.fileKind === "asset" ? Infinity
+          : left.article?.date ? Date.parse(left.article.date) : now;
+        const rightDate = right.fileKind === "asset" ? Infinity
+          : right.article?.date ? Date.parse(right.article.date) : now;
+        if (leftDate !== rightDate) {
+          return sortOrder === "date-inc" ? leftDate - rightDate : rightDate - leftDate;
+        }
+        return leftTitle.localeCompare(rightTitle) * (sortOrder === "date-inc" ? 1 : -1);
+      }
+      const titleCmp = leftTitle.localeCompare(rightTitle);
+      return sortOrder === "title-inc" ? titleCmp : -titleCmp;
+    });
 }
 
 function getSnippetLanguage(model: monacoEditor.editor.ITextModel, position: monacoEditor.Position) {
@@ -5074,7 +5082,7 @@ export function App() {
               setContextMenuState({ path: "", x: event.clientX, y: event.clientY });
             }}
           >
-            {flattenAndSortFileTree(treePayload?.fileTree ?? [], sortOrder)
+            {sortTreeNodes(treePayload?.fileTree ?? [], sortOrder)
               .filter((node) => filterFileTreeNode(node, deferredSearchQuery, tagFilter, statusFilter, showAssets))
               .map((node) => renderFileNode(node))}
           </div>
@@ -5099,8 +5107,6 @@ export function App() {
               {isArticleDocument(activeDocument) ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   <select
-                    className="action-button ghost"
-                    style={{ padding: "6px 10px", textAlign: "left", cursor: "pointer" }}
                     value={activeDocument.record.status}
                     onChange={async (event) => {
                       const nextStatus = event.target.value as "draft" | "working" | "published";
