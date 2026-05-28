@@ -223,3 +223,52 @@ export function removeCollapsedTreePaths(paths: ReadonlySet<string>, targetPath:
     Array.from(paths).filter((path) => !matchesPathPrefix(path, targetPath))
   );
 }
+
+export type SortOrder = "date-inc" | "date-dec" | "title-inc" | "title-dec";
+export type StatusFilter = "all" | "draft" | "working" | "published";
+
+export interface FilePaneFilters {
+  searchQuery: string;
+  tagFilter: string;
+  statusFilter: StatusFilter;
+  sortOrder: SortOrder;
+  showAssets: boolean;
+}
+
+export const DEFAULT_FILE_PANE_FILTERS: FilePaneFilters = {
+  searchQuery: "",
+  tagFilter: "all",
+  statusFilter: "all",
+  sortOrder: "date-dec",
+  showAssets: false
+};
+
+const VALID_SORT_ORDERS: ReadonlySet<string> = new Set(["date-inc", "date-dec", "title-inc", "title-dec"]);
+const VALID_STATUS_FILTERS: ReadonlySet<string> = new Set(["all", "draft", "working", "published"]);
+
+export function serializeFilePaneFilters(filters: FilePaneFilters): string {
+  return JSON.stringify(filters);
+}
+
+export function parseStoredFilePaneFilters(rawValue: string | null): FilePaneFilters {
+  if (!rawValue) {
+    return { ...DEFAULT_FILE_PANE_FILTERS };
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as Record<string, unknown>;
+    return {
+      searchQuery: typeof parsed.searchQuery === "string" ? parsed.searchQuery : "",
+      tagFilter: typeof parsed.tagFilter === "string" ? parsed.tagFilter : "all",
+      statusFilter: typeof parsed.statusFilter === "string" && VALID_STATUS_FILTERS.has(parsed.statusFilter)
+        ? parsed.statusFilter as StatusFilter
+        : "all",
+      sortOrder: typeof parsed.sortOrder === "string" && VALID_SORT_ORDERS.has(parsed.sortOrder)
+        ? parsed.sortOrder as SortOrder
+        : "date-dec",
+      showAssets: typeof parsed.showAssets === "boolean" ? parsed.showAssets : false
+    };
+  } catch {
+    return { ...DEFAULT_FILE_PANE_FILTERS };
+  }
+}

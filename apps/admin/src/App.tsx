@@ -51,13 +51,17 @@ import {
   resolveActiveSnippetMatches
 } from "./snippet-completion";
 import {
+  DEFAULT_FILE_PANE_FILTERS,
   parseStoredCollapsedTreePaths,
+  parseStoredFilePaneFilters,
   parseStoredWorkbenchResource,
   remapCollapsedTreePaths,
   removeCollapsedTreePaths,
   serializeCollapsedTreePaths,
+  serializeFilePaneFilters,
   serializeWorkbenchResource
 } from "./workbench-session";
+import type { FilePaneFilters, SortOrder, StatusFilter } from "./workbench-session";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
 import { getSnippetLanguageAtOffset } from "./snippet-context";
 import { builtInPlugins } from "./workbench/builtins";
@@ -114,6 +118,7 @@ const PREVIEW_WIDTH_STORAGE_KEY = "admin-preview-width";
 const ARTICLE_CURSOR_STATE_STORAGE_KEY = "admin-article-cursor-state";
 const ACTIVE_RESOURCE_STORAGE_KEY = "admin-active-resource";
 const COLLAPSED_TREE_PATHS_STORAGE_KEY = "admin-collapsed-tree-paths";
+const FILE_PANE_FILTERS_STORAGE_KEY = "admin-file-pane-filters";
 const HOME_DOCUMENT_ID = "home:dashboard";
 const USAGE_STATS_DOCUMENT_ID = "usage-stats:overview";
 
@@ -1070,9 +1075,7 @@ function buildFileTreeMap(nodes: FileSystemNode[]) {
   return entries;
 }
 
-type SortOrder = "date-inc" | "date-dec" | "title-inc" | "title-dec";
-
-function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedTag: string, selectedStatus: "all" | "draft" | "working" | "published", showAssets: boolean) {
+function filterFileTreeNode(node: FileSystemNode, searchQuery: string, selectedTag: string, selectedStatus: StatusFilter, showAssets: boolean) {
   const query = searchQuery.trim().toLowerCase();
   if (node.type === "directory") {
     return (
@@ -1417,12 +1420,15 @@ export function App() {
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(HOME_DOCUMENT_ID);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [initialFilters] = useState<FilePaneFilters>(() =>
+    parseStoredFilePaneFilters(window.localStorage.getItem(FILE_PANE_FILTERS_STORAGE_KEY))
+  );
+  const [searchQuery, setSearchQuery] = useState(initialFilters.searchQuery);
   const [publishBusy, setPublishBusy] = useState(false);
-  const [tagFilter, setTagFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "working" | "published">("all");
-  const [sortOrder, setSortOrder] = useState<"date-inc" | "date-dec" | "title-inc" | "title-dec">("date-dec");
-  const [showAssets, setShowAssets] = useState(false);
+  const [tagFilter, setTagFilter] = useState(initialFilters.tagFilter);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(initialFilters.statusFilter);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(initialFilters.sortOrder);
+  const [showAssets, setShowAssets] = useState(initialFilters.showAssets);
   const [previewRenderDialogOpen, setPreviewRenderDialogOpen] = useState(false);
   const [renderStyleAssetVersion, setRenderStyleAssetVersion] = useState(0);
   const [activeArticleLineNumber, setActiveArticleLineNumber] = useState<number | null>(null);
@@ -3528,6 +3534,17 @@ export function App() {
   }, [disabledPluginIds]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        FILE_PANE_FILTERS_STORAGE_KEY,
+        serializeFilePaneFilters({ searchQuery, tagFilter, statusFilter, sortOrder, showAssets })
+      );
+    } catch {
+      // Ignore storage failures and keep the in-memory filter state.
+    }
+  }, [searchQuery, tagFilter, statusFilter, sortOrder, showAssets]);
+
+  useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
 
@@ -4810,7 +4827,7 @@ export function App() {
 
   const renderFileNode = (node: FileSystemNode): JSX.Element | null => {
     if (node.type === "directory") {
-      const hasActiveFilters = deferredSearchQuery.trim().length > 0 || tagFilter !== "all" || statusFilter !== "all" || !showAssets;
+      const hasActiveFilters = deferredSearchQuery.trim().length > 0 || tagFilter !== "all" || statusFilter !== "all" || showAssets;
       const isExpanded = hasActiveFilters || !collapsedTreePaths.has(node.path);
       return (
         <details
@@ -5061,7 +5078,7 @@ export function App() {
                 <span>Status</span>
                 <select
                   value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value as "all" | "draft" | "working" | "published")}
+                  onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
                 >
                   <option value="all">All</option>
                   <option value="draft">Draft</option>
