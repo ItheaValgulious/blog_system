@@ -12,8 +12,13 @@ import {
 } from "@blog-system/content-core/node";
 import {
   normalizeArticleForSave,
+  normalizeOptionalText,
+  normalizePassword,
+  parseRawFrontmatter,
+  normalizeStatus,
   normalizeTags,
   normalizeTop,
+  parseArticleSource,
   serializeArticle,
   titleFromFileName,
   toPosixPath,
@@ -24,6 +29,11 @@ import {
 const DIRECTORY_METADATA_FILE_NAME = ".blog-system-folder.json";
 
 interface FileSystemMetadataPayload {
+  date?: string;
+  password?: string;
+  slug?: string;
+  status?: "draft" | "working" | "published";
+  summary?: string;
   tags?: string[];
   title?: string;
   top?: number;
@@ -139,19 +149,24 @@ export async function updateArticleStatus(
   relativePath: string,
   status: "draft" | "working" | "published"
 ): Promise<ArticleRecord> {
-  const article = await readArticle(contentRoot, relativePath);
+  // Use parseArticleSource to avoid baking inherited directory metadata
+  // into the article's own frontmatter on save.
+  const normalizedPath = normalizeRelativeEntryPath(relativePath);
+  const absolutePath = resolveContentPath(contentRoot, normalizedPath);
+  const rawContent = await fs.readFile(absolutePath, "utf8");
+  const parsed = parseArticleSource(normalizedPath, rawContent);
   const shouldSetDate =
     (status === "published" || status === "working") &&
-    article.status === "draft" &&
-    !article.frontmatter.date;
+    parsed.status === "draft" &&
+    !parsed.frontmatter.date;
   const nextFrontmatter = {
-    ...article.frontmatter,
+    ...parsed.frontmatter,
     status,
-    date: shouldSetDate ? new Date().toISOString() : article.frontmatter.date
+    date: shouldSetDate ? new Date().toISOString() : parsed.frontmatter.date
   };
   const serialized = serializeArticle({
     frontmatter: nextFrontmatter,
-    body: article.body
+    body: parsed.body
   });
   return saveArticleContent(contentRoot, relativePath, serialized);
 }
@@ -175,45 +190,22 @@ function normalizeRelativeEntryPath(relativePath = "") {
   return normalized === "." ? "" : normalized;
 }
 
-async function loadDirectoryMetadataTags(contentRoot: string, relativeDirectoryPath: string) {
-  const normalizedDirectoryPath = normalizeRelativeEntryPath(relativeDirectoryPath);
-  const segments = normalizedDirectoryPath ? normalizedDirectoryPath.split("/") : [];
-  const mergedTags: string[] = [];
-
-  for (let index = 0; index <= segments.length; index += 1) {
-    const candidateDirectory = segments.slice(0, index).join("/");
-    const metadataPath = resolveContentPath(
-      contentRoot,
-      candidateDirectory
-        ? path.posix.join(candidateDirectory, DIRECTORY_METADATA_FILE_NAME)
-        : DIRECTORY_METADATA_FILE_NAME
-    );
-
-    try {
-      const rawMetadata = await fs.readFile(metadataPath, "utf8");
-      const parsed = JSON.parse(rawMetadata) as { tags?: unknown };
-
-      for (const tag of normalizeTags(parsed.tags)) {
-        if (!mergedTags.includes(tag)) {
-          mergedTags.push(tag);
-        }
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        continue;
-      }
-
-      throw error;
-    }
+function isNonEmptyMetadataValue(value: unknown) {
+  if (value === undefined || value === null) {
+    return false;
   }
 
-  return mergedTags;
+  if (typeof value === "string") {
+    return value.trim() !== "";
+  }
+
+  return true;
 }
 
-async function writeDirectoryMetadataTags(
+async function writeDirectoryMetadata(
   contentRoot: string,
   relativeDirectoryPath: string,
-  tags: string[]
+  metadata: Record<string, unknown>
 ) {
   const normalizedDirectoryPath = normalizeRelativeEntryPath(relativeDirectoryPath);
   const metadataPath = resolveContentPath(
@@ -222,7 +214,31 @@ async function writeDirectoryMetadataTags(
       ? path.posix.join(normalizedDirectoryPath, DIRECTORY_METADATA_FILE_NAME)
       : DIRECTORY_METADATA_FILE_NAME
   );
-  await fs.writeFile(metadataPath, `${JSON.stringify({ tags }, null, 2)}\n`, "utf8");
+  await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+}
+
+async function readLocalDirectoryMetadata(
+  contentRoot: string,
+  relativeDirectoryPath: string
+): Promise<Record<string, unknown>> {
+  const normalizedDirectoryPath = normalizeRelativeEntryPath(relativeDirectoryPath);
+  const metadataPath = resolveContentPath(
+    contentRoot,
+    normalizedDirectoryPath
+      ? path.posix.join(normalizedDirectoryPath, DIRECTORY_METADATA_FILE_NAME)
+      : DIRECTORY_METADATA_FILE_NAME
+  );
+
+  try {
+    const raw = await fs.readFile(metadataPath, "utf8");
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {};
+    }
+
+    throw error;
+  }
 }
 
 export async function readFileSystemMetadata(contentRoot: string, relativePath: string) {
@@ -231,22 +247,30 @@ export async function readFileSystemMetadata(contentRoot: string, relativePath: 
   const stats = await fs.stat(absolutePath);
 
   if (stats.isDirectory()) {
+    const localMetadata = await readLocalDirectoryMetadata(contentRoot, normalizedPath);
     return {
       type: "directory" as const,
       metadata: {
-        tags: await loadDirectoryMetadataTags(contentRoot, normalizedPath)
+        ...localMetadata,
+        tags: normalizeTags(localMetadata.tags)
       }
     };
   }
 
   if (normalizedPath.toLowerCase().endsWith(".md")) {
-    const article = await readArticle(contentRoot, normalizedPath);
+    const rawContent = await fs.readFile(absolutePath, "utf8");
+    const article = parseArticleSource(normalizedPath, rawContent);
     return {
       type: "file" as const,
       metadata: {
         title: article.title,
-        tags: article.tags,
-        top: article.top
+        status: article.status,
+        date: article.date,
+        summary: article.summary,
+        slug: article.frontmatter.slug,
+        password: normalizePassword(article.frontmatter.password),
+        tags: normalizeTags(article.frontmatter.tags),
+        top: normalizeTop(article.frontmatter.top)
       }
     };
   }
@@ -267,8 +291,61 @@ export async function saveFileSystemMetadata(
   const stats = await fs.stat(absolutePath);
 
   if (stats.isDirectory()) {
-    const tags = normalizeTags(metadata.tags ?? []);
-    await writeDirectoryMetadataTags(contentRoot, normalizedPath, tags);
+    const dirMetadata: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(metadata)) {
+      if (key === "tags") {
+        if (Array.isArray(value)) {
+          const tags = normalizeTags(value);
+          if (tags.length > 0) dirMetadata.tags = tags;
+        }
+        continue;
+      }
+
+      if (key === "top") {
+        if (value !== undefined && value !== null && value !== "") {
+          dirMetadata.top = normalizeTop(value);
+        }
+        continue;
+      }
+
+      if (key === "status") {
+        if (value !== undefined) {
+          const status = normalizeStatus(value);
+          dirMetadata.status = status;
+        }
+        continue;
+      }
+
+      if (key === "password") {
+        if (value !== undefined) {
+          const password = normalizePassword(value);
+          if (password !== undefined) {
+            dirMetadata.password = password;
+          }
+        }
+        continue;
+      }
+
+      if (key === "title" || key === "date" || key === "summary" || key === "slug") {
+        if (value !== undefined) {
+          const normalized = normalizeOptionalText(value);
+          if (normalized !== undefined) {
+            dirMetadata[key] = normalized;
+          }
+        }
+        continue;
+      }
+
+      if (value !== undefined) {
+        if (isNonEmptyMetadataValue(value)) {
+          dirMetadata[key] = value;
+        }
+      }
+    }
+    // Only write to the folder's .blog-system-folder.json file.
+    // Do NOT propagate to descendant files/folders.
+    await writeDirectoryMetadata(contentRoot, normalizedPath, dirMetadata);
+
     return { type: "directory" as const };
   }
 
@@ -276,26 +353,60 @@ export async function saveFileSystemMetadata(
     return { type: "file" as const };
   }
 
-  const article = await readArticle(contentRoot, normalizedPath);
+  // Use parseArticleSource (not readArticle) to get the article's own
+  // frontmatter without inherited directory metadata, so that inherited
+  // values are not baked into the file on save.
+  const rawContent = await fs.readFile(absolutePath, "utf8");
+  const parsed = parseArticleSource(normalizedPath, rawContent);
+  const rawFrontmatter = parseRawFrontmatter(rawContent) as Record<string, unknown>;
   const nextFrontmatter = {
-    ...article.frontmatter,
+    ...rawFrontmatter,
     title:
       typeof metadata.title === "string" && metadata.title.trim()
         ? metadata.title.trim()
-        : article.frontmatter.title,
-    tags: normalizeTags(metadata.tags ?? article.tags),
-    top: normalizeTop(metadata.top ?? article.top)
+        : rawFrontmatter.title ?? parsed.title,
+    status:
+      metadata.status !== undefined
+        ? normalizeStatus(metadata.status)
+        : typeof rawFrontmatter.status === "string" && rawFrontmatter.status.trim()
+          ? normalizeStatus(rawFrontmatter.status)
+          : parsed.status,
+    date:
+      metadata.date !== undefined
+        ? normalizeOptionalText(metadata.date)
+        : normalizeOptionalText(rawFrontmatter.date),
+    summary:
+      metadata.summary !== undefined
+        ? normalizeOptionalText(metadata.summary)
+        : normalizeOptionalText(rawFrontmatter.summary),
+    slug:
+      metadata.slug !== undefined
+        ? normalizeOptionalText(metadata.slug)
+        : normalizeOptionalText(rawFrontmatter.slug),
+    password:
+      metadata.password !== undefined
+        ? normalizePassword(metadata.password)
+        : normalizePassword(rawFrontmatter.password),
+    tags:
+      metadata.tags !== undefined
+        ? normalizeTags(metadata.tags)
+        : normalizeTags(rawFrontmatter.tags),
+    top:
+      metadata.top !== undefined
+        ? normalizeTop(metadata.top)
+        : rawFrontmatter.top !== undefined && rawFrontmatter.top !== null
+          ? normalizeTop(rawFrontmatter.top)
+          : normalizeTop(parsed.top)
   };
 
   const serialized = serializeArticle({
     frontmatter: nextFrontmatter,
-    body: article.body
+    body: parsed.body
   });
 
   await fs.writeFile(absolutePath, serialized, "utf8");
   return { type: "file" as const };
 }
-
 function joinRelativePath(parentPath: string, name: string) {
   const normalizedName = name.trim().replace(/^\/+/, "");
 
@@ -422,7 +533,7 @@ export async function createFileSystemEntry(
     const directoryTags = normalizeTags(metadata?.tags);
 
     if (directoryTags.length > 0) {
-      await writeDirectoryMetadataTags(contentRoot, relativePath, directoryTags);
+      await writeDirectoryMetadata(contentRoot, relativePath, { tags: directoryTags });
     }
 
     return { path: relativePath };
@@ -439,13 +550,12 @@ export async function createFileSystemEntry(
   }
 
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  // Don't bake inherited folder metadata into new article files.
+  // Inheritance happens at read time via loadDirectoryMetadata.
   const initialContent = relativePath.toLowerCase().endsWith(".md")
     ? buildArticleTemplate(name, {
         title: typeof metadata?.title === "string" ? metadata.title : undefined,
-        tags: [
-          ...(await loadDirectoryMetadataTags(contentRoot, normalizedParentPath)),
-          ...normalizeTags(metadata?.tags)
-        ].filter((tag, index, tags) => tags.indexOf(tag) === index),
+        tags: normalizeTags(metadata?.tags),
         top: normalizeTop(metadata?.top)
       })
     : "";

@@ -15,6 +15,7 @@ const CONFIG_DOCUMENT_PATHS: Record<ConfigDocumentKind, string> = {
   latexSnippets: "config/latex.snippets.json",
   markdownBlockConfig: "config/markdown-blocks.json",
   markdownSnippets: "config/markdown.snippets.json",
+  publishConfig: "config/site-publish.local.json",
   siteConfig: "config/site.json"
 };
 

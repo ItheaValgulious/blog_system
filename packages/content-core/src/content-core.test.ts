@@ -60,7 +60,7 @@ state: published
   assert.doesNotMatch(record.rawContent, /^state:/m);
 });
 
-test("normalizeArticleForSave drops summary frontmatter", () => {
+test("normalizeArticleForSave preserves summary frontmatter", () => {
   const record = normalizeArticleForSave(
     "notes/summary.md",
     `---
@@ -70,8 +70,8 @@ summary: keep me?
 # Summary`
   );
 
-  assert.equal(record.summary, undefined);
-  assert.doesNotMatch(record.rawContent, /^summary:/m);
+  assert.equal(record.summary, "keep me?");
+  assert.match(record.rawContent, /^summary: keep me\?/m);
 });
 
 test("normalizeArticleForSave preserves unquoted yaml dates", () => {

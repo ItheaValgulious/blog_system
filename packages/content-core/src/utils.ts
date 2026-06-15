@@ -102,7 +102,16 @@ export function normalizeTop(value: unknown): number {
   return Math.trunc(parsed);
 }
 
-function normalizePassword(value: unknown): string | undefined {
+export function normalizePassword(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export function normalizeOptionalText(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
@@ -135,6 +144,7 @@ export function normalizeFrontmatter(
   const slug =
     typeof rest.slug === "string" && rest.slug.trim() ? rest.slug.trim() : undefined;
   const password = normalizePassword(rest.password);
+  const summary = normalizeOptionalText(rest.summary);
   const statusSource =
     typeof rest.status === "string" && rest.status.trim()
       ? rest.status
@@ -149,7 +159,7 @@ export function normalizeFrontmatter(
     status: normalizeStatus(statusSource),
     top,
     date,
-    summary: undefined,
+    summary,
     slug,
     password
   };
@@ -185,6 +195,10 @@ export function parseArticleSource(relativePath: string, rawContent: string): Ar
     excerpt: frontmatter.summary ?? getExcerpt(body),
     isProtected: Boolean(normalizePassword(frontmatter.password))
   };
+}
+
+export function parseRawFrontmatter(rawContent: string): ArticleFrontmatter {
+  return parseFrontmatterBlock(normalizeLineEndings(rawContent)).data;
 }
 
 export function serializeArticle(record: Pick<ArticleRecord, "frontmatter" | "body">): string {

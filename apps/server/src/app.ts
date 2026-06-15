@@ -39,6 +39,7 @@ import {
   pushGitChanges
 } from "./git-service.js";
 import { publishSite } from "./publish-service.js";
+import { loadPublishConfig, savePublishConfig } from "./publish-config-service.js";
 import { loadMarkdownBlockConfig, saveMarkdownBlockConfig } from "./markdown-block-config-service.js";
 import {
   MarkdownSearchError,
@@ -365,6 +366,29 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
       }
 
       res.json(await saveSiteConfig(settings.configRoot, raw));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/publish-config", async (_req, res, next) => {
+    try {
+      res.json(await loadPublishConfig(settings.configRoot));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/publish-config", async (req, res, next) => {
+    try {
+      const { raw } = req.body as { raw?: string };
+
+      if (typeof raw !== "string") {
+        res.status(400).json({ error: "raw is required." });
+        return;
+      }
+
+      res.json(await savePublishConfig(settings.configRoot, raw));
     } catch (error) {
       next(error);
     }
@@ -1081,6 +1105,25 @@ export function createApp(customSettings?: Partial<ServerSettings>) {
     try {
       res.json(await publishSite(settings));
     } catch (error) {
+      // Surface PublishTargetError fields (target / phase / HTTP status) so the
+      // admin toast can show e.g. "Publish failed (cloudflare/upload-assets):
+      // 401 invalid token" instead of just "publish failed".
+      const targetError = error as Error & {
+        target?: string;
+        phase?: string;
+        status?: number;
+        detail?: string;
+      };
+      if (targetError && (targetError.target || targetError.phase)) {
+        res.status(500).json({
+          error: targetError.message,
+          target: targetError.target,
+          phase: targetError.phase,
+          status: targetError.status,
+          detail: targetError.detail
+        });
+        return;
+      }
       next(error);
     }
   });

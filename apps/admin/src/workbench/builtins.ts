@@ -3,6 +3,7 @@ import { clipboardImagePlugin } from "./plugins/clipboard-image-plugin";
 import { commandPalettePlugin } from "./plugins/command-palette-plugin";
 import { commutativePlugin } from "./plugins/commutative-plugin";
 import { createMetadataPlugin } from "./plugins/create-metadata-plugin";
+import { editorConveniencePlugin } from "./plugins/editor-convenience-plugin";
 import { gitPlugin } from "./plugins/git-plugin";
 import { globalSearchReplacePlugin } from "./plugins/global-search-replace-plugin";
 import { coreWorkbenchPlugin } from "./plugins/core-workbench-plugin";
@@ -17,6 +18,7 @@ import { usageStatsPlugin } from "./plugins/usage-stats-plugin";
 export const builtInPlugins: PluginDefinition[] = [
   coreWorkbenchPlugin,
   snippetActionsPlugin,
+  editorConveniencePlugin,
   commandPalettePlugin,
   commutativePlugin,
   themePlugin,

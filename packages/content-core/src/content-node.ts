@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type {
+  ArticleFrontmatter,
   ArticleRecord,
   ArticleSummary,
   ContentTreeNode,
@@ -12,7 +13,10 @@ import type {
 } from "./types.js";
 import {
   normalizeArticleForSave,
+  normalizePassword,
+  normalizeStatus,
   normalizeTags,
+  normalizeTop,
   parseArticleSource,
   serializeArticle,
   toArticleSummary,
@@ -43,10 +47,10 @@ async function walkDirectory(rootDir: string, currentDir = ""): Promise<string[]
   return files;
 }
 
-async function loadDirectoryMetadataTags(contentRoot: string, relativeDirectoryPath: string) {
+export async function loadDirectoryMetadata(contentRoot: string, relativeDirectoryPath: string) {
   const normalizedDirectoryPath = toPosixPath(relativeDirectoryPath).replace(/\/+$/g, "");
   const segments = normalizedDirectoryPath ? normalizedDirectoryPath.split("/") : [];
-  const mergedTags: string[] = [];
+  const merged: Record<string, unknown> = {};
 
   for (let index = 0; index <= segments.length; index += 1) {
     const candidateDirectory = segments.slice(0, index).join("/");
@@ -59,11 +63,11 @@ async function loadDirectoryMetadataTags(contentRoot: string, relativeDirectoryP
 
     try {
       const rawMetadata = await fs.readFile(metadataPath, "utf8");
-      const parsed = JSON.parse(rawMetadata) as { tags?: unknown };
+      const parsed = JSON.parse(rawMetadata) as Record<string, unknown>;
 
-      for (const tag of normalizeTags(parsed.tags)) {
-        if (!mergedTags.includes(tag)) {
-          mergedTags.push(tag);
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value !== undefined && value !== null) {
+          merged[key] = value;
         }
       }
     } catch (error) {
@@ -75,7 +79,12 @@ async function loadDirectoryMetadataTags(contentRoot: string, relativeDirectoryP
     }
   }
 
-  return mergedTags;
+  return merged;
+}
+
+async function loadDirectoryMetadataTags(contentRoot: string, relativeDirectoryPath: string) {
+  const merged = await loadDirectoryMetadata(contentRoot, relativeDirectoryPath);
+  return normalizeTags(merged.tags);
 }
 
 async function walkFileSystemTree(
@@ -96,11 +105,19 @@ async function walkFileSystemTree(
     const relativePath = toPosixPath(currentDir ? path.join(currentDir, entry.name) : entry.name);
 
     if (entry.isDirectory()) {
+      const metadataPath = path.join(absoluteDir, entry.name, DIRECTORY_METADATA_FILE_NAME);
+      let hasMetadata = false;
+      try {
+        await fs.access(metadataPath);
+        hasMetadata = true;
+      } catch {}
+
       nodes.push({
         type: "directory",
         name: entry.name,
         path: relativePath,
-        children: await walkFileSystemTree(rootDir, articleMap, basePath, relativePath)
+        children: await walkFileSystemTree(rootDir, articleMap, basePath, relativePath),
+        hasMetadata
       });
       continue;
     }
@@ -144,28 +161,54 @@ export async function readArticle(contentRoot: string, relativePath: string): Pr
   const absolutePath = resolveContentPath(contentRoot, relativePath);
   const rawContent = await fs.readFile(absolutePath, "utf8");
   const parsed = parseArticleSource(relativePath, rawContent);
-  const inheritedTags = await loadDirectoryMetadataTags(contentRoot, parsed.directory);
+  const inheritedMetadata = await loadDirectoryMetadata(contentRoot, parsed.directory);
+
+  const inheritedTags = normalizeTags(inheritedMetadata.tags);
   const mergedTags = [...inheritedTags, ...parsed.tags].filter(
     (tag, index, tags) => tags.indexOf(tag) === index
   );
 
-  if (mergedTags.length === parsed.tags.length && mergedTags.every((tag, index) => tag === parsed.tags[index])) {
+  const inheritedFrontmatter: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(inheritedMetadata)) {
+    if (key === "tags") continue;
+    if (parsed.frontmatter[key] === undefined || parsed.frontmatter[key] === null) {
+      inheritedFrontmatter[key] = value;
+    }
+  }
+
+  const hasInheritedTags = mergedTags.length !== parsed.tags.length || !mergedTags.every((tag, index) => tag === parsed.tags[index]);
+  const hasInheritedKeys = Object.keys(inheritedFrontmatter).length > 0;
+
+  if (!hasInheritedTags && !hasInheritedKeys) {
     return parsed;
   }
 
-  const frontmatter = {
-    ...parsed.frontmatter,
+  const cleanParsedFrontmatter: Record<string, unknown> = Object.fromEntries(
+    Object.entries(parsed.frontmatter).filter(([, v]) => v !== undefined)
+  );
+  const frontmatter: Record<string, unknown> = {
+    ...inheritedFrontmatter,
+    ...cleanParsedFrontmatter,
     tags: mergedTags
   };
 
+  const fm = frontmatter as ArticleFrontmatter;
+  const title = String(fm.title ?? parsed.title);
+  const slug = fm.slug ? String(fm.slug) : parsed.slug;
+
   return {
     ...parsed,
-    frontmatter,
+    frontmatter: fm,
+    title,
+    slug,
     tags: mergedTags,
-    rawContent: serializeArticle({
-      frontmatter,
-      body: parsed.body
-    })
+    status: normalizeStatus(fm.status),
+    top: normalizeTop(fm.top),
+    date: fm.date,
+    isProtected: Boolean(normalizePassword(fm.password)),
+    // Preserve the file's original source for editor round-trips. Effective
+    // inherited metadata lives on the computed fields above, not in rawContent.
+    rawContent
   };
 }
 

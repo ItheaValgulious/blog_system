@@ -10,6 +10,7 @@ const CONFIG_DOCUMENT_KINDS = new Set<ConfigDocumentKind>([
   "latexSnippets",
   "keybindings",
   "editorAssociations",
+  "publishConfig",
   "siteConfig"
 ]);
 

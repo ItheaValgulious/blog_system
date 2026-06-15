@@ -44,12 +44,10 @@ function cloneProtectedSummary(article: ArticleSummary): ArticleSummary {
     return article;
   }
 
-  return {
-    ...article,
-    excerpt: "",
-    summary: undefined,
-    tags: []
-  };
+  // Only hide the excerpt — keep tags and summary visible so protected
+  // articles still appear in tag listings (password guards the body,
+  // not discoverability).
+  return article;
 }
 
 function cloneProtectedTree(nodes: ContentTreeNode[]): ContentTreeNode[] {
@@ -84,10 +82,6 @@ function collectPublicTags(articles: ArticleSummary[]): TagInfo[] {
   const tagMap = new Map<string, TagInfo>();
 
   for (const article of articles) {
-    if (article.isProtected) {
-      continue;
-    }
-
     for (const tag of article.tags) {
       const existing = tagMap.get(tag) ?? {
         count: 0,

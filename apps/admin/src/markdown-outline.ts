@@ -1,54 +1,85 @@
-import { extractHeadings, parseArticleSource, type HeadingItem } from "@blog-system/content-core";
+import GithubSlugger from "github-slugger";
 
-export interface MarkdownOutlineItem extends HeadingItem {
+export interface CachedHeading {
+  depth: number;
+  text: string;
+  id: string;
+  lineNumber: number;
+  lineHash: number;
+}
+
+export interface MarkdownOutlineItem {
+  depth: number;
+  text: string;
+  id: string;
   lineNumber: number;
   children: MarkdownOutlineItem[];
 }
 
-function computeBodyLineOffset(rawContent: string) {
-  const normalized = rawContent.replace(/\r\n/g, "\n");
-
-  if (!normalized.startsWith("---\n")) {
-    return 0;
+export function hashLine(line: string): number {
+  let hash = 0;
+  for (let i = 0; i < line.length; i++) {
+    hash = ((hash << 5) - hash + line.charCodeAt(i)) | 0;
   }
-
-  const closingIndex = normalized.indexOf("\n---\n", 4);
-  if (closingIndex === -1) {
-    return 0;
-  }
-
-  const bodyStartIndex = closingIndex + 5;
-  const linesBeforeBody = normalized.slice(0, bodyStartIndex).split("\n").length - 1;
-  const rawBodyWithLeadingNewlines = normalized.slice(bodyStartIndex);
-  const leadingNewlineCount = rawBodyWithLeadingNewlines.match(/^\n+/)?.[0].length ?? 0;
-
-  return linesBeforeBody + leadingNewlineCount;
+  return hash;
 }
 
-function parseOutlineBody(articlePath: string, rawContent: string) {
-  try {
-    return parseArticleSource(articlePath, rawContent).body;
-  } catch {
-    const normalizedRawContent = rawContent.replace(/\r\n/g, "\n");
-    const closingIndex = normalizedRawContent.startsWith("---\n")
-      ? normalizedRawContent.indexOf("\n---\n", 4)
-      : -1;
+export function scanHeadingsFromText(text: string): CachedHeading[] {
+  const lines = text.split("\n");
+  const headings: CachedHeading[] = [];
+  const slugger = new GithubSlugger();
+  let inFence = false;
+  let fenceMarker: string | null = null;
 
-    if (closingIndex === -1) {
-      return normalizedRawContent;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+    const fenceMatch = /^(?<marker>`{3,}|~{3,})/.exec(trimmed);
+
+    if (fenceMatch) {
+      const marker = fenceMatch.groups!.marker;
+      if (fenceMarker === marker) {
+        inFence = false;
+        fenceMarker = null;
+        continue;
+      }
+      if (!inFence) {
+        inFence = true;
+        fenceMarker = marker;
+        continue;
+      }
     }
 
-    return normalizedRawContent.slice(closingIndex + 5).replace(/^\n+/, "");
+    if (inFence) continue;
+
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (headingMatch) {
+      const text = headingMatch[2].trim();
+      if (text) {
+        headings.push({
+          depth: headingMatch[1].length,
+          text,
+          id: slugger.slug(text),
+          lineNumber: i + 1,
+          lineHash: hashLine(line)
+        });
+      }
+    }
   }
+
+  return headings;
 }
 
-function buildMarkdownOutlineTree(headings: MarkdownOutlineItem[]) {
+export function buildOutlineTree(headings: CachedHeading[]): MarkdownOutlineItem[] {
   const roots: MarkdownOutlineItem[] = [];
   const stack: MarkdownOutlineItem[] = [];
 
-  for (const heading of headings) {
+  for (const h of headings) {
     const node: MarkdownOutlineItem = {
-      ...heading,
+      depth: h.depth,
+      text: h.text,
+      id: h.id,
+      lineNumber: h.lineNumber,
       children: []
     };
 
@@ -68,37 +99,28 @@ function buildMarkdownOutlineTree(headings: MarkdownOutlineItem[]) {
   return roots;
 }
 
-export function extractMarkdownOutline(articlePath: string, rawContent: string) {
-  const body = parseOutlineBody(articlePath, rawContent);
-  const bodyLineOffset = computeBodyLineOffset(rawContent);
-  const headings = extractHeadings(body).map((heading, index) => ({
-    ...heading,
-    id: heading.id || `heading-${index + 1}`,
-    lineNumber: Math.max(1, (heading.lineNumber ?? 1) + bodyLineOffset),
-    children: []
-  }));
-
-  return buildMarkdownOutlineTree(headings);
-}
-
-export function flattenMarkdownOutline(items: MarkdownOutlineItem[]): MarkdownOutlineItem[] {
-  return items.flatMap((item) => [item, ...flattenMarkdownOutline(item.children)]);
-}
-
-export function findActiveMarkdownOutlineItemId(items: MarkdownOutlineItem[], lineNumber: number | null) {
-  if (!Number.isFinite(lineNumber)) {
+export function findActiveMarkdownOutlineItemId(
+  headings: CachedHeading[],
+  lineNumber: number | null
+): string | null {
+  if (!Number.isFinite(lineNumber) || headings.length === 0) {
     return null;
   }
 
-  let activeId: string | null = null;
-  for (const item of flattenMarkdownOutline(items)) {
-    if (item.lineNumber <= Number(lineNumber)) {
-      activeId = item.id;
-      continue;
-    }
+  const target = Number(lineNumber);
+  let low = 0;
+  let high = headings.length - 1;
+  let result: string | null = null;
 
-    break;
+  while (low <= high) {
+    const mid = (low + high) >>> 1;
+    if (headings[mid].lineNumber <= target) {
+      result = headings[mid].id;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
   }
 
-  return activeId;
+  return result;
 }

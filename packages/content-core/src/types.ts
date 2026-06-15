@@ -110,6 +110,7 @@ export interface FileSystemDirectoryNode {
   name: string;
   path: string;
   children: FileSystemNode[];
+  hasMetadata?: boolean;
 }
 
 export interface FileSystemFileNode {

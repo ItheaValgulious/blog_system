@@ -540,6 +540,8 @@ ${buildColorVariables(colors)}
 
 .side-panel {
   align-self: start;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
   padding: 20px 0 0 18px;
   position: sticky;
   top: 18px;
@@ -561,12 +563,17 @@ ${buildColorVariables(colors)}
   margin: 0 0 12px;
 }
 
-.side-panel ul {
+.side-panel ul,
+.side-panel ul ul {
   display: grid;
   gap: 10px;
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+.side-panel ul ul {
+  margin-left: 14px;
 }
 
 .side-panel a,

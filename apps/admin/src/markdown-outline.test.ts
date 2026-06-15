@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { extractMarkdownOutline, findActiveMarkdownOutlineItemId } from "./markdown-outline";
+import { scanHeadingsFromText, findActiveMarkdownOutlineItemId } from "./markdown-outline";
 
-test("extractMarkdownOutline offsets frontmatter lines and nests headings", () => {
+test("scanHeadingsFromText offsets frontmatter lines and nests headings", () => {
   const rawContent = [
     "---",
     "title: Demo",
@@ -21,25 +21,21 @@ test("extractMarkdownOutline offsets frontmatter lines and nests headings", () =
     "## Deep"
   ].join("\n");
 
-  const outline = extractMarkdownOutline("notes/demo.md", rawContent);
+  const headings = scanHeadingsFromText(rawContent);
 
-  assert.equal(outline.length, 1);
-  assert.equal(outline[0].text, "Intro");
-  assert.equal(outline[0].lineNumber, 5);
-  assert.equal(outline[0].children.length, 2);
-  assert.equal(outline[0].children[0].text, "Section");
-  assert.equal(outline[0].children[0].lineNumber, 11);
-  assert.equal(outline[0].children[1].text, "Deep");
-  assert.equal(outline[0].children[1].lineNumber, 14);
+  assert.equal(headings.length, 2);
+  assert.equal(headings[0].text, "Intro");
+  assert.equal(headings[0].lineNumber, 5);
+  assert.equal(headings[1].text, "Deep");
+  assert.equal(headings[1].lineNumber, 14);
 });
 
 test("findActiveMarkdownOutlineItemId returns the closest heading above the cursor", () => {
-  const outline = extractMarkdownOutline(
-    "notes/demo.md",
+  const headings = scanHeadingsFromText(
     ["# Intro", "", "## Setup", "", "## Usage", "", "### Detail"].join("\n")
   );
 
-  assert.equal(findActiveMarkdownOutlineItemId(outline, 1), outline[0].id);
-  assert.equal(findActiveMarkdownOutlineItemId(outline, 4), outline[0].children[0].id);
-  assert.equal(findActiveMarkdownOutlineItemId(outline, 7), outline[0].children[1].children[0].id);
+  assert.equal(findActiveMarkdownOutlineItemId(headings, 1), headings[0].id);
+  assert.equal(findActiveMarkdownOutlineItemId(headings, 4), headings[1].id);
+  assert.equal(findActiveMarkdownOutlineItemId(headings, 7), headings[3].id);
 });

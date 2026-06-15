@@ -1,6 +1,7 @@
 import { startTransition, type SetStateAction, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { loader, type OnMount } from "@monaco-editor/react";
 import * as monacoEditor from "monaco-editor";
+import GithubSlugger from "github-slugger";
 import "monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2.js";
 import "katex/dist/katex.min.css";
 import katexCssRaw from "katex/dist/katex.min.css?raw";
@@ -33,6 +34,7 @@ import {
   type GlobalMarkdownSearchReplaceNextRequest,
   type GlobalMarkdownSearchRequest,
   type MarkdownBlockConfigPayload,
+  type PublishConfigPayload,
   type ProjectLogPayload,
   type ProjectPayload,
   type ProjectsPayload,
@@ -45,7 +47,12 @@ import {
 } from "./api";
 import { jsonSchemas } from "./editor-config-schema";
 import { evaluateWhenClause, getActiveKeybinding, getMatchingKeybindings, matchesKeybindingEvent } from "./keybindings";
-import { installMarkdownMathTokenization } from "./markdown-math-tokenization";
+import {
+  installMarkdownMathTokenization,
+  scanDocumentMathPairs,
+  updateMathPairsCache,
+  type MathPair
+} from "./markdown-math-tokenization";
 import {
   getSnippetTriggerCharacters,
   resolveActiveSnippetMatches
@@ -63,7 +70,15 @@ import {
 } from "./workbench-session";
 import type { FilePaneFilters, SortOrder, StatusFilter } from "./workbench-session";
 import { getSnippetsForLanguage, normalizeWorkbenchSnippets } from "./snippet-scope";
-import { getSnippetLanguageAtOffset } from "./snippet-context";
+import { getSnippetLanguageFromMathPairs } from "./snippet-context";
+import {
+  scanHeadingsFromText,
+  buildOutlineTree,
+  findActiveMarkdownOutlineItemId,
+  hashLine,
+  type CachedHeading,
+  type MarkdownOutlineItem
+} from "./markdown-outline";
 import { builtInPlugins } from "./workbench/builtins";
 import { resolvePreferredEditorId } from "./workbench/editor-associations";
 import { PluginRuntime } from "./workbench/plugin-runtime";
@@ -209,7 +224,7 @@ function loadStoredArticleCursorStates() {
   }
 }
 
-const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "markdownBlockConfig" | "siteConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
+const CONFIG_DOCUMENT_META: Record<Exclude<ConfigDocumentKind, "markdownBlockConfig" | "publishConfig" | "siteConfig">, { title: string; path: string; read: (payload: EditorConfigPayload) => string }> = {
   editorAssociations: {
     title: "editor.associations.json",
     path: "config/editor.associations.json",
@@ -240,6 +255,11 @@ const MARKDOWN_BLOCK_CONFIG_DOCUMENT_META = {
 const SITE_CONFIG_DOCUMENT_META = {
   title: "site.json",
   path: "config/site.json"
+} as const;
+
+const PUBLISH_CONFIG_DOCUMENT_META = {
+  title: "site-publish.local.json",
+  path: "config/site-publish.local.json"
 } as const;
 
 function normalizeThemeGroupId(value: string) {
@@ -551,6 +571,11 @@ const DEFAULT_KEYBINDINGS = normalizeEditorConfig({
       key: "F22",
       command: "acceptSelectedSuggestion",
       when: "suggestWidgetVisible"
+    },
+    {
+      key: "Ctrl+E",
+      command: "editor.markdown.set_bold",
+      when: "editorTextFocus"
     }
   ]
 }).keybindings;
@@ -559,6 +584,8 @@ function getConfigDocumentPath(kind: ConfigDocumentKind) {
   switch (kind) {
     case "markdownBlockConfig":
       return MARKDOWN_BLOCK_CONFIG_DOCUMENT_META.path;
+    case "publishConfig":
+      return PUBLISH_CONFIG_DOCUMENT_META.path;
     case "siteConfig":
       return SITE_CONFIG_DOCUMENT_META.path;
     default:
@@ -570,6 +597,8 @@ function getConfigDocumentTitle(kind: ConfigDocumentKind) {
   switch (kind) {
     case "markdownBlockConfig":
       return MARKDOWN_BLOCK_CONFIG_DOCUMENT_META.title;
+    case "publishConfig":
+      return PUBLISH_CONFIG_DOCUMENT_META.title;
     case "siteConfig":
       return SITE_CONFIG_DOCUMENT_META.title;
     default:
@@ -818,11 +847,14 @@ function buildConfigDocument(
   payload:
     | EditorConfigPayload
     | MarkdownBlockConfigPayload
+    | PublishConfigPayload
     | SiteConfigPayload
 ): ConfigWorkbenchDocument {
   const value =
     kind === "markdownBlockConfig"
       ? (payload as MarkdownBlockConfigPayload).raw
+      : kind === "publishConfig"
+      ? (payload as PublishConfigPayload).raw
       : kind === "siteConfig"
       ? (payload as SiteConfigPayload).raw
       : CONFIG_DOCUMENT_META[kind].read(payload as EditorConfigPayload);
@@ -1136,10 +1168,6 @@ function sortTreeNodes(nodes: FileSystemNode[], sortOrder: SortOrder): FileSyste
     });
 }
 
-function getSnippetLanguage(model: monacoEditor.editor.ITextModel, position: monacoEditor.Position) {
-  return getSnippetLanguageAtOffset(model.getValue(), model.getOffsetAt(position));
-}
-
 function toSnippetBody(body: string | string[]) {
   return Array.isArray(body) ? body.join("\n") : body;
 }
@@ -1414,6 +1442,7 @@ export function App() {
   const [markdownBlockConfigPayload, setMarkdownBlockConfigPayload] = useState<MarkdownBlockConfigPayload | null>(null);
   const [projectsPayload, setProjectsPayload] = useState<ProjectsPayload | null>(null);
   const [themeGroupsPayload, setThemeGroupsPayload] = useState<ThemeGroupsPayload | null>(null);
+  const [publishConfigPayload, setPublishConfigPayload] = useState<PublishConfigPayload | null>(null);
   const [siteConfigPayload, setSiteConfigPayload] = useState<SiteConfigPayload | null>(null);
   const [usageStatsPayload, setUsageStatsPayload] = useState<UsageStatsPayload | null>(null);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>(() => [buildHomeDocument()]);
@@ -1453,6 +1482,19 @@ export function App() {
     value: string;
     metadata: Record<string, string>;
   } | null>(null);
+  const [folderMetadataDialog, setFolderMetadataDialog] = useState<{
+    path: string;
+    name: string;
+    tags: string;
+    title: string;
+    status: string;
+    top: string;
+    date: string;
+    summary: string;
+    slug: string;
+    password: string;
+    extraJson: string;
+  } | null>(null);
   const [titleConflictState, setTitleConflictState] = useState<{
     conflicts: Array<{ path: string; title: string }>;
     fileDialog: {
@@ -1486,6 +1528,9 @@ export function App() {
   const previewShadowHeadRef = useRef<HTMLDivElement | null>(null);
   const previewProseRef = useRef<HTMLDivElement | null>(null);
   const previewBlocksRef = useRef<RenderedPreviewBlock[]>([]);
+  const headingsRef = useRef<CachedHeading[]>([]);
+  const mathPairsRef = useRef<MathPair[]>([]);
+  const outlineVersionRef = useRef(0);
   const previewBlockIdRef = useRef(0);
   const previewCursorSyncRafRef = useRef<number | null>(null);
   const schedulePreviewCursorSyncRef = useRef<(() => void) | null>(null);
@@ -1524,6 +1569,25 @@ export function App() {
     runtime.activate(enabledPlugins);
     return runtime;
   }, [enabledPlugins]);
+
+  const [outlineVersion, setOutlineVersion] = useState(0);
+
+  const outlineTree = useMemo(
+    () => buildOutlineTree(headingsRef.current),
+    [outlineVersion]
+  );
+
+  const activeOutlineItemId = useMemo(
+    () => findActiveMarkdownOutlineItemId(headingsRef.current, activeArticleLineNumber),
+    [outlineVersion, activeArticleLineNumber]
+  );
+
+  const getSnippetLanguageForEditor = useCallback(
+    (model: monacoEditor.editor.ITextModel, position: monacoEditor.Position) => {
+      return getSnippetLanguageFromMathPairs(mathPairsRef.current, position.lineNumber, position.column);
+    },
+    []
+  );
   const activeDocument = useMemo(() => documents.find((document) => document.id === activeDocumentId) ?? null, [documents, activeDocumentId]);
   activeDocumentIdRef.current = activeDocumentId;
   dirtyDocumentIdsRef.current = new Set(documents.filter((document) => document.dirty).map((document) => document.id));
@@ -1989,6 +2053,28 @@ export function App() {
     },
     [getCreateDialogMetadataDefaults]
   );
+  const openFolderMetadataDialog = useCallback(
+    async (targetNode: { type: "directory"; path: string; name: string }) => {
+      const metadataPayload = await api.getFileSystemMetadata(targetNode.path);
+      const rawMeta = metadataPayload.metadata ?? {};
+      const knownKeys = ["tags", "title", "status", "top", "date", "summary", "slug", "password"];
+      const extraEntries = Object.entries(rawMeta).filter(([k]) => !knownKeys.includes(k));
+      setFolderMetadataDialog({
+        path: targetNode.path,
+        name: targetNode.name,
+        tags: Array.isArray(rawMeta.tags) ? rawMeta.tags.join(", ") : String(rawMeta.tags ?? ""),
+        title: String(rawMeta.title ?? ""),
+        status: String(rawMeta.status ?? ""),
+        top: String(rawMeta.top ?? ""),
+        date: String(rawMeta.date ?? ""),
+        summary: String(rawMeta.summary ?? ""),
+        slug: String(rawMeta.slug ?? ""),
+        password: String(rawMeta.password ?? ""),
+        extraJson: extraEntries.length > 0 ? JSON.stringify(Object.fromEntries(extraEntries), null, 2) : ""
+      });
+    },
+    []
+  );
   const selectedTags = treePayload?.tags ?? [];
 
   const getDraftValue = useCallback(
@@ -2400,6 +2486,14 @@ export function App() {
     const payload = await api.getSiteConfig();
     startTransition(() => {
       setSiteConfigPayload(payload);
+    });
+    return payload;
+  };
+
+  const loadPublishConfig = async () => {
+    const payload = await api.getPublishConfig();
+    startTransition(() => {
+      setPublishConfigPayload(payload);
     });
     return payload;
   };
@@ -3073,6 +3167,8 @@ export function App() {
     const payload =
       kind === "markdownBlockConfig"
         ? markdownBlockConfigPayload ?? (await loadMarkdownBlockConfig())
+        : kind === "publishConfig"
+        ? publishConfigPayload ?? (await loadPublishConfig())
         : kind === "siteConfig"
         ? siteConfigPayload ?? (await loadSiteConfig())
         : configPayload ?? (await loadConfig());
@@ -3091,6 +3187,7 @@ export function App() {
       loadProjects(),
       loadAdminHomeConfig(),
       loadThemeGroups(),
+      loadPublishConfig(),
       loadSiteConfig()
     ]);
     setDocuments((current) => (current.some((document) => document.kind === "home") ? current : [buildHomeDocument(), ...current]));
@@ -3159,6 +3256,33 @@ export function App() {
     draftValuesRef.current["config:siteConfig"] = savedPayload.raw;
   };
 
+  const savePublishConfigDocument = async () => {
+    const publishConfigDocument = documents.find(
+      (document) => document.kind === "config" && document.configKind === "publishConfig"
+    );
+    const raw = (publishConfigDocument ? getDraftValue(publishConfigDocument) : undefined) ?? publishConfigPayload?.raw;
+
+    if (typeof raw !== "string") {
+      return;
+    }
+
+    const savedPayload = await api.savePublishConfig(raw);
+    setPublishConfigPayload(savedPayload);
+    setDocuments((current) =>
+      current.map((document) =>
+        document.kind === "config" && document.configKind === "publishConfig"
+          ? {
+              ...document,
+              value: savedPayload.raw,
+              savedValue: savedPayload.raw,
+              dirty: false
+            }
+          : document
+      )
+    );
+    draftValuesRef.current["config:publishConfig"] = savedPayload.raw;
+  };
+
   const saveMarkdownBlockConfigDocument = async () => {
     const markdownBlockDocument = documents.find(
       (document) => document.kind === "config" && document.configKind === "markdownBlockConfig"
@@ -3222,6 +3346,8 @@ export function App() {
         await saveThemeAssetDocument();
       } else if (activeDocument.configKind === "markdownBlockConfig") {
         await saveMarkdownBlockConfigDocument();
+      } else if (activeDocument.configKind === "publishConfig") {
+        await savePublishConfigDocument();
       } else if (activeDocument.configKind === "siteConfig") {
         await saveSiteConfigDocument();
       } else {
@@ -3242,7 +3368,16 @@ export function App() {
       const result = await api.publishSite();
       setPageError(result.stderr || null);
     } catch (error) {
-      setPageError((error as Error).message);
+      // Carry the publish target + phase through to the error toast so authors
+      // can see e.g. "Publish failed (cloudflare/upload-assets): 401 invalid
+      // token" instead of a bare error message.
+      if (error instanceof ApiRequestError && (error.target || error.phase)) {
+        const where = [error.target, error.phase].filter(Boolean).join("/");
+        const status = error.providerStatus ? ` ${error.providerStatus}` : "";
+        setPageError(`Publish failed (${where}):${status} ${error.message}`.trim());
+      } else {
+        setPageError((error as Error).message);
+      }
     } finally {
       setPublishBusy(false);
       setBusyMessage(null);
@@ -3255,6 +3390,7 @@ export function App() {
         | "adminHome"
         | "config"
         | "markdownBlockConfig"
+        | "publishConfig"
         | "usageStats"
         | "projects"
         | "siteConfig"
@@ -3264,6 +3400,7 @@ export function App() {
             | "adminHome"
             | "config"
             | "markdownBlockConfig"
+            | "publishConfig"
             | "usageStats"
             | "projects"
             | "siteConfig"
@@ -3281,6 +3418,8 @@ export function App() {
               return loadConfig();
             case "markdownBlockConfig":
               return loadMarkdownBlockConfig();
+            case "publishConfig":
+              return loadPublishConfig();
             case "usageStats":
               return loadUsageStats();
             case "projects":
@@ -4181,7 +4320,7 @@ export function App() {
       const model = editor?.getModel();
       const position = editor?.getPosition();
       const snippetLanguage =
-        editor && model && position && isArticleDocument(activeDocument) ? getSnippetLanguage(model, position) : "markdown";
+        editor && model && position && isArticleDocument(activeDocument) ? getSnippetLanguageForEditor(model, position) : "markdown";
       const context = {
         editorLangId: snippetLanguage,
         editorTextFocus: Boolean(editor?.hasTextFocus()),
@@ -4456,6 +4595,26 @@ export function App() {
 
   useEffect(() => {
     const editor = editorRef.current;
+    if (!editor || !activeDocument || !isArticleDocument(activeDocument)) {
+      headingsRef.current = [];
+      mathPairsRef.current = [];
+      updateMathPairsCache([]);
+      outlineVersionRef.current += 1;
+      setOutlineVersion(outlineVersionRef.current);
+      return;
+    }
+
+    const fullText = editor.getValue();
+    headingsRef.current = scanHeadingsFromText(fullText);
+    const newPairs = scanDocumentMathPairs(fullText);
+    mathPairsRef.current = newPairs;
+    updateMathPairsCache(newPairs);
+    outlineVersionRef.current += 1;
+    setOutlineVersion(outlineVersionRef.current);
+  }, [activeDocument?.id, editorReadyVersion]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
     const monaco = monacoRef.current;
     if (!editor || !monaco) {
       return;
@@ -4502,7 +4661,7 @@ export function App() {
         if (!isArticleDocument(activeDocument)) {
           return { suggestions: [] };
         }
-        const snippetLanguage = getSnippetLanguage(model, position);
+        const snippetLanguage = getSnippetLanguageForEditor(model, position);
         const snippetState = resolveEditorSnippetState(linePrefix, snippetLanguage, normalizedConfig);
         const suggestions = snippetState.matches.map(
           ({ prefix, replacementText, snippet }) => ({
@@ -4540,7 +4699,7 @@ export function App() {
       const editorHasTextFocus = editor.hasTextFocus();
       const snippetController = getSnippetController();
       const snippetLanguage =
-        model && position && isArticleDocument(activeDocument) ? getSnippetLanguage(model, position) : "markdown";
+        model && position && isArticleDocument(activeDocument) ? getSnippetLanguageForEditor(model, position) : "markdown";
 
       return {
         editorLangId: snippetLanguage,
@@ -4640,7 +4799,7 @@ export function App() {
         return;
       }
 
-      const snippetLanguage = getSnippetLanguage(model, position);
+      const snippetLanguage = getSnippetLanguageForEditor(model, position);
       const linePrefix = model.getValueInRange(
         new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column)
       );
@@ -4729,7 +4888,7 @@ export function App() {
         return;
       }
 
-      const snippetLanguage = getSnippetLanguage(model, position);
+      const snippetLanguage = getSnippetLanguageForEditor(model, position);
 
       queueMicrotask(() => {
         if (!editor.hasTextFocus()) {
@@ -4742,7 +4901,7 @@ export function App() {
           return;
         }
 
-        const currentSnippetLanguage = getSnippetLanguage(currentModel, currentPosition);
+        const currentSnippetLanguage = getSnippetLanguageForEditor(currentModel, currentPosition);
         const currentLinePrefix = currentModel.getValueInRange(
           new monaco.Range(currentPosition.lineNumber, 1, currentPosition.lineNumber, currentPosition.column)
         );
@@ -4885,7 +5044,7 @@ export function App() {
               }
             }}
           >
-            {node.name}
+            {node.name}{node.hasMetadata ? <span className="folder-metadata-dot" /> : null}
           </summary>
           <div className="tree-children">{node.children.map((child) => renderFileNode(child))}</div>
         </details>
@@ -5006,6 +5165,105 @@ export function App() {
           return changed ? nextDocuments : current;
         });
       }
+
+      if (isArticleDocument(activeDocument)) {
+        const model = editorRef.current?.getModel();
+        if (model) {
+          const isSingleLine = event.changes.every(
+            (c) => c.range.startLineNumber === c.range.endLineNumber && !c.text.includes("\n")
+          );
+
+          if (isSingleLine && event.changes.length === 1) {
+            const change = event.changes[0];
+            const lineNum = change.range.startLineNumber;
+            const newLine = model.getLineContent(lineNum);
+
+            // Incremental heading update
+            const headings = headingsRef.current;
+            let hLow = 0;
+            let hHigh = headings.length - 1;
+            let hIdx = -1;
+            while (hLow <= hHigh) {
+              const mid = (hLow + hHigh) >>> 1;
+              if (headings[mid].lineNumber === lineNum) { hIdx = mid; break; }
+              if (headings[mid].lineNumber < lineNum) hLow = mid + 1;
+              else hHigh = mid - 1;
+            }
+
+            const headingMatch = /^(#{1,6})\s+(.+)$/.exec(newLine);
+            if (hIdx >= 0) {
+              if (headingMatch) {
+                const newText = headingMatch[2].trim();
+                const newHash = hashLine(newLine);
+                if (headings[hIdx].text !== newText) {
+                  const slugger = new GithubSlugger();
+                  for (const h of headings) slugger.slug(h.text);
+                  headings[hIdx] = { ...headings[hIdx], depth: headingMatch[1].length, text: newText, id: slugger.slug(newText), lineHash: newHash };
+                } else {
+                  headings[hIdx] = { ...headings[hIdx], depth: headingMatch[1].length, lineHash: newHash };
+                }
+              } else {
+                headingsRef.current = headings.filter((_, i) => i !== hIdx);
+              }
+            } else if (headingMatch) {
+              const newText = headingMatch[2].trim();
+              if (newText) {
+                const slugger = new GithubSlugger();
+                for (const h of headings) slugger.slug(h.text);
+                const newHeading: CachedHeading = {
+                  depth: headingMatch[1].length,
+                  text: newText,
+                  id: slugger.slug(newText),
+                  lineNumber: lineNum,
+                  lineHash: hashLine(newLine)
+                };
+                const insertIdx = headings.findIndex((h) => h.lineNumber > lineNum);
+                if (insertIdx === -1) headingsRef.current = [...headings, newHeading];
+                else headingsRef.current = [...headings.slice(0, insertIdx), newHeading, ...headings.slice(insertIdx)];
+              }
+            }
+
+            // Incremental math pairs update
+            const pairs = mathPairsRef.current;
+            let pLow = 0;
+            let pHigh = pairs.length - 1;
+            let pIdx = -1;
+            while (pLow <= pHigh) {
+              const mid = (pLow + pHigh) >>> 1;
+              if (pairs[mid].endLine >= lineNum && pairs[mid].startLine <= lineNum) { pIdx = mid; break; }
+              if (pairs[mid].endLine < lineNum) pLow = mid + 1;
+              else pHigh = mid - 1;
+            }
+
+            const newDollarCount = (newLine.match(/\$/g) ?? []).length;
+            const oldLine = model.getLineContent(lineNum); // already the new content
+            // We can't easily get the old line, so we check if any pair boundary was on this line
+            const affectedPair = pIdx >= 0 ? pairs[pIdx] : null;
+            const pairBoundaryChanged = affectedPair
+              ? (affectedPair.startLine === lineNum || affectedPair.endLine === lineNum)
+              : newDollarCount > 0;
+
+            if (pairBoundaryChanged) {
+              // Full rescan of math pairs
+              const fullText = model.getValue();
+              const newPairs = scanDocumentMathPairs(fullText);
+              mathPairsRef.current = newPairs;
+              updateMathPairsCache(newPairs);
+            }
+          } else {
+            // Multi-line change: full rebuild
+            const fullText = model.getValue();
+            headingsRef.current = scanHeadingsFromText(fullText);
+            const newPairs = scanDocumentMathPairs(fullText);
+            mathPairsRef.current = newPairs;
+            updateMathPairsCache(newPairs);
+          }
+
+          outlineVersionRef.current += 1;
+          setOutlineVersion(outlineVersionRef.current);
+        }
+      }
+
       queueUsageDocumentDelta(activeDocument, netCharacterDelta);
       markUsageActivity();
       scheduleDraftValueSync(activeDocument);
@@ -5031,6 +5289,8 @@ export function App() {
           api={workbenchApi}
           getDocumentValue={getDraftValue}
           projects={projectsPayload?.projects ?? []}
+          outlineTree={outlineTree}
+          activeOutlineItemId={activeOutlineItemId}
         />
       );
     }
@@ -5402,6 +5662,80 @@ export function App() {
         </div>
       ) : null}
 
+      {folderMetadataDialog ? (
+        <div className="dialog-backdrop" onClick={() => setFolderMetadataDialog(null)} role="presentation">
+          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
+            <p className="title-overline">Folder Metadata</p>
+            <h2>{folderMetadataDialog.name}</h2>
+            <p className="body-muted">Values set here are inherited by articles in this folder (deepest ancestor wins).</p>
+            {(["title", "tags", "status", "top", "date", "summary", "slug", "password"] as const).map((key) => (
+              <label key={key}>
+                <span>{key}</span>
+                <input
+                  type={key === "top" ? "number" : "text"}
+                  placeholder={key === "tags" ? "tag-a, tag-b" : key === "status" ? "draft / working / published" : ""}
+                  value={folderMetadataDialog[key]}
+                  onChange={(event) => setFolderMetadataDialog({ ...folderMetadataDialog, [key]: event.target.value })}
+                />
+              </label>
+            ))}
+            <label>
+              <span>extra (JSON)</span>
+              <textarea
+                rows={3}
+                placeholder='{"customKey": "value"}'
+                value={folderMetadataDialog.extraJson}
+                onChange={(event) => setFolderMetadataDialog({ ...folderMetadataDialog, extraJson: event.target.value })}
+              />
+            </label>
+            <div className="dialog-actions">
+              <button className="action-button ghost" onClick={() => setFolderMetadataDialog(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className="action-button primary"
+                onClick={async () => {
+                  setBusyMessage("Saving folder metadata...");
+                  try {
+                    const d = folderMetadataDialog;
+                    const meta: Record<string, unknown> = {
+                      title: d.title.trim(),
+                      status: d.status.trim(),
+                      date: d.date.trim(),
+                      summary: d.summary.trim(),
+                      slug: d.slug.trim(),
+                      password: d.password.trim()
+                    };
+                    const tags = d.tags.split(",").map((t) => t.trim()).filter(Boolean);
+                    meta.tags = tags;
+                    meta.top = d.top.trim() ? Number(d.top) : "";
+                    if (d.extraJson.trim()) {
+                      try {
+                        Object.assign(meta, JSON.parse(d.extraJson));
+                      } catch {
+                        setPageError("Invalid JSON in extra field.");
+                        return;
+                      }
+                    }
+                    await api.saveFileSystemMetadata(d.path, meta);
+                    await loadTree();
+                    setPageError(null);
+                    setFolderMetadataDialog(null);
+                  } catch (error) {
+                    setPageError((error as Error).message);
+                  } finally {
+                    setBusyMessage(null);
+                  }
+                }}
+                type="button"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {titleConflictState ? (
         <div className="dialog-backdrop" onClick={() => setTitleConflictState(null)} role="presentation">
           <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
@@ -5569,6 +5903,7 @@ export function App() {
               ["new-file", "New File"],
               ["new-directory", "New Folder"],
               ["rename", "Rename"],
+              ["edit-metadata", "Edit Metadata"],
               ["copy", "Copy"],
               ["cut", "Cut"],
               ["paste", "Paste"],
@@ -5576,7 +5911,7 @@ export function App() {
             ].map(([action, label]) => (
               <button
                 className={`context-menu-item ${action === "delete" ? "danger" : ""}`}
-                disabled={(action === "paste" && !treeClipboard) || ((action === "rename" || action === "copy" || action === "cut" || action === "delete") && !contextTargetNode)}
+                disabled={(action === "paste" && !treeClipboard) || ((action === "rename" || action === "copy" || action === "cut" || action === "delete") && !contextTargetNode) || (action === "edit-metadata" && (!contextTargetNode || contextTargetNode.type !== "directory"))}
                 key={action}
                 onClick={() => {
                   const targetNode = contextTargetNode;
@@ -5617,6 +5952,10 @@ export function App() {
                       })
                       .catch((error: Error) => setPageError(error.message))
                       .finally(() => setBusyMessage(null));
+                    return;
+                  }
+                  if (action === "edit-metadata" && targetNode && targetNode.type === "directory") {
+                    void openFolderMetadataDialog(targetNode);
                     return;
                   }
                   if (action === "new-file" || action === "new-directory") {

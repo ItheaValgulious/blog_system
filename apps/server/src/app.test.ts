@@ -276,7 +276,7 @@ test("file system endpoints create, rename, copy, and delete entries", async () 
   await fs.access(path.join(contentRoot, "notes", "renamed.md"));
 });
 
-test("directory metadata tags apply to files created beneath the directory", async () => {
+test("directory metadata tags are inherited at read time, not baked into file source", async () => {
   const { agent, contentRoot } = await setupTempApp();
 
   await agent
@@ -304,7 +304,75 @@ test("directory metadata tags apply to files created beneath the directory", asy
     .expect(200);
 
   const childRaw = await fs.readFile(path.join(contentRoot, "notes", "tagged", "child.md"), "utf8");
-  assert.match(childRaw, /- folder-tag/);
+  // Tags from folder metadata should NOT be baked into the file source
+  assert.doesNotMatch(childRaw, /- folder-tag/);
+});
+
+test("saving file metadata persists summary and password fields", async () => {
+  const { agent, contentRoot } = await setupTempApp();
+
+  await agent
+    .post("/api/fs/metadata")
+    .send({
+      path: "notes/draft.md",
+      metadata: {
+        summary: "Draft summary",
+        password: "draft-pass",
+        status: "working",
+        date: "2026-06-12T10:00:00.000Z",
+        slug: "draft-note-custom"
+      }
+    })
+    .expect(200);
+
+  const savedRaw = await fs.readFile(path.join(contentRoot, "notes", "draft.md"), "utf8");
+  assert.match(savedRaw, /^summary: Draft summary/m);
+  assert.match(savedRaw, /^password: draft-pass/m);
+  assert.match(savedRaw, /^status: working/m);
+  assert.match(savedRaw, /^date: '?2026-06-12T10:00:00.000Z'?/m);
+  assert.match(savedRaw, /^slug: draft-note-custom/m);
+});
+
+test("saving file metadata does not bake inherited folder password into article frontmatter", async () => {
+  const { agent, contentRoot } = await setupTempApp();
+
+  await agent
+    .post("/api/fs/create")
+    .send({
+      parentPath: "notes",
+      entryType: "directory",
+      name: "inherited",
+      metadata: {
+        password: "folder-pass"
+      }
+    })
+    .expect(200);
+
+  await agent
+    .post("/api/fs/create")
+    .send({
+      parentPath: "notes/inherited",
+      entryType: "file",
+      name: "child.md",
+      metadata: {
+        title: "Child"
+      }
+    })
+    .expect(200);
+
+  await agent
+    .post("/api/fs/metadata")
+    .send({
+      path: "notes/inherited/child.md",
+      metadata: {
+        summary: "Child summary"
+      }
+    })
+    .expect(200);
+
+  const childRaw = await fs.readFile(path.join(contentRoot, "notes", "inherited", "child.md"), "utf8");
+  assert.match(childRaw, /^summary: Child summary/m);
+  assert.doesNotMatch(childRaw, /^password: folder-pass/m);
 });
 
 test("creating an article with a duplicate title returns a conflict payload", async () => {
@@ -335,6 +403,34 @@ test("config endpoints expose markdown block rules and admin home defaults", asy
   const adminHome = await agent.get("/api/admin-home-config").expect(200);
   assert.deepEqual(adminHome.body.value.widgetOrder, []);
   assert.deepEqual(adminHome.body.value.widgets, {});
+});
+
+test("publish config endpoint exposes and saves v2 config", async () => {
+  const { agent, tempRoot } = await setupTempApp();
+
+  const initial = await agent.get("/api/publish-config").expect(200);
+  assert.equal(initial.body.value.defaultTarget, "github");
+  assert.deepEqual(initial.body.value.targets, {});
+
+  const saved = await agent
+    .put("/api/publish-config")
+    .send({
+      raw: `{
+  "defaultTarget": "github",
+  "targets": {
+    "github": {
+      "deployRepo": "https://github.com/example/site.git",
+      "deployBranch": "main",
+      "siteBasePath": ""
+    }
+  }
+}`
+    })
+    .expect(200);
+
+  assert.equal(saved.body.value.targets.github.deployRepo, "https://github.com/example/site.git");
+  const persisted = await fs.readFile(path.join(tempRoot, "config", "site-publish.local.json"), "utf8");
+  assert.match(persisted, /"defaultTarget": "github"/);
 });
 
 test("usage stats endpoint persists net delta and active time", async () => {

@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import type * as monacoEditor from "monaco-editor";
 import type { SnippetCompletionMatch } from "../snippet-completion";
+import type { MarkdownOutlineItem } from "../markdown-outline";
 
 import type {
   AdminHomeConfig,
@@ -27,7 +28,8 @@ export type ConfigDocumentKind =
   | "latexSnippets"
   | "keybindings"
   | "editorAssociations"
-  | "siteConfig";
+  | "siteConfig"
+  | "publishConfig";
 export type WorkbenchDocumentKind = string;
 export type WorkbenchEditorId = string;
 export type SnippetLanguageId = "markdown" | "latex";
@@ -35,6 +37,7 @@ export type WorkbenchRefreshTarget =
   | "adminHome"
   | "config"
   | "markdownBlockConfig"
+  | "publishConfig"
   | "usageStats"
   | "projects"
   | "siteConfig"
@@ -171,6 +174,8 @@ export interface PaneComponentProps {
   api: WorkbenchApi;
   getDocumentValue: (document: WorkbenchDocument) => string;
   projects: ProjectSummary[];
+  outlineTree?: MarkdownOutlineItem[];
+  activeOutlineItemId?: string | null;
 }
 
 export interface RevealLineOptions {

@@ -63,8 +63,10 @@ Public body.`,
     path.join(contentRoot, "secret.md"),
     `---
 title: Secret Post
+summary: Public summary for protected post.
 tags:
   - hidden
+  - visible-tag
 status: published
 password: open-sesame
 ---
@@ -77,6 +79,21 @@ Secret body with a [link](./asset.txt).
 
 - one
 - two`,
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(contentRoot, "secret-auto.md"),
+    `---
+title: Secret Auto Summary
+tags:
+  - hidden
+status: published
+password: hidden-auto
+---
+
+# Secret Auto Summary
+
+This protected article has no explicit summary, so the static site should show this generated excerpt in listings.`,
     "utf8"
   );
   await fs.writeFile(path.join(contentRoot, "asset.txt"), "asset", "utf8");
@@ -112,7 +129,9 @@ test("buildSite encrypts protected articles and excludes them from public search
   });
 
   const protectedHtml = await fs.readFile(path.join(distDir, "posts", "secret-post", "index.html"), "utf8");
+  const protectedAutoHtml = await fs.readFile(path.join(distDir, "posts", "secret-auto-summary", "index.html"), "utf8");
   const homeHtml = await fs.readFile(path.join(distDir, "index.html"), "utf8");
+  const tagHtml = await fs.readFile(path.join(distDir, "tags", "hidden", "index.html"), "utf8");
   const searchIndex = JSON.parse(await fs.readFile(path.join(distDir, "assets", "search-index.json"), "utf8")) as Array<{
     excerpt: string;
     path: string;
@@ -127,11 +146,17 @@ test("buildSite encrypts protected articles and excludes them from public search
   assert.match(protectedHtml, /application\/json/);
   assert.doesNotMatch(protectedHtml, /Secret body/);
   assert.doesNotMatch(protectedHtml, /Locked Heading/);
-  assert.doesNotMatch(protectedHtml, /\/tags\/hidden\//);
   assert.match(protectedHtml, /This article is protected/);
+  assert.doesNotMatch(protectedAutoHtml, /This protected article has no explicit summary/);
   assert.match(homeHtml, /Secret Post/);
-  assert.match(homeHtml, /Protected article\. Unlock/);
+  assert.match(homeHtml, /Public summary for protected post\./);
+  assert.match(homeHtml, /This protected article has no explicit summary, so the static site should show this generated excerpt in listings\./);
+  assert.match(homeHtml, /\/tags\/hidden\//);
+  assert.match(homeHtml, /\/tags\/visible-tag\//);
+  assert.match(tagHtml, /Public summary for protected post\./);
+  assert.match(tagHtml, /This protected article has no explicit summary, so the static site should show this generated excerpt in listings\./);
   assert.ok(!searchIndex.some((entry) => entry.path === "secret.md"));
+  assert.ok(!searchIndex.some((entry) => entry.path === "secret-auto.md"));
   assert.match(protectedRuntime, /blog-system-protected-content:/);
   assert.match(protectedCss, /protected-gate/);
 

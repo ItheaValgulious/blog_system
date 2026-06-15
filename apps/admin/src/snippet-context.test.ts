@@ -18,6 +18,12 @@ test("uses latex snippets inside math blocks", () => {
   assert.equal(getSnippetLanguageAtOffset(source, source.length), "latex");
 });
 
+test("uses latex snippets when cursor is right before closing $ with no gap", () => {
+  const source = "$\\alpha$";
+  const offset = source.indexOf("$", 1);
+  assert.equal(getSnippetLanguageAtOffset(source, offset), "latex");
+});
+
 test("ignores dollar signs inside fenced code blocks", () => {
   const source = ["```ts", "const sample = '$$';", "```", "", "frontmatter"].join("\n");
   assert.equal(getSnippetLanguageAtOffset(source, source.length), "markdown");

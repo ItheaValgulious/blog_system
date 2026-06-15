@@ -62,6 +62,14 @@ export const commandPalettePlugin: PluginDefinition = {
       }
     });
     context.registerCommand({
+      id: "preferences.openPublishConfigJson",
+      title: "Preferences: Open Publish Config (JSON)",
+      keywords: ["settings", "publish", "cloudflare", "github", "json"],
+      handler(api) {
+        void api.openConfigDocument("publishConfig");
+      }
+    });
+    context.registerCommand({
       id: "workbench.reopenWithEditor",
       title: "View: Reopen With Editor",
       keywords: ["editor", "reopen", "open with"],

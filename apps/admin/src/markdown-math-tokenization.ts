@@ -38,6 +38,133 @@ export function createInitialMarkdownMathContextState(): MarkdownMathContextStat
   };
 }
 
+export interface MathPair {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+}
+
+let cachedMathPairs: MathPair[] = [];
+
+export function updateMathPairsCache(pairs: MathPair[]) {
+  cachedMathPairs = pairs;
+}
+
+export function getCachedMathPairs(): MathPair[] {
+  return cachedMathPairs;
+}
+
+export function findMathRangeForPosition(line: number, col: number): MathPair | null {
+  const pairs = cachedMathPairs;
+  let low = 0;
+  let high = pairs.length - 1;
+  let result: MathPair | null = null;
+
+  while (low <= high) {
+    const mid = (low + high) >>> 1;
+    const pair = pairs[mid];
+    if (pair.startLine < line || (pair.startLine === line && pair.startCol <= col)) {
+      result = pair;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  if (result) {
+    const afterStart = result.startLine < line || (result.startLine === line && result.startCol <= col);
+    const beforeEnd = line < result.endLine || (line === result.endLine && col <= result.endCol);
+    if (afterStart && beforeEnd) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+export function findMathRangesForLine(line: number): MathPair[] {
+  const pairs = cachedMathPairs;
+  const result: MathPair[] = [];
+
+  for (const pair of pairs) {
+    if (pair.endLine < line) continue;
+    if (pair.startLine > line) break;
+    result.push(pair);
+  }
+
+  return result;
+}
+
+export function scanDocumentMathPairs(text: string): MathPair[] {
+  const lines = text.split("\n");
+  const pairs: MathPair[] = [];
+  let inMathMode: "inline" | "block" | null = null;
+  let pairStartLine = 0;
+  let pairStartCol = 0;
+  let fenceMarker: string | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+    const fenceMatch = /^(?<marker>`{3,}|~{3,})/.exec(trimmed);
+
+    if (fenceMatch) {
+      const marker = fenceMatch.groups!.marker;
+      if (fenceMarker === marker) {
+        fenceMarker = null;
+        continue;
+      }
+      if (!fenceMarker && !inMathMode) {
+        fenceMarker = marker;
+        continue;
+      }
+    }
+
+    if (fenceMarker) continue;
+
+    let inlineCodeLen = 0;
+
+    for (let j = 0; j < line.length; j++) {
+      const ch = line[j];
+
+      if (ch === "\\") { j += 1; continue; }
+
+      if (!inMathMode && ch === "`") {
+        let run = 1;
+        while (line[j + run] === "`") run += 1;
+        if (inlineCodeLen === 0) inlineCodeLen = run;
+        else if (inlineCodeLen === run) inlineCodeLen = 0;
+        j += run - 1;
+        continue;
+      }
+
+      if (inlineCodeLen > 0 || ch !== "$") continue;
+
+      const delimLen = line[j + 1] === "$" ? 2 : 1;
+      const mode: "inline" | "block" = delimLen === 2 ? "block" : "inline";
+
+      if (inMathMode === mode) {
+        pairs.push({
+          startLine: pairStartLine + 1,
+          startCol: pairStartCol + 1,
+          endLine: i + 1,
+          endCol: j + delimLen
+        });
+        inMathMode = null;
+      } else if (!inMathMode) {
+        inMathMode = mode;
+        pairStartLine = i;
+        pairStartCol = j;
+      }
+
+      j += delimLen - 1;
+    }
+  }
+
+  return pairs;
+}
+
 export function scanMarkdownMathLine(
   line: string,
   previousState: MarkdownMathContextState
@@ -330,11 +457,12 @@ function overlayMathTokens(
 class MarkdownMathOverlayState implements monacoEditor.languages.IState {
   constructor(
     readonly baseState: monacoEditor.languages.IState,
-    readonly mathState: MarkdownMathContextState
+    readonly mathState: MarkdownMathContextState,
+    readonly lineNumber: number = 0
   ) {}
 
   clone() {
-    return new MarkdownMathOverlayState(this.baseState.clone(), { ...this.mathState });
+    return new MarkdownMathOverlayState(this.baseState.clone(), { ...this.mathState }, this.lineNumber);
   }
 
   equals(other: monacoEditor.languages.IState) {
@@ -345,7 +473,8 @@ class MarkdownMathOverlayState implements monacoEditor.languages.IState {
     return (
       this.baseState.equals(other.baseState) &&
       this.mathState.inFenceMarker === other.mathState.inFenceMarker &&
-      this.mathState.inMath === other.mathState.inMath
+      this.mathState.inMath === other.mathState.inMath &&
+      this.lineNumber === other.lineNumber
     );
   }
 }
@@ -387,7 +516,8 @@ export function installMarkdownMathTokenization(monaco: typeof monacoEditor) {
       getInitialState() {
         return new MarkdownMathOverlayState(
           tokenizationSupport.getInitialState(),
-          createInitialMarkdownMathContextState()
+          createInitialMarkdownMathContextState(),
+          0
         );
       },
       tokenize(line, state) {
@@ -396,18 +526,39 @@ export function installMarkdownMathTokenization(monaco: typeof monacoEditor) {
             ? state
             : new MarkdownMathOverlayState(
                 tokenizationSupport.getInitialState(),
-                createInitialMarkdownMathContextState()
+                createInitialMarkdownMathContextState(),
+                0
               );
 
+        const currentLine = overlayState.lineNumber + 1;
         const baseResult = tokenizationSupport.tokenize(line, true, overlayState.baseState);
         const baseTokens = normalizeTokens(baseResult.tokens);
-        const scanResult = scanMarkdownMathLine(line, overlayState.mathState);
+
+        const cachedRanges = findMathRangesForLine(currentLine);
+        let mathRanges: MarkdownMathRange[];
+
+        if (cachedRanges.length > 0) {
+          mathRanges = cachedRanges.map((pair) => ({
+            startIndex: pair.startLine === currentLine ? pair.startCol - 1 : 0,
+            endIndex: pair.endLine === currentLine ? pair.endCol : line.length,
+            mode: (pair.startLine === pair.endLine ? "inline" : "block") as MarkdownMathMode
+          }));
+        } else {
+          const localResult = scanMarkdownMathLine(line, { inFenceMarker: overlayState.mathState.inFenceMarker, inMath: null });
+          mathRanges = localResult.mathRanges;
+        }
+
+        const nextFenceState = scanMarkdownMathLine(line, { inFenceMarker: overlayState.mathState.inFenceMarker, inMath: null });
 
         return {
-          endState: new MarkdownMathOverlayState(baseResult.endState, scanResult.nextState),
+          endState: new MarkdownMathOverlayState(
+            baseResult.endState,
+            { inFenceMarker: nextFenceState.nextState.inFenceMarker, inMath: null },
+            currentLine
+          ),
           tokens:
-            scanResult.mathRanges.length > 0
-              ? overlayMathTokens(line, baseTokens, scanResult.mathRanges)
+            mathRanges.length > 0
+              ? overlayMathTokens(line, baseTokens, mathRanges)
               : baseTokens
         };
       }

@@ -19,15 +19,37 @@ export class ApiRequestError extends Error {
   readonly code?: string;
   readonly conflicts?: Array<{ path: string; title: string }>;
   readonly status: number;
+  /** Publish target identifier (e.g. "github", "cloudflare") when the failure originated in publish. */
+  readonly target?: string;
+  /** Phase within the target where the failure occurred (e.g. "upload-assets"). */
+  readonly phase?: string;
+  /** Provider HTTP status code, if any. */
+  readonly providerStatus?: number;
+  /** Provider error body excerpt, if any. */
+  readonly detail?: string;
 
   constructor(
     status: number,
-    payload: { code?: string; conflicts?: Array<{ path: string; title: string }>; error?: string } | null
+    payload:
+      | {
+          code?: string;
+          conflicts?: Array<{ path: string; title: string }>;
+          error?: string;
+          target?: string;
+          phase?: string;
+          status?: number;
+          detail?: string;
+        }
+      | null
   ) {
     super(payload?.error ?? `Request failed with ${status}`);
     this.status = status;
     this.code = payload?.code;
     this.conflicts = payload?.conflicts;
+    this.target = payload?.target;
+    this.phase = payload?.phase;
+    this.providerStatus = payload?.status;
+    this.detail = payload?.detail;
   }
 }
 
@@ -46,6 +68,10 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
       code?: string;
       conflicts?: Array<{ path: string; title: string }>;
       error?: string;
+      target?: string;
+      phase?: string;
+      status?: number;
+      detail?: string;
     } | null;
     throw new ApiRequestError(response.status, payload);
   }
@@ -145,6 +171,17 @@ export interface EditorConfigPayload {
 export interface SiteConfigPayload {
   raw: string;
   value: Record<string, unknown>;
+}
+
+export interface PublishConfigPayload {
+  raw: string;
+  value: {
+    defaultTarget: "github" | "cloudflare";
+    targets: {
+      cloudflare?: Record<string, unknown>;
+      github?: Record<string, unknown>;
+    };
+  };
 }
 
 export interface MarkdownBlockConfigPayload {
@@ -322,6 +359,15 @@ export const api = {
   },
   saveSiteConfig(raw: string) {
     return request<SiteConfigPayload>("/api/site-config", {
+      method: "PUT",
+      body: JSON.stringify({ raw })
+    });
+  },
+  getPublishConfig() {
+    return request<PublishConfigPayload>("/api/publish-config");
+  },
+  savePublishConfig(raw: string) {
+    return request<PublishConfigPayload>("/api/publish-config", {
       method: "PUT",
       body: JSON.stringify({ raw })
     });
@@ -602,7 +648,16 @@ export const api = {
     });
   },
   publishSite() {
-    return request<{ stdout: string; stderr: string }>("/api/publish", {
+    return request<{
+      stdout: string;
+      stderr: string;
+      target: string;
+      url?: string;
+      deploymentId?: string;
+      uploaded: number;
+      skipped: number;
+      durationMs: number;
+    }>("/api/publish", {
       method: "POST"
     });
   }
