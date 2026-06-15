@@ -8,6 +8,27 @@ import {
   QuiverShape,
   createQuiverArrowStyleFromOptions
 } from "./quiver-geometry.js";
+import { parseFenceParams } from "./fence-params.js";
+import { parseTikzcd } from "./tikzcd-parser.js";
+
+export type { CommutativeFenceParams } from "./fence-params.js";
+export { parseFenceParams } from "./fence-params.js";
+export type {
+  ParseDiagnostic,
+  TikzcdParseResult
+} from "./tikzcd-parser.js";
+export { parseTikzcd } from "./tikzcd-parser.js";
+export {
+  defaultEdgeOptions,
+  toCommutativeDocument
+} from "./quiver-data.js";
+export type {
+  ParserColour,
+  ParserEdge,
+  ParserEdgeOptions,
+  ParserPosition,
+  ParserVertex
+} from "./quiver-data.js";
 
 export const COMMUTATIVE_FENCE_LANGUAGE = "commutative";
 export const COMMUTATIVE_VERSION = 1;
@@ -87,6 +108,12 @@ export interface CommutativeDocument {
 export interface CommutativeRenderOptions {
   className?: string;
   fitToWidth?: boolean;
+  /** CSS width applied to the wrapping figure (e.g. '100%', '480px', 'auto'). */
+  width?: string;
+  /** Multiplicative scale applied via CSS transform; 1 means no scaling. */
+  scale?: number;
+  /** Horizontal alignment of the figure within its container. */
+  align?: "left" | "center" | "right";
 }
 
 export interface CommutativeRenderResult {
@@ -177,6 +204,19 @@ function normalizeColour(value: unknown): CommutativeColour | undefined {
   }
 
   return [h, s, l];
+}
+
+function isDefaultBlackColour(colour: CommutativeColour | undefined) {
+  if (!colour) {
+    return false;
+  }
+  const [h, s, l, a] = colour;
+  return h === 0 && s === 0 && l === 0 && (a === undefined || a === 1);
+}
+
+function normalizeThemeAwareColour(value: unknown) {
+  const colour = normalizeColour(value);
+  return isDefaultBlackColour(colour) ? undefined : colour;
 }
 
 function colourToCss(colour: CommutativeColour | undefined, fallback = "currentColor") {
@@ -338,9 +378,12 @@ function parseVertex(raw: unknown[]): CommutativeVertexCell {
     throw new CommutativeError("invalid-vertex", "Commutative vertex label must be a string.");
   }
 
-  const colour = normalizeColour(labelColour);
+  const colour = normalizeThemeAwareColour(labelColour);
   if (labelColour !== undefined && !colour) {
-    throw new CommutativeError("invalid-vertex", "Commutative vertex label colour is invalid.");
+    const normalized = normalizeColour(labelColour);
+    if (!normalized) {
+      throw new CommutativeError("invalid-vertex", "Commutative vertex label colour is invalid.");
+    }
   }
 
   return {
@@ -440,17 +483,23 @@ function parseEdge(raw: unknown[]): CommutativeEdgeCell {
     }
   }
 
-  const colour = normalizeColour(options.colour);
+  const colour = normalizeThemeAwareColour(options.colour);
   if (options.colour !== undefined && !colour) {
-    throw new CommutativeError("invalid-edge", "Commutative edge colour is invalid.");
+    const normalizedColour = normalizeColour(options.colour);
+    if (!normalizedColour) {
+      throw new CommutativeError("invalid-edge", "Commutative edge colour is invalid.");
+    }
   }
   if (colour) {
     normalizedOptions.colour = colour;
   }
 
-  const normalizedLabelColour = normalizeColour(labelColour);
+  const normalizedLabelColour = normalizeThemeAwareColour(labelColour);
   if (labelColour !== undefined && !normalizedLabelColour) {
-    throw new CommutativeError("invalid-edge", "Commutative edge label colour is invalid.");
+    const normalizedColour = normalizeColour(labelColour);
+    if (!normalizedColour) {
+      throw new CommutativeError("invalid-edge", "Commutative edge label colour is invalid.");
+    }
   }
 
   return {
@@ -577,7 +626,7 @@ export function parseCommutative(raw: string): CommutativeDocument {
       if (!isFiniteNumber(cell.x) || !isFiniteNumber(cell.y) || typeof cell.label !== "string") {
         throw new CommutativeError("invalid-vertex", "Commutative vertex is invalid.");
       }
-      const labelColour = normalizeColour(cell.labelColour);
+      const labelColour = normalizeThemeAwareColour(cell.labelColour);
       return {
         kind: "vertex" as const,
         label: cell.label,
@@ -1307,6 +1356,8 @@ export function renderCommutativeStaticHtml(
 
   const className = ["commutative", options.className].filter(Boolean).join(" ");
   const preserveAspectRatio = options.fitToWidth === false ? "xMidYMid meet" : "xMinYMin meet";
+  const figureStyles = buildFigureStyle(options);
+  const figureStyleAttr = figureStyles ? ` style="${figureStyles}"` : "";
   const svg = `<svg class="cg-svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="${preserveAspectRatio}" role="img" aria-label="Commutative diagram">
   <g class="cg-layer cg-layer--edges">${edgeMarkup}</g>
   <g class="cg-layer cg-layer--nodes">${nodeMarkup}</g>
@@ -1314,9 +1365,82 @@ export function renderCommutativeStaticHtml(
 
   return {
     height,
-    html: `<figure class="${className}" data-commutative>${svg}</figure>`,
+    html: `<figure class="${className}" data-commutative${figureStyleAttr}>${svg}</figure>`,
     width
   };
+}
+
+/**
+ * Render an error placeholder figure with the same `commutative` class as a
+ * successful render plus a `commutative--error` modifier. Used by the fence
+ * renderer when parsing fails so authors get a visible signal instead of a
+ * crashed page.
+ */
+export function renderCommutativeErrorHtml(message: string): string {
+  return `<figure class="commutative commutative--error" data-commutative-error><pre>${escapeHtml(message)}</pre></figure>`;
+}
+
+/**
+ * Normalize a tikz-cd fence body to the repo's on-disk format: only the body
+ * between `\begin{tikzcd}` and `\end{tikzcd}`.
+ */
+export function stripTikzcdWrappers(text: string): string {
+  let result = text;
+  result = result.replace(/^%[^\n]*\n?/, "");
+  result = result.replace(/^\\\[\s*\n?/, "");
+  result = result.replace(/\n?\\\]\s*$/, "");
+  result = result.replace(/^\\begin\{tikzcd\}(\[[^\]]*\])?\s*\n?/, "");
+  result = result.replace(/\n?\\end\{tikzcd\}\s*$/, "");
+  return result.trim();
+}
+
+function buildFigureStyle(options: CommutativeRenderOptions): string {
+  const declarations: string[] = [];
+  if (typeof options.width === "string" && options.width.trim() !== "") {
+    declarations.push(`width:${options.width.trim()}`);
+  }
+  if (typeof options.scale === "number" && Number.isFinite(options.scale) && options.scale !== 1) {
+    declarations.push(`transform:scale(${options.scale})`);
+    // Anchor the scale at the alignment edge so right/left aligned figures
+    // don't drift sideways when scaled.
+    const origin =
+      options.align === "left" ? "left center" : options.align === "right" ? "right center" : "center";
+    declarations.push(`transform-origin:${origin}`);
+  }
+  if (options.align === "left") {
+    declarations.push("margin-left:0", "margin-right:auto", "justify-content:flex-start");
+  } else if (options.align === "right") {
+    declarations.push("margin-left:auto", "margin-right:0", "justify-content:flex-end");
+  }
+  return declarations.join(";");
+}
+
+/**
+ * Top-level fence renderer used by both site builds and admin previews.
+ * Accepts the *body* (tikzcd LaTeX between the fences) and the markdown
+ * `infoString` (everything on the opening fence after `commutative`). On parse
+ * failure returns an inline `commutative--error` figure so authors get a
+ * visible signal but the surrounding page still renders.
+ */
+export function renderCommutativeFence(body: string, infoString: string | undefined): {
+  html: string;
+  cssText: string;
+} {
+  const params = parseFenceParams(infoString);
+  const result = parseTikzcd(stripTikzcdWrappers(body));
+  if (!result.ok) {
+    const errorMsg = (result as { ok: false; error: { message: string } }).error.message;
+    return {
+      cssText: commutativeCssText,
+      html: renderCommutativeErrorHtml(`commutative parse error: ${errorMsg}`)
+    };
+  }
+  const rendered = renderCommutativeStaticHtml(result.document, {
+    width: params.width || undefined,
+    scale: params.scale,
+    align: params.align
+  });
+  return { cssText: commutativeCssText, html: rendered.html };
 }
 
 export const commutativeCssText = `
@@ -1386,5 +1510,22 @@ export const commutativeCssText = `
 
 .commutative .cg-label-text {
   font-family: "Times New Roman", serif;
+}
+
+.commutative--error {
+  display: block;
+  margin: 1.2rem 0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px dashed rgba(220, 38, 38, 0.5);
+  background: rgba(220, 38, 38, 0.05);
+  color: rgb(120, 25, 25);
+  font: 500 13px/1.4 "Cascadia Code", "Fira Code", monospace;
+}
+
+.commutative--error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 `;

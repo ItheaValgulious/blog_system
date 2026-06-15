@@ -1,11 +1,15 @@
 import {
   COMMUTATIVE_FENCE_LANGUAGE,
+  commutativeCssText,
   createEmptyCommutativeDocument,
-  decodeCommutativeBase64,
   encodeCommutativeBase64,
   parseCommutative,
+  parseFenceParams,
+  parseTikzcd,
+  renderCommutativeFence,
   renderCommutativeStaticHtml,
-  commutativeCssText
+  stripTikzcdWrappers,
+  toCommutativeDocument
 } from "@blog-system/commutative";
 
 import type * as monacoEditor from "monaco-editor";
@@ -19,6 +23,7 @@ const STYLE_ID = "commutative-admin-style";
 interface CommutativeFenceBlock {
   content: string;
   endLineNumber: number;
+  infoString: string;
   range: monacoEditor.IRange;
   startLineNumber: number;
 }
@@ -162,9 +167,14 @@ function isMarkdownDocument(document: WorkbenchDocument | null) {
   );
 }
 
-function buildCommutativeFence(document: ReturnType<typeof parseCommutative>) {
-  const encoded = encodeCommutativeBase64(document);
-  return `\`\`\`${COMMUTATIVE_FENCE_LANGUAGE}\n${encoded}\n\`\`\`\n`;
+/**
+ * Build a commutative fence block string for insertion into Monaco.
+ * The body is now tikzcd LaTeX (not base64). The info-string preserves
+ * any `width/scale/align` params from the original block.
+ */
+function buildCommutativeFence(latexBody: string, infoString = "") {
+  const info = infoString ? ` ${infoString}` : "";
+  return `\`\`\`${COMMUTATIVE_FENCE_LANGUAGE}${info}\n${latexBody}\n\`\`\`\n`;
 }
 
 function findCommutativeBlocks(model: monacoEditor.editor.ITextModel): CommutativeFenceBlock[] {
@@ -181,6 +191,11 @@ function findCommutativeBlocks(model: monacoEditor.editor.ITextModel): Commutati
     const fullText = model.getValueInRange(match.range);
     const firstLineBreak = fullText.indexOf("\n");
     const lastFenceIndex = fullText.lastIndexOf("\n```");
+    // Extract info-string: everything after "commutative" on the opening line.
+    const firstLine = firstLineBreak >= 0 ? fullText.slice(0, firstLineBreak) : fullText;
+    const infoString = firstLine.startsWith("```commutative")
+      ? firstLine.slice("```commutative".length)
+      : "";
     const content =
       firstLineBreak >= 0 && lastFenceIndex > firstLineBreak
         ? fullText.slice(firstLineBreak + 1, lastFenceIndex)
@@ -189,6 +204,7 @@ function findCommutativeBlocks(model: monacoEditor.editor.ITextModel): Commutati
     return {
       content,
       endLineNumber: match.range.endLineNumber,
+      infoString,
       range: match.range,
       startLineNumber: match.range.startLineNumber
     };
@@ -211,46 +227,6 @@ function findBlockAtSelection(editor: monacoEditor.editor.IStandaloneCodeEditor)
   );
 }
 
-function foldCommutativeBlocks(
-  editor: monacoEditor.editor.IStandaloneCodeEditor,
-  blocks: CommutativeFenceBlock[]
-) {
-  if (blocks.length === 0) {
-    return;
-  }
-
-  const action = editor.getAction("editor.fold");
-  if (!action) {
-    return;
-  }
-
-  void action.run({
-    selectionLines: blocks.map((block) => block.startLineNumber)
-  }).catch(() => undefined);
-}
-
-function readCurrentQuiverDocument(iframe: HTMLIFrameElement) {
-  const iframeWindow = iframe.contentWindow;
-  if (!iframeWindow) {
-    throw new Error("Commutative editor is not ready yet.");
-  }
-
-  const currentUrl = new URL(iframeWindow.location.href);
-  const hash = currentUrl.hash.startsWith("#") ? currentUrl.hash.slice(1) : currentUrl.hash;
-  const encoded = hash.split("&").reduce<string | null>((found, segment) => {
-    if (found !== null) return found;
-    const eqIndex = segment.indexOf("=");
-    if (eqIndex === -1) return null;
-    return segment.slice(0, eqIndex) === "q" ? segment.slice(eqIndex + 1) : null;
-  }, null);
-
-  if (!encoded) {
-    throw new Error("No graph payload found in Quiver URL.");
-  }
-
-  return decodeCommutativeBase64(decodeURIComponent(encoded));
-}
-
 function openCommutativeModal(
   editor: monacoEditor.editor.IStandaloneCodeEditor,
   block: CommutativeFenceBlock
@@ -264,17 +240,28 @@ function openCommutativeModal(
   root.id = MODAL_ID;
   root.className = "commutative-modal";
 
+  // Parse the LaTeX body to a CommutativeDocument, then encode to base64
+  // for the iframe URL hash. The iframe still reads base64 from the hash
+  // (quiver's own code path), so this is just an internal transport format.
   let startingDocument;
-  try {
-    startingDocument = parseCommutative(block.content);
-  } catch {
-    startingDocument = createEmptyCommutativeDocument();
+  const normalizedBody = stripTikzcdWrappers(block.content);
+  const parseResult = parseTikzcd(normalizedBody);
+  if (parseResult.ok) {
+    startingDocument = parseResult.document;
+  } else {
+    // Fallback: try legacy base64 decode for backward compatibility during
+    // the transition period (before migration has run).
+    try {
+      startingDocument = parseCommutative(block.content);
+    } catch {
+      startingDocument = createEmptyCommutativeDocument();
+    }
   }
 
   const encoded = encodeCommutativeBase64(startingDocument);
   const iframe = document.createElement("iframe");
   iframe.className = "commutative-modal__iframe";
-  iframe.src = `/quiver/index.html#q=${encodeURIComponent(encoded)}`;
+  iframe.src = `/quiver/index.html?admin=1&r=katex#q=${encodeURIComponent(encoded)}`;
   iframe.addEventListener("load", () => {
     try {
       const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
@@ -286,13 +273,47 @@ function openCommutativeModal(
     }
   });
 
+  let isClosed = false;
+
+  const teardownMessageListener = () => {
+    window.removeEventListener("message", messageHandler);
+  };
+
   const close = () => {
+    if (isClosed) {
+      return;
+    }
+    isClosed = true;
+    teardownMessageListener();
     root.remove();
   };
 
+  /**
+   * On Apply: request the iframe to export its current state as tikzcd LaTeX
+   * via postMessage. The iframe's new message handler calls
+   * `QuiverImportExport.tikz_cd.export(...)` and returns the LaTeX string,
+   * which we strip of its `\begin{tikzcd}/\end{tikzcd}` wrappers and write
+   * back into the Monaco fence body.
+   */
   const apply = () => {
-    const nextDocument = readCurrentQuiverDocument(iframe);
-    const nextFence = buildCommutativeFence(nextDocument);
+    const iframeWindow = iframe.contentWindow;
+    if (!iframeWindow) {
+      window.alert("Commutative editor is not ready yet.");
+      return;
+    }
+    // Send export request to iframe.
+    iframeWindow.postMessage({ type: "export-tikz-cd" }, "*");
+  };
+
+  // Listen for the iframe's export response.
+  const messageHandler = (event: MessageEvent) => {
+    if (event.source !== iframe.contentWindow) {
+      return;
+    }
+    if (event.data?.type !== "tikz-cd-export") return;
+    const latexFull = event.data.data as string;
+    const latexBody = stripTikzcdWrappers(latexFull);
+    const nextFence = buildCommutativeFence(latexBody, block.infoString);
     editor.executeEdits("commutative-modal", [
       {
         range: block.range,
@@ -301,20 +322,15 @@ function openCommutativeModal(
     ]);
     close();
     editor.focus();
-    window.setTimeout(() => {
-      const model = editor.getModel();
-      if (model) {
-        foldCommutativeBlocks(editor, findCommutativeBlocks(model));
-      }
-    }, 120);
   };
+  window.addEventListener("message", messageHandler);
 
   root.innerHTML = `
     <div class="commutative-modal__card" role="dialog" aria-modal="true" aria-label="Edit commutative diagram">
       <div class="commutative-modal__header">
         <div>
           <div class="commutative-modal__title">Commutative Editor</div>
-          <div class="commutative-modal__status">Use Quiver's Save action first, then Apply here to write base64 back into Markdown.</div>
+          <div class="commutative-modal__status">Edit in Quiver, then Apply to write readable LaTeX back into Markdown.</div>
         </div>
         <div class="commutative-modal__actions">
           <button class="commutative-modal__button" data-action="cancel" type="button">Cancel</button>
@@ -322,7 +338,7 @@ function openCommutativeModal(
       </div>
       <div></div>
       <div class="commutative-modal__footer">
-        <div class="commutative-modal__status">Stored format: base64 inside \`\`\`commutative fences.</div>
+        <div class="commutative-modal__status">Stored format: tikzcd LaTeX inside \`\`\`commutative fences.</div>
         <div class="commutative-modal__actions">
           <button class="commutative-modal__button" data-action="cancel-footer" type="button">Close</button>
           <button class="commutative-modal__button primary" data-action="apply" type="button">Apply</button>
@@ -362,7 +378,8 @@ function insertCommutativeBlockAtSelection(
     return false;
   }
 
-  const snippet = buildCommutativeFence(createEmptyCommutativeDocument());
+  // Insert an empty diagram: minimal LaTeX placeholder.
+  const snippet = buildCommutativeFence("% empty diagram");
   const containingBlock = findCommutativeBlocks(model).find(
     (block) =>
       selection.startLineNumber >= block.startLineNumber &&
@@ -412,7 +429,6 @@ function insertCommutativeBlockAtSelection(
       blocks.find(
         (block) => insertedLine >= block.startLineNumber && insertedLine <= block.endLineNumber
       );
-    foldCommutativeBlocks(editor, blocks);
     if (insertedBlock) {
       openCommutativeModal(editor, insertedBlock);
     }
@@ -436,14 +452,16 @@ export const commutativePlugin: PluginDefinition = {
   label: "Commutative",
   description: "Adds right-pane preview rendering and Quiver-based editing for fenced commutative blocks.",
   activate(context) {
+    // Right-pane preview renderer: use `renderCommutativeFence` which
+    // parses tikzcd LaTeX and emits an error placeholder on parse failure.
     context.registerMarkdownFenceRenderer({
       language: COMMUTATIVE_FENCE_LANGUAGE,
       name: "commutative",
       render(renderContext) {
-        const document = parseCommutative(renderContext.content);
+        const output = renderCommutativeFence(renderContext.content, renderContext.meta);
         return {
-          cssText: commutativeCssText,
-          html: renderCommutativeStaticHtml(document).html
+          cssText: output.cssText,
+          html: output.html
         };
       }
     });
@@ -476,7 +494,7 @@ export const commutativePlugin: PluginDefinition = {
     });
 
     context.registerMarkdownEditorFeature({
-      id: "commutative-markdown-source-folding",
+      id: "commutative-markdown-source-tracking",
       matches(document) {
         return isMarkdownDocument(document);
       },
@@ -488,43 +506,24 @@ export const commutativePlugin: PluginDefinition = {
         activeMarkdownEditor = editor;
         activeMonacoApi = monaco;
         let blockSignature = "";
-        let refreshTimer = 0;
-        const refresh = () => {
-          refreshTimer = 0;
-          const model = editor.getModel();
-          if (!model) {
-            return;
-          }
-
-          const blocks = findCommutativeBlocks(model);
-          const nextSignature = getBlockSignature(blocks);
-          if (nextSignature === blockSignature) {
-            return;
-          }
-
-          blockSignature = nextSignature;
-          foldCommutativeBlocks(editor, blocks);
-        };
-        const scheduleRefresh = (delay = 160) => {
-          if (refreshTimer) {
-            window.clearTimeout(refreshTimer);
-          }
-          refreshTimer = window.setTimeout(refresh, delay);
-        };
         const focusDisposable = editor.onDidFocusEditorText(() => {
           activeMarkdownEditor = editor;
           activeMonacoApi = monaco;
         });
 
-        scheduleRefresh(320);
         const contentDisposable = editor.onDidChangeModelContent((event) => {
-          if (blockSignature || contentChangeMayAffectCommutativeBlocks(editor, event)) {
-            scheduleRefresh();
+          if (contentChangeMayAffectCommutativeBlocks(editor, event)) {
+            const model = editor.getModel();
+            if (!model) return;
+            const blocks = findCommutativeBlocks(model);
+            const nextSignature = getBlockSignature(blocks);
+            if (nextSignature !== blockSignature) {
+              blockSignature = nextSignature;
+            }
           }
         });
         const modelDisposable = editor.onDidChangeModel(() => {
           blockSignature = "";
-          scheduleRefresh();
         });
 
         return () => {
@@ -533,9 +532,6 @@ export const commutativePlugin: PluginDefinition = {
           }
           if (activeMonacoApi === monaco) {
             activeMonacoApi = null;
-          }
-          if (refreshTimer) {
-            window.clearTimeout(refreshTimer);
           }
           focusDisposable.dispose();
           contentDisposable.dispose();

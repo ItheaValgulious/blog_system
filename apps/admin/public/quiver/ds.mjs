@@ -409,9 +409,9 @@ export function url_parameters() {
     if (fragment_string !== "") {
         data = data.concat(fragment_string.split("&").map(parse_segment));
     }
-    const query_string = window.location.href.match(/\?(.*)$/);
-    if (query_string !== null) {
-        data = data.concat(query_string[1].split("&").map(parse_segment));
+    const query_string = window.location.search.replace(/^\?/, "");
+    if (query_string !== "") {
+        data = data.concat(query_string.split("&").map(parse_segment));
     }
     return new Map(data);
 }

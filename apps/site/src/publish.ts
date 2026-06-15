@@ -1,4 +1,4 @@
 import { publishSite } from "./publisher.js";
 
-const message = await publishSite();
-console.log(message);
+const result = await publishSite();
+console.log(result.message);

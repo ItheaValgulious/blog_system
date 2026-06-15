@@ -8191,6 +8191,16 @@ const load_typst = (ui) => {
     return Typst;
 };
 
+const hide_admin_panes = (ui) => {
+    window.localStorage.setItem("version-previous-use", CONSTANTS.VERSION);
+    for (const selector of ["#welcome-pane", "#keyboard-shortcuts-pane", "#about-pane"]) {
+        const pane = ui.element.query_selector(selector);
+        if (pane !== null) {
+            pane.class_list.add("hidden");
+        }
+    }
+};
+
 // We want until the (minimal) DOM content has loaded, so we have access to `document.body`.
 document.addEventListener("DOMContentLoaded", () => {
     // We don't want the browser being too clever and trying to restore the scroll position, as that
@@ -8199,13 +8209,27 @@ document.addEventListener("DOMContentLoaded", () => {
         window.history.scrollRestoration = "manual";
     }
 
+    const startup_query_data = url_parameters();
+    const startup_admin_mode = startup_query_data.has("admin");
+    if (startup_admin_mode) {
+        window.localStorage.setItem("version-previous-use", CONSTANTS.VERSION);
+    }
+
     // The global UI.
     const body = new DOM.Element(document.body);
     const ui = new UI(body);
     ui.initialise();
+    if (startup_admin_mode) {
+        hide_admin_panes(ui);
+    }
 
     const load_quiver_from_query_string = () => {
         const query_data = url_parameters();
+        const admin_mode = query_data.has("admin");
+
+        if (admin_mode) {
+            hide_admin_panes(ui);
+        }
 
         // Set the initial zoom level based on the `scale` parameter.
         if (query_data.has("scale")) {
@@ -8301,4 +8325,38 @@ document.addEventListener("DOMContentLoaded", () => {
         ui.reset();
         load_quiver_from_query_string();
     });
+
+    // Listen for export requests from the parent (admin modal). The parent
+    // sends `{ type: "export-tikz-cd" }` via postMessage when the user clicks
+    // Apply. We call QuiverImportExport.tikz_cd.export(...) to produce the
+    // tikz-cd LaTeX, then post it back as `{ type: "tikz-cd-export", data }`.
+    // This is the **only** modification to quiver code allowed by the design
+    // doc — the parser, renderer, and UI remain untouched.
+    const exportTikzCd = () => {
+      const quiver = ui.quiver;
+      const settings = ui.settings;
+      const options = {
+        ...QuiverImportExport.tikz_cd.default_options,
+        sep: { ...ui.panel.sep },
+      };
+      const definitions = ui.definitions;
+      const result = QuiverImportExport.tikz_cd.export(quiver, settings, options, definitions);
+      return result.data;
+    };
+
+    window.addEventListener("message", (event) => {
+        if (event.data?.type === "export-tikz-cd") {
+            try {
+                const data = exportTikzCd();
+                event.source.postMessage({ type: "tikz-cd-export", data }, event.origin);
+            } catch (error) {
+                event.source.postMessage({
+                    type: "tikz-cd-export",
+                    data: `% export error: ${error instanceof Error ? error.message : String(error)}`
+                }, event.origin);
+            }
+        }
+    });
+
+    window.__BLOG_SYSTEM_EXPORT_TIKZCD__ = async () => exportTikzCd();
 });

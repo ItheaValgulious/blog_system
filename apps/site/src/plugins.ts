@@ -4,13 +4,13 @@ import {
   rewriteManagedMediaUrls,
   rewriteRelativeAssetUrls,
   type ArticleRecord,
-  type ArticleSummary
+  type ArticleSummary,
+  type HeadingItem
 } from "@blog-system/content-core";
 import {
   COMMUTATIVE_FENCE_LANGUAGE,
   commutativeCssText,
-  parseCommutative,
-  renderCommutativeStaticHtml
+  renderCommutativeFence
 } from "@blog-system/commutative";
 
 import type {
@@ -46,6 +46,32 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#39;");
 }
 
+function buildTocTreeHtml(headings: HeadingItem[]): string {
+  if (!headings.length) return "";
+  const minDepth = headings[0].depth;
+  let html = "";
+  let depth = minDepth;
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (i === 0) {
+      for (let d = 0; d < h.depth - minDepth + 1; d++) html += "<ul>";
+      depth = h.depth;
+    } else if (h.depth > depth) {
+      while (h.depth > depth) { html += "<ul>"; depth++; }
+    } else if (h.depth === depth) {
+      html += "</li>";
+    } else {
+      html += "</li>";
+      while (h.depth < depth) { html += "</ul></li>"; depth--; }
+    }
+    html += `<li><a href="#${escapeHtml(h.id)}">${escapeHtml(h.text)}</a>`;
+  }
+  html += "</li>";
+  while (depth > minDepth) { html += "</ul></li>"; depth--; }
+  html += "</ul>";
+  return html;
+}
+
 function renderTagRow(article: ArticleSummary, basePath: string) {
   if (article.tags.length === 0) {
     return "";
@@ -70,19 +96,19 @@ function renderArticleMeta(article: ArticleSummary) {
 }
 
 function renderArticleCard(article: ArticleSummary, basePath: string) {
+  const summaryText = article.summary ?? article.excerpt;
   const protectedNote = article.isProtected
     ? `<p class="entry-protected-note">Protected article. Unlock on the article page.</p>`
-    : `<p>${escapeHtml(article.excerpt)}</p>`;
-  const tagRowClass = article.isProtected ? "tag-row tag-row--suppressed" : "tag-row";
+    : "";
 
   return `<article class="post-entry">
     <div class="entry-pencil-line" aria-hidden="true"></div>
     <div class="entry-meta">${renderArticleMeta(article)}</div>
     <h2><a href="${article.urlPath}">${escapeHtml(article.title)}</a></h2>
-    ${protectedNote}
+    ${summaryText ? `<p>${escapeHtml(summaryText)}</p>` : protectedNote}
     <div class="entry-footer">
       <span class="entry-path">${escapeHtml(article.path)}</span>
-      <div class="${tagRowClass}">${renderTagRow(article, basePath)}</div>
+      <div class="tag-row">${renderTagRow(article, basePath)}</div>
     </div>
   </article>`;
 }
@@ -384,7 +410,7 @@ export const articlePagesPlugin: SitePluginDefinition = {
               </article>
               <aside class="side-panel">
                 <h3>On This Page</h3>
-                <ul>${rendered.headings.map((heading) => `<li><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join("")}</ul>
+                ${buildTocTreeHtml(rendered.headings)}
               </aside>
             </section>`,
             getProtectedArticlePassword(record)
@@ -408,7 +434,7 @@ export const articlePagesPlugin: SitePluginDefinition = {
               </article>
               <aside class="side-panel">
                 <h3>On This Page</h3>
-                <ul>${rendered.headings.map((heading) => `<li><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join("")}</ul>
+                ${buildTocTreeHtml(rendered.headings)}
               </aside>
             </section>`;
         }
@@ -654,8 +680,11 @@ export const commutativePlugin: SiteMarkdownPluginDefinition = {
         language: COMMUTATIVE_FENCE_LANGUAGE,
         name: "commutative",
         render(context) {
-          const document = parseCommutative(context.content);
-          return renderCommutativeStaticHtml(document);
+          // Use the unified fence renderer that parses tikzcd LaTeX instead of
+          // the old base64 format. `renderCommutativeFence` never throws — on
+          // parse failure it returns a `commutative--error` placeholder.
+          const output = renderCommutativeFence(context.content, context.meta);
+          return output;
         }
       }
     ];
