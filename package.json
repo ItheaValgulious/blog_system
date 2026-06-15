@@ -21,7 +21,8 @@
     "start:electron": "npm run start -w apps/desktop",
     "test": "npm run test -w packages/commutative && npm run test -w packages/content-core && npm run test -w apps/server && npm run test -w apps/admin && npm run test -w apps/site",
     "build-site": "npm run build-site -w apps/site",
-    "publish-site": "npm run publish-site -w apps/site"
+    "publish-site": "npm run publish-site -w apps/site",
+    "migrate:commutative-latex": "tsx scripts/migrate-commutative-latex.ts"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

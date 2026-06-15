@@ -112,21 +112,30 @@ const watcher = chokidar.watch([settings.contentRoot, settings.assetsRoot, setti
 });
 
 let pendingBuild: Promise<unknown> | null = null;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 watcher.on("all", () => {
-  if (pendingBuild) {
-    return;
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
   }
 
-  pendingBuild = runBuild()
-    .then((succeeded) => {
-      if (succeeded) {
-        console.log("Static site rebuilt after content change.");
-      }
-    })
-    .finally(() => {
-      pendingBuild = null;
-    });
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+
+    if (pendingBuild) {
+      return;
+    }
+
+    pendingBuild = runBuild()
+      .then((succeeded) => {
+        if (succeeded) {
+          console.log("Static site rebuilt after content change.");
+        }
+      })
+      .finally(() => {
+        pendingBuild = null;
+      });
+  }, 300);
 });
 
 app.listen(port, () => {
